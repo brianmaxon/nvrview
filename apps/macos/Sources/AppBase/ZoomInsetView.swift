@@ -7,19 +7,19 @@ import QuartzCore
 /// layers above the Metal surface: it draws no video and costs the renderer
 /// nothing. It takes no clicks.
 @MainActor
-final class ZoomInsetView: NSView {
-    static let maxWidth: CGFloat = 96
-    static let margin: CGFloat = 8
+package final class ZoomInsetView: NSView {
+    package static let maxWidth: CGFloat = 96
+    package static let margin: CGFloat = 8
 
     private let box = CALayer()
     private let region = CALayer()
     private var shown = false
     private var lastRegion: CGRect?
 
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    package override var isFlipped: Bool { true }
+    package override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    init() {
+    package init() {
         super.init(frame: .zero)
         wantsLayer = true
         box.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
@@ -36,12 +36,12 @@ final class ZoomInsetView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     /// Where the map sits for a tile whose picture appears in `picture`
     /// (points, in the stage overlay): its bottom left corner, the
     /// picture's shape, at most a quarter of its width.
-    static func frame(inPicture picture: CGRect, aspect: CGFloat) -> CGRect {
+    package static func frame(inPicture picture: CGRect, aspect: CGFloat) -> CGRect {
         guard picture.width > 0, picture.height > 0, aspect > 0 else { return .zero }
         var w = min(maxWidth, picture.width / 4)
         var h = w / aspect
@@ -53,7 +53,7 @@ final class ZoomInsetView: NSView {
     }
 
     /// The visible region as a fraction of the whole picture.
-    func update(region r: CGRect) {
+    package func update(region r: CGRect) {
         guard r != lastRegion || region.frame.isEmpty else { return }
         lastRegion = r
         CATransaction.begin()
@@ -66,7 +66,7 @@ final class ZoomInsetView: NSView {
         CATransaction.commit()
     }
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         if let r = lastRegion {
             lastRegion = nil
@@ -75,7 +75,7 @@ final class ZoomInsetView: NSView {
     }
 
     /// Fades in or out (with the chrome, and only while zoomed).
-    func setShown(_ visible: Bool) {
+    package func setShown(_ visible: Bool) {
         guard visible != shown else { return }
         shown = visible
         if visible { isHidden = false }
@@ -85,5 +85,5 @@ final class ZoomInsetView: NSView {
         layer?.opacity = visible ? 1 : 0
     }
 
-    var isShown: Bool { shown }
+    package var isShown: Bool { shown }
 }

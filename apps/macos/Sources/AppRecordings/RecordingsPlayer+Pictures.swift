@@ -10,20 +10,27 @@ import AppBase
 // `PictureSaver`); what is here only connects them to the player's cells.
 
 /// A short message over the player.
-struct PlayerToast: Equatable, Identifiable {
-    let id: Int
-    var text: String
-    var actionTitle: String?
-    var url: URL?
+package struct PlayerToast: Equatable, Identifiable {
+    package let id: Int
+    package var text: String
+    package var actionTitle: String?
+    package var url: URL?
+
+    package init(id: Int, text: String, actionTitle: String? = nil, url: URL? = nil) {
+        self.id = id
+        self.text = text
+        self.actionTitle = actionTitle
+        self.url = url
+    }
 }
 
 extension RecordingsPlayer {
     /// The cell showing `camera`.
-    func index(of camera: RecordingCamera) -> Int? { cells.firstIndex { $0.camera == camera } }
+    package func index(of camera: RecordingCamera) -> Int? { cells.firstIndex { $0.camera == camera } }
 
     /// What the header model needs to know about the cell `index`: a picture
     /// to save, a fisheye camera, the zoom and the crop.
-    func headerTile(_ index: Int) -> TileHeaderTile {
+    package func headerTile(_ index: Int) -> TileHeaderTile {
         guard cells.indices.contains(index) else { return TileHeaderTile(playback: true) }
         let cell = cells[index]
         return TileHeaderTile(
@@ -33,13 +40,13 @@ extension RecordingsPlayer {
 
     /// The cell the keys act on: the one under the pointer, else the large
     /// (or first) one, the one whose sound plays.
-    var selectedIndex: Int? {
+    package var selectedIndex: Int? {
         if let hovered, cells.indices.contains(hovered) { return hovered }
         return PlayerGrid.audibleIndex(mode, count: cells.count)
     }
 
     /// A key, the header or a menu for the cell `index`.
-    func perform(_ item: TileHeaderItem, at index: Int) {
+    package func perform(_ item: TileHeaderItem, at index: Int) {
         guard cells.indices.contains(index) else { return }
         let camera = cells[index].camera
         switch item {
@@ -55,33 +62,33 @@ extension RecordingsPlayer {
 
     /// 0: back to 1x on the selected cell, a filled crop to the middle, a
     /// dewarped view to its default direction.
-    func resetView(_ camera: RecordingCamera, eased: Bool = true) {
+    package func resetView(_ camera: RecordingCamera, eased: Bool = true) {
         if let stage { stage.reset(camera, eased: eased) } else { tileViews.reset(camera) }
     }
 
-    func resetSelectedView() {
+    package func resetSelectedView() {
         guard let i = selectedIndex else { return }
         resetView(cells[i].camera)
     }
 
-    func setFill(_ fills: Bool, for camera: RecordingCamera) {
+    package func setFill(_ fills: Bool, for camera: RecordingCamera) {
         tileViews.setFill(fills, for: camera)
     }
 
-    func setFisheyeMode(_ mode: FisheyeViewMode, for camera: RecordingCamera) {
+    package func setFisheyeMode(_ mode: FisheyeViewMode, for camera: RecordingCamera) {
         tileViews.setFisheyeMode(mode, for: camera)
     }
 
-    func setFisheyeMount(_ mount: FisheyeMount, for camera: RecordingCamera) {
+    package func setFisheyeMount(_ mount: FisheyeMount, for camera: RecordingCamera) {
         guard let app else { return }
         app.setFisheyeMount(CameraRef(device: camera.device, channel: camera.channel, lens: camera.lens), mount)
     }
 
-    func mount(of camera: RecordingCamera) -> FisheyeMount { stage?.mount(camera) ?? .ceiling }
+    package func mount(of camera: RecordingCamera) -> FisheyeMount { stage?.mount(camera) ?? .ceiling }
 
     // MARK: Messages
 
-    func showToast(_ text: String, actionTitle: String? = nil, url: URL? = nil) {
+    package func showToast(_ text: String, actionTitle: String? = nil, url: URL? = nil) {
         toast = PlayerToast(id: (toast?.id ?? 0) + 1, text: text, actionTitle: actionTitle, url: url)
     }
 
@@ -92,7 +99,7 @@ extension RecordingsPlayer {
     /// says. The picture is taken now; the confirmation comes when the file
     /// is written. The region and the file names follow the live tiles' rules
     /// (the share-safe setting included).
-    func savePicture(_ index: Int, kind: PictureKind, ask: Bool) {
+    package func savePicture(_ index: Int, kind: PictureKind, ask: Bool) {
         guard cells.indices.contains(index), let app, let stage else { return }
         let camera = cells[index].camera
         guard let job = stage.pictureRender(camera: camera, kind: kind) else {

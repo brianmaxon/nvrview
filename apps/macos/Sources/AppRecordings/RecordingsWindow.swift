@@ -9,13 +9,13 @@ import AppBase
 /// incident list with its filters, and the cameras to search; on the right
 /// (collapsible) the selected incident's details and actions.
 @MainActor
-final class RecordingsWindowController: NSWindowController, NSWindowDelegate {
-    let browser: RecordingsBrowser
-    var onClose: (RecordingsWindowController) -> Void = { _ in }
+package final class RecordingsWindowController: NSWindowController, NSWindowDelegate {
+    package let browser: RecordingsBrowser
+    package var onClose: (RecordingsWindowController) -> Void = { _ in }
     /// The player's picture view, once SwiftUI made it (the self-test).
-    private(set) weak var stage: PlayerStageView?
+    package private(set) weak var stage: PlayerStageView?
 
-    init(model: RecordingsModel) {
+    package init(model: RecordingsModel) {
         browser = RecordingsBrowser(model: model)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -39,7 +39,7 @@ final class RecordingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     /// A side pane was turned on in a window too narrow for it: the window
     /// grows (within its screen) so the player keeps its room.
@@ -55,7 +55,7 @@ final class RecordingsWindowController: NSWindowController, NSWindowDelegate {
         window.setFrame(frame, display: true, animate: false)
     }
 
-    func windowWillClose(_ notification: Notification) {
+    package func windowWillClose(_ notification: Notification) {
         browser.close()
         onClose(self)
     }
@@ -63,12 +63,12 @@ final class RecordingsWindowController: NSWindowController, NSWindowDelegate {
 
 // MARK: The window's content
 
-struct RecordingsView: View {
-    @Bindable var browser: RecordingsBrowser
-    var onStage: (PlayerStageView) -> Void = { _ in }
-    var grow: (CGFloat) -> Void = { _ in }
+package struct RecordingsView: View {
+    @Bindable package var browser: RecordingsBrowser
+    package var onStage: (PlayerStageView) -> Void = { _ in }
+    package var grow: (CGFloat) -> Void = { _ in }
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             let panes = RecordingsPanes.shown(
                 width: geo.size.width, sidebar: browser.showSidebar, inspector: browser.showInspector)
@@ -128,9 +128,15 @@ struct RecordingsView: View {
     }
 
     private struct PaneKey: Equatable {
-        var width: CGFloat
-        var sidebar: Bool
-        var inspector: Bool
+        package var width: CGFloat
+        package var sidebar: Bool
+        package var inspector: Bool
+
+        package init(width: CGFloat, sidebar: Bool, inspector: Bool) {
+            self.width = width
+            self.sidebar = sidebar
+            self.inspector = inspector
+        }
     }
 
     private func openExportTab() {
@@ -152,12 +158,12 @@ struct RecordingsView: View {
     }
 }
 
-struct RecordingsHeader: View {
-    @Bindable var browser: RecordingsBrowser
-    let panes: (sidebar: Bool, inspector: Bool)
-    let toggle: (Bool, CGFloat) -> Void
+package struct RecordingsHeader: View {
+    @Bindable package var browser: RecordingsBrowser
+    package let panes: (sidebar: Bool, inspector: Bool)
+    package let toggle: (Bool, CGFloat) -> Void
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             HStack(spacing: 8) {
                 Button { toggle(false, geo.size.width) } label: { Image(systemName: "sidebar.left") }
@@ -201,11 +207,11 @@ struct RecordingsHeader: View {
 
 // MARK: Sidebar: calendar, incidents, cameras
 
-struct RecordingsSidebar: View {
-    @Bindable var browser: RecordingsBrowser
+package struct RecordingsSidebar: View {
+    @Bindable package var browser: RecordingsBrowser
     @State private var camerasShown = false
 
-    var body: some View {
+    package var body: some View {
         let model = browser.model
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
@@ -251,10 +257,10 @@ struct RecordingsSidebar: View {
     }
 }
 
-struct IndexStateText: View {
-    let model: RecordingsModel
+package struct IndexStateText: View {
+    package let model: RecordingsModel
 
-    var body: some View {
+    package var body: some View {
         let s = model.searching
         Group {
             if s.busy {
@@ -271,14 +277,18 @@ struct IndexStateText: View {
         .font(.caption)
         .foregroundStyle(.secondary)
     }
+
+    package init(model: RecordingsModel) {
+        self.model = model
+    }
 }
 
-struct DeviceCameraToggles: View {
-    let model: RecordingsModel
-    let app: AppModel
-    let device: DeviceRuntime
+package struct DeviceCameraToggles: View {
+    package let model: RecordingsModel
+    package let app: any RecordingsHost
+    package let device: DeviceRuntime
 
-    var body: some View {
+    package var body: some View {
         let cameras = device.channels.flatMap { app.cameras(device: device.key, channel: $0) }
             .map { RecordingCamera(device: $0.device, channel: $0.channel, lens: $0.lens) }
         let on = cameras.filter { model.isEnabled($0) }
@@ -303,16 +313,22 @@ struct DeviceCameraToggles: View {
         }
         .toggleStyle(.checkbox)
     }
+
+    package init(model: RecordingsModel, app: any RecordingsHost, device: DeviceRuntime) {
+        self.model = model
+        self.app = app
+        self.device = device
+    }
 }
 
 /// A camera's "Listen for sounds" switch (`nv_sound_watch`): its sub-stream
 /// stays open with no tile so its sound is analyzed (loudness, alarms) while
 /// it is not on screen; at most four cameras of a device.
-struct ListenToggle: View {
-    let model: RecordingsModel
-    let camera: RecordingCamera
+package struct ListenToggle: View {
+    package let model: RecordingsModel
+    package let camera: RecordingCamera
 
-    var body: some View {
+    package var body: some View {
         let on = model.isListening(camera)
         let state = model.listenStates[camera]
         Toggle(isOn: Binding(get: { on }, set: { model.setListening(camera, $0) })) {
@@ -327,13 +343,18 @@ struct ListenToggle: View {
                 : "Listen for sounds while not on screen (keeps this camera's sub-stream open; at most \(SoundListening.maxPerDevice) per device)")
         .accessibilityLabel("Listen for sounds")
     }
+
+    package init(model: RecordingsModel, camera: RecordingCamera) {
+        self.model = model
+        self.camera = camera
+    }
 }
 
-struct MonthCalendar: View {
-    let browser: RecordingsBrowser
+package struct MonthCalendar: View {
+    package let browser: RecordingsBrowser
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 7)
 
-    var body: some View {
+    package var body: some View {
         let today = browser.model.today
         let first = Calendar.current.firstWeekday
         VStack(spacing: 6) {
@@ -368,17 +389,21 @@ struct MonthCalendar: View {
             }
         }
     }
+
+    package init(browser: RecordingsBrowser) {
+        self.browser = browser
+    }
 }
 
-struct DayCell: View {
-    let day: Int64
-    let selected: Bool
-    let today: Bool
-    let recorded: Bool
-    let future: Bool
-    let action: () -> Void
+package struct DayCell: View {
+    package let day: Int64
+    package let selected: Bool
+    package let today: Bool
+    package let recorded: Bool
+    package let future: Bool
+    package let action: () -> Void
 
-    var body: some View {
+    package var body: some View {
         Button(action: action) {
             VStack(spacing: 1) {
                 Text("\(DeviceTime.dayOfMonth(day))")
@@ -396,6 +421,15 @@ struct DayCell: View {
         .disabled(future)
         .accessibilityLabel(DeviceTime.longDay(day) + (recorded ? ", has recordings" : ""))
     }
+
+    package init(day: Int64, selected: Bool, today: Bool, recorded: Bool, future: Bool, action: @escaping () -> Void) {
+        self.day = day
+        self.selected = selected
+        self.today = today
+        self.recorded = recorded
+        self.future = future
+        self.action = action
+    }
 }
 
 // MARK: Kind badges
@@ -403,10 +437,10 @@ struct DayCell: View {
 /// The live detection badges' symbols, for recorded kinds.
 /// An incident's sounds other than the alarms (those have their own
 /// badges): one waveform, the sounds' names on hover.
-struct SoundBadge: View {
-    let events: [RecordedEvent]
+package struct SoundBadge: View {
+    package let events: [RecordedEvent]
 
-    var body: some View {
+    package var body: some View {
         let names = SoundKinds.names(events.filter { !IndicatorKind(detectionKind: $0.kind).isSound })
         if !names.isEmpty {
             Image(systemName: "waveform")
@@ -416,12 +450,16 @@ struct SoundBadge: View {
                 .accessibilityLabel("Sounds: " + names.joined(separator: ", "))
         }
     }
+
+    package init(events: [RecordedEvent]) {
+        self.events = events
+    }
 }
 
-struct KindBadges: View {
-    let kinds: [String]
+package struct KindBadges: View {
+    package let kinds: [String]
 
-    var body: some View {
+    package var body: some View {
         let items = Self.unique(kinds)
         HStack(spacing: 3) {
             ForEach(items, id: \.self) { k in
@@ -433,15 +471,19 @@ struct KindBadges: View {
         }
     }
 
-    static func unique(_ kinds: [String]) -> [IndicatorKind] {
+    package static func unique(_ kinds: [String]) -> [IndicatorKind] {
         var seen = Set<IndicatorKind>()
         return kinds.map(IndicatorKind.init(detectionKind:)).filter { seen.insert($0).inserted }
+    }
+
+    package init(kinds: [String]) {
+        self.kinds = kinds
     }
 }
 
 extension IndicatorKind {
     /// The timeline's color for an event of this kind.
-    var laneColor: Color {
+    package var laneColor: Color {
         switch self {
         case .person: .blue
         case .vehicle: .purple
@@ -456,10 +498,10 @@ extension IndicatorKind {
 
 // MARK: Incidents
 
-struct IncidentFilters: View {
-    @Bindable var browser: RecordingsBrowser
+package struct IncidentFilters: View {
+    @Bindable package var browser: RecordingsBrowser
 
-    var body: some View {
+    package var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 ForEach(KindFilter.allCases, id: \.self) { f in
@@ -497,10 +539,10 @@ struct IncidentFilters: View {
     }
 }
 
-struct IncidentList: View {
-    @Bindable var browser: RecordingsBrowser
+package struct IncidentList: View {
+    @Bindable package var browser: RecordingsBrowser
 
-    var body: some View {
+    package var body: some View {
         if browser.cameras.isEmpty {
             ContentUnavailableView(
                 "No Cameras Chosen", systemImage: "video.slash",
@@ -536,11 +578,11 @@ struct IncidentList: View {
 
 /// An incident's context menu (the row's; the inspector has the same
 /// actions as buttons).
-struct IncidentMenu: View {
-    let browser: RecordingsBrowser
-    let incident: Incident
+package struct IncidentMenu: View {
+    package let browser: RecordingsBrowser
+    package let incident: Incident
 
-    var body: some View {
+    package var body: some View {
         Button("Play") { browser.click(incident.key, extend: false) }
         if let at = browser.splitSecond(incident) {
             Button("Split Here (\(DeviceTime.time(at)))") { browser.splitHere(incident) }
@@ -556,13 +598,18 @@ struct IncidentMenu: View {
         Button("Download") { browser.download(incident.key) }
         if incident.edited { Button("Revert Edits") { browser.revert(incident.key) } }
     }
+
+    package init(browser: RecordingsBrowser, incident: Incident) {
+        self.browser = browser
+        self.incident = incident
+    }
 }
 
-struct IncidentRow: View {
-    let browser: RecordingsBrowser
-    let incident: Incident
+package struct IncidentRow: View {
+    package let browser: RecordingsBrowser
+    package let incident: Incident
 
-    var body: some View {
+    package var body: some View {
         HStack(alignment: .top, spacing: 8) {
             ThumbnailStrip(model: browser.model, keys: incident.coverKeys)
                 .frame(width: IncidentRowStrip.width, height: IncidentRowStrip.thumbnail.height, alignment: .leading)
@@ -587,15 +634,20 @@ struct IncidentRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+
+    package init(browser: RecordingsBrowser, incident: Incident) {
+        self.browser = browser
+        self.incident = incident
+    }
 }
 
 /// A row's covers: a fixed width whatever the number of cameras, the
 /// thumbnails apart, "+N" for cameras beyond those shown.
-struct ThumbnailStrip: View {
-    let model: RecordingsModel
-    let keys: [ThumbnailKey]
+package struct ThumbnailStrip: View {
+    package let model: RecordingsModel
+    package let keys: [ThumbnailKey]
 
-    var body: some View {
+    package var body: some View {
         let slots = IncidentRowStrip.slots(keys.count)
         HStack(spacing: IncidentRowStrip.spacing) {
             ForEach(Array(keys.prefix(slots.shown).enumerated()), id: \.offset) { n, key in
@@ -611,13 +663,18 @@ struct ThumbnailStrip: View {
             }
         }
     }
+
+    package init(model: RecordingsModel, keys: [ThumbnailKey]) {
+        self.model = model
+        self.keys = keys
+    }
 }
 
-struct ThumbnailView: View {
-    let model: RecordingsModel
-    let key: ThumbnailKey
+package struct ThumbnailView: View {
+    package let model: RecordingsModel
+    package let key: ThumbnailKey
 
-    var body: some View {
+    package var body: some View {
         ZStack {
             Color.black.opacity(0.85)
             switch model.thumbnails[key] {
@@ -640,14 +697,19 @@ struct ThumbnailView: View {
         // Asked after the row appears, not while the list builds it.
         .task(id: key) { model.requestThumbnail(key) }
     }
+
+    package init(model: RecordingsModel, key: ThumbnailKey) {
+        self.model = model
+        self.key = key
+    }
 }
 
 // MARK: The inspector
 
-struct IncidentInspector: View {
-    let browser: RecordingsBrowser
+package struct IncidentInspector: View {
+    package let browser: RecordingsBrowser
 
-    var body: some View {
+    package var body: some View {
         if let incident = browser.selected {
             IncidentDetail(browser: browser, incident: incident)
         } else {
@@ -657,14 +719,18 @@ struct IncidentInspector: View {
                 description: Text(browser.selection.count > 1 ? "Merge them with the button above the list." : "Select an incident to see and change it."))
         }
     }
+
+    package init(browser: RecordingsBrowser) {
+        self.browser = browser
+    }
 }
 
-struct IncidentDetail: View {
-    let browser: RecordingsBrowser
-    let incident: Incident
+package struct IncidentDetail: View {
+    package let browser: RecordingsBrowser
+    package let incident: Incident
     @State private var name = ""
 
-    var body: some View {
+    package var body: some View {
         let model = browser.model
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -758,21 +824,26 @@ struct IncidentDetail: View {
         .onAppear { name = incident.name ?? "" }
         .onChange(of: incident.key) { name = incident.name ?? "" }
     }
+
+    package init(browser: RecordingsBrowser, incident: Incident) {
+        self.browser = browser
+        self.incident = incident
+    }
 }
 
 /// What Split Here does, in words.
-enum SplitHelp {
-    static let short = "Divides the incident in two at the playhead: what happened before stays here, what follows becomes a new incident."
-    static let text =
+package enum SplitHelp {
+    package static let short = "Divides the incident in two at the playhead: what happened before stays here, what follows becomes a new incident."
+    package static let text =
         "Split Here divides this incident into two at the playhead. Events before it stay in this incident; events from it on become a new incident with the same cameras. Use it when two separate happenings were grouped together. Revert Edits undoes it."
 }
 
 // MARK: Downloads
 
-struct DownloadsPanel: View {
-    let model: RecordingsModel
+package struct DownloadsPanel: View {
+    package let model: RecordingsModel
 
-    var body: some View {
+    package var body: some View {
         VStack(spacing: 0) {
             if model.downloads.isEmpty {
                 ContentUnavailableView(
@@ -799,13 +870,17 @@ struct DownloadsPanel: View {
             }
         }
     }
+
+    package init(model: RecordingsModel) {
+        self.model = model
+    }
 }
 
-struct DownloadRow: View {
-    let model: RecordingsModel
-    let download: DownloadProgress
+package struct DownloadRow: View {
+    package let model: RecordingsModel
+    package let download: DownloadProgress
 
-    var body: some View {
+    package var body: some View {
         let d = download
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -832,21 +907,26 @@ struct DownloadRow: View {
         .padding(.vertical, 3)
     }
 
-    static func cameraText(_ c: DownloadCamera) -> String {
+    package static func cameraText(_ c: DownloadCamera) -> String {
         if c.state == "done" { return "done" }
         if c.chunksTotal > 0 { return "\(c.chunksDone)/\(c.chunksTotal)" }
         return c.state.replacingOccurrences(of: "_", with: " ")
+    }
+
+    package init(model: RecordingsModel, download: DownloadProgress) {
+        self.model = model
+        self.download = download
     }
 }
 
 // MARK: Camera groups
 
-struct CameraGroupsEditor: View {
-    let browser: RecordingsBrowser
+package struct CameraGroupsEditor: View {
+    package let browser: RecordingsBrowser
     @Environment(\.dismiss) private var dismiss
     @State private var groups: [IncidentGroups.Group] = []
 
-    var body: some View {
+    package var body: some View {
         let cameras = browser.cameras
         VStack(alignment: .leading, spacing: 10) {
             Text("Camera Groups").font(.title3.weight(.semibold))
@@ -893,5 +973,9 @@ struct CameraGroupsEditor: View {
         .padding(16)
         .frame(width: 440, height: 480)
         .onAppear { groups = browser.model.groups.groups }
+    }
+
+    package init(browser: RecordingsBrowser) {
+        self.browser = browser
     }
 }

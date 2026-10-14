@@ -11,24 +11,24 @@ import AppBase
 // are the Export model's (`trim`, `exportEdit`, `downloadRange`, `saveStills`).
 
 /// The right pane's tabs.
-enum InspectorTab: String, CaseIterable, Identifiable {
+package enum InspectorTab: String, CaseIterable, Identifiable {
     case incident = "Incident"
     case export = "Export"
-    var id: String { rawValue }
+    package var id: String { rawValue }
 }
 
 extension RecordingsBrowser {
     // MARK: What the tab offers
 
     /// The cameras the range has: the playing ones, or the follow cut's or grid's.
-    var exportSource: [RecordingCamera] { trimCameras }
+    package var exportSource: [RecordingCamera] { trimCameras }
 
     /// The cameras checked: the source's, unless the user unchecked some.
-    var exportChecked: Set<RecordingCamera> { ExportPanelRules.checked(chosen: export.cameras, available: exportSource) }
+    package var exportChecked: Set<RecordingCamera> { ExportPanelRules.checked(chosen: export.cameras, available: exportSource) }
 
-    var exportCheckedList: [RecordingCamera] { exportSource.filter(exportChecked.contains) }
+    package var exportCheckedList: [RecordingCamera] { exportSource.filter(exportChecked.contains) }
 
-    var exportContext: ExportContext {
+    package var exportContext: ExportContext {
         let pictures: Bool = playerView == .cameras
             ? (player.playback != nil && !player.cells.isEmpty)
             : (editPlayer.plan != nil && editPlayer.session != nil)
@@ -37,23 +37,23 @@ extension RecordingsBrowser {
             sourceCameras: exportSource.count, checkedCameras: exportCheckedList.count)
     }
 
-    var exportKinds: [ExportKind] { ExportPanelRules.kinds(exportContext) }
+    package var exportKinds: [ExportKind] { ExportPanelRules.kinds(exportContext) }
 
     /// The kind shown: the user's choice while it applies, else the first that does.
-    var exportKind: ExportKind? { ExportPanelRules.defaultKind(exportKinds, keeping: export.kind) }
+    package var exportKind: ExportKind? { ExportPanelRules.defaultKind(exportKinds, keeping: export.kind) }
 
     /// The range to export: the points', else the whole range of the incident (or day) shown.
-    var exportWindow: (start: Int64, end: Int64)? {
+    package var exportWindow: (start: Int64, end: Int64)? {
         pointsWindow ?? scrubSpan.map { (start: $0.lowerBound, end: $0.upperBound) }
     }
 
-    var exportQuality: ExportQuality { export.quality }
+    package var exportQuality: ExportQuality { export.quality }
 
-    var exportStartText: String { exportWindow.map { ExportPanelRules.timeText(ms: $0.start) } ?? "" }
-    var exportEndText: String { exportWindow.map { ExportPanelRules.timeText(ms: $0.end) } ?? "" }
+    package var exportStartText: String { exportWindow.map { ExportPanelRules.timeText(ms: $0.start) } ?? "" }
+    package var exportEndText: String { exportWindow.map { ExportPanelRules.timeText(ms: $0.end) } ?? "" }
 
     /// What the tab says is about to be written.
-    var exportSummary: String {
+    package var exportSummary: String {
         guard let kind = exportKind else { return "" }
         let window = exportWindow ?? (0, 0)
         return ExportPanelRules.summary(
@@ -77,7 +77,7 @@ extension RecordingsBrowser {
     }
 
     /// Why the Export button would not start anything, or nil.
-    var exportProblem: String? {
+    package var exportProblem: String? {
         guard let kind = exportKind else { return "Play an incident or a camera to export from it" }
         let window = exportWindow ?? (0, 0)
         return ExportPanelRules.problem(
@@ -88,7 +88,7 @@ extension RecordingsBrowser {
 
     /// A start time typed in the tab; false when the text is not a time inside the range.
     @discardableResult
-    func setExportStart(_ text: String) -> Bool {
+    package func setExportStart(_ text: String) -> Bool {
         guard let span = scrubSpan, let window = exportWindow,
             let ms = ExportPanelRules.parseTime(text, dayStartMs: DeviceTime.dayStart(window.start.floorDiv(1000)) * 1000),
             span.contains(ms)
@@ -99,7 +99,7 @@ extension RecordingsBrowser {
     }
 
     @discardableResult
-    func setExportEnd(_ text: String) -> Bool {
+    package func setExportEnd(_ text: String) -> Bool {
         guard let span = scrubSpan, let window = exportWindow,
             let ms = ExportPanelRules.parseTime(text, dayStartMs: DeviceTime.dayStart(window.start.floorDiv(1000)) * 1000),
             span.contains(ms)
@@ -109,7 +109,7 @@ extension RecordingsBrowser {
         return export.points.outMs == ms
     }
 
-    func setExportCamera(_ camera: RecordingCamera, checked: Bool) {
+    package func setExportCamera(_ camera: RecordingCamera, checked: Bool) {
         var set = exportChecked
         if checked { set.insert(camera) } else { set.remove(camera) }
         export.cameras = set
@@ -118,13 +118,13 @@ extension RecordingsBrowser {
     // MARK: The tab and the button
 
     /// Cmd+E: shows the right pane on its Export tab.
-    func openExportTab() {
+    package func openExportTab() {
         inspectorTab = .export
         showInspector = true
     }
 
     /// The Export button: checks the choice, then runs the kind's command.
-    func startExport() {
+    package func startExport() {
         guard let kind = exportKind else {
             message = exportProblem
             return
@@ -153,10 +153,10 @@ extension RecordingsBrowser {
 // MARK: The right pane
 
 /// The right pane: the Incident and Export tabs.
-struct InspectorPane: View {
-    @Bindable var browser: RecordingsBrowser
+package struct InspectorPane: View {
+    @Bindable package var browser: RecordingsBrowser
 
-    var body: some View {
+    package var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $browser.inspectorTab) {
                 ForEach(InspectorTab.allCases) { Text($0.rawValue).tag($0) }
@@ -173,12 +173,12 @@ struct InspectorPane: View {
     }
 }
 
-struct ExportPanel: View {
-    @Bindable var browser: RecordingsBrowser
+package struct ExportPanel: View {
+    @Bindable package var browser: RecordingsBrowser
     @State private var startText = ""
     @State private var endText = ""
 
-    var body: some View {
+    package var body: some View {
         let export = browser.export
         let kinds = browser.exportKinds
         ScrollView {
@@ -314,11 +314,11 @@ struct ExportPanel: View {
 }
 
 /// A running or just-ended export, in place in the tab: progress and Cancel, then what was written with Show in Finder.
-struct ExportProgress: View {
-    let job: ExportJob
-    let export: ExportModel
+package struct ExportProgress: View {
+    package let job: ExportJob
+    package let export: ExportModel
 
-    var body: some View {
+    package var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if job.running {
                 Text(job.title).font(.caption)
@@ -340,5 +340,10 @@ struct ExportProgress: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    package init(job: ExportJob, export: ExportModel) {
+        self.job = job
+        self.export = export
     }
 }

@@ -5,15 +5,19 @@ import Observation
 import QuartzCore
 
 /// Why no edit list could be made.
-struct EditPlanRefusal: Error, Equatable {
-    let text: String
+package struct EditPlanRefusal: Error, Equatable {
+    package let text: String
+
+    package init(text: String) {
+        self.text = text
+    }
 }
 
 /// The transport the Recordings window's controls drive: the device playback
 /// (`RecordingsPlayer`) or a follow cut or grid of downloaded files
 /// (`EditPlayer`).
 @MainActor
-protocol PlayerTransportDriver: AnyObject {
+package protocol PlayerTransportDriver: AnyObject {
     var transport: TransportState { get }
     var rate: Double { get }
     var muted: Bool { get set }
@@ -27,7 +31,7 @@ protocol PlayerTransportDriver: AnyObject {
 }
 
 extension RecordingsPlayer: PlayerTransportDriver {
-    var canPlay: Bool { playback != nil }
+    package var canPlay: Bool { playback != nil }
 }
 
 /// The Recordings window's follow cut and 2-up or 4-up grid (docs/UX.md
@@ -41,13 +45,13 @@ extension RecordingsPlayer: PlayerTransportDriver {
 /// the player's mute and volume.
 @MainActor
 @Observable
-final class EditPlayer: PlayerTransportDriver {
-    enum Kind: Equatable, Sendable {
+package final class EditPlayer: PlayerTransportDriver {
+    package enum Kind: Equatable, Sendable {
         case follow
         /// `2up` or `4up`.
         case grid(String)
 
-        var request: String {
+        package var request: String {
             switch self {
             case .follow: "follow"
             case .grid: "grid"
@@ -62,37 +66,37 @@ final class EditPlayer: PlayerTransportDriver {
     @ObservationIgnored private var opening: Task<Void, Never>?
     @ObservationIgnored private let audio = EditAudio()
 
-    private(set) var kind: Kind?
-    private(set) var download: String?
-    private(set) var plan: EditPlan?
-    @ObservationIgnored private(set) var session: EditSession?
+    package private(set) var kind: Kind?
+    package private(set) var download: String?
+    package private(set) var plan: EditPlan?
+    @ObservationIgnored package private(set) var session: EditSession?
     /// Opening (computing the plan, opening the files).
-    private(set) var loading = false
+    package private(set) var loading = false
     /// Why nothing is shown, if so.
-    private(set) var message: String?
-    private(set) var positionMs: Int64 = 0
-    private(set) var state: PlaybackState?
-    private(set) var rate: Double = 1
+    package private(set) var message: String?
+    package private(set) var positionMs: Int64 = 0
+    package private(set) var state: PlaybackState?
+    package private(set) var rate: Double = 1
     /// The grid cell whose sound plays.
-    var gridSound = 0 { didSet { updateAudio() } }
+    package var gridSound = 0 { didSet { updateAudio() } }
     /// Dragging the scrubber: keyframes only until the release.
-    @ObservationIgnored var scrubbing = false
+    @ObservationIgnored package var scrubbing = false
 
-    @ObservationIgnored private(set) var clock = EditClock(startMs: 0, endMs: 0)
+    @ObservationIgnored package private(set) var clock = EditClock(startMs: 0, endMs: 0)
     /// The host clock in seconds; the self-test sets a simulated one.
-    @ObservationIgnored var now: () -> Double = { CACurrentMediaTime() }
+    @ObservationIgnored package var now: () -> Double = { CACurrentMediaTime() }
     /// Plans opened (the self-test).
-    @ObservationIgnored private(set) var opens = 0
+    @ObservationIgnored package private(set) var opens = 0
 
-    init(model: RecordingsModel, cameras: RecordingsPlayer) {
+    package init(model: RecordingsModel, cameras: RecordingsPlayer) {
         self.model = model
         self.cameras = cameras
     }
 
-    var isActive: Bool { kind != nil }
-    var canPlay: Bool { session != nil }
+    package var isActive: Bool { kind != nil }
+    package var canPlay: Bool { session != nil }
 
-    var muted: Bool {
+    package var muted: Bool {
         get { cameras?.muted ?? false }
         set {
             cameras?.muted = newValue
@@ -100,7 +104,7 @@ final class EditPlayer: PlayerTransportDriver {
         }
     }
 
-    var volume: Float {
+    package var volume: Float {
         get { cameras?.volume ?? 1 }
         set {
             cameras?.volume = newValue
@@ -108,30 +112,30 @@ final class EditPlayer: PlayerTransportDriver {
         }
     }
 
-    var transport: TransportState {
+    package var transport: TransportState {
         TransportState(startMs: clock.startMs, endMs: clock.endMs, positionMs: positionMs, state: state, rate: rate)
     }
 
     /// Where the follow cut changes camera (scrubber marks).
-    var cuts: [Int64] { plan.map(EditTimeline.cuts) ?? [] }
+    package var cuts: [Int64] { plan.map(EditTimeline.cuts) ?? [] }
 
     /// The source whose sound plays now.
-    var audibleSource: Int? {
+    package var audibleSource: Int? {
         guard let plan else { return nil }
         return EditTimeline.audibleSource(plan, at: positionMs, rate: rate, muted: muted, gridCell: gridSound)
     }
 
     /// Pictures decode as keyframes only (dragging, 2× and up).
-    var keyframesOnly: Bool { scrubbing || PlaybackSpeed.keyframesOnly(rate) }
+    package var keyframesOnly: Bool { scrubbing || PlaybackSpeed.keyframesOnly(rate) }
 
     /// The position to draw now (the stage asks once per display refresh).
-    func framePosition() -> Int64 { clock.position(at: now()) }
+    package func framePosition() -> Int64 { clock.position(at: now()) }
 
     // MARK: Opening
 
     /// Shows `kind` over a finished download, from `at` (kept within the
     /// plan's range; its start when nil), and plays.
-    func open(_ kind: Kind, download: String, at: Int64?) {
+    package func open(_ kind: Kind, download: String, at: Int64?) {
         close()
         self.kind = kind
         self.download = download
@@ -172,7 +176,7 @@ final class EditPlayer: PlayerTransportDriver {
     }
 
     /// Closes the edit (its files and sound).
-    func close() {
+    package func close() {
         opening?.cancel()
         opening = nil
         timer?.invalidate()
@@ -190,28 +194,28 @@ final class EditPlayer: PlayerTransportDriver {
 
     // MARK: Transport
 
-    func play() {
+    package func play() {
         guard session != nil else { return }
         clock.play(at: now())
         tick()
     }
 
-    func pause() {
+    package func pause() {
         clock.pause(at: now())
         tick()
     }
 
-    func togglePlay() { transport.isPlaying ? pause() : play() }
+    package func togglePlay() { transport.isPlaying ? pause() : play() }
 
-    func seek(to ms: Int64, exact: Bool = true) {
+    package func seek(to ms: Int64, exact: Bool = true) {
         scrubbing = !exact
         clock.seek(to: ms, at: now())
         tick()
     }
 
-    func skip(by delta: Int64) { seek(to: transport.skipped(by: delta)) }
+    package func skip(by delta: Int64) { seek(to: transport.skipped(by: delta)) }
 
-    func setRate(_ new: Double) {
+    package func setRate(_ new: Double) {
         guard PlaybackSpeed.all.contains(new), new != rate else { return }
         rate = new
         clock.setRate(new, at: now())
@@ -230,7 +234,7 @@ final class EditPlayer: PlayerTransportDriver {
     }
 
     /// Reads the clock (ten times a second, and after every transport call).
-    func tick() {
+    package func tick() {
         let t = now()
         let p = clock.position(at: t), s = clock.state(at: t)
         if p != positionMs { positionMs = p }
@@ -253,19 +257,19 @@ final class EditPlayer: PlayerTransportDriver {
     }
 
     /// The source whose sound the audio engine plays (the self-test).
-    var playingSoundSource: Int? { audio.active }
+    package var playingSoundSource: Int? { audio.active }
 }
 
 /// The edit's sound: one `AVPlayer` per source file, the audible one playing
 /// at the shown position and kept within a quarter second of the picture's
 /// clock, the others paused. A file without sound plays nothing.
 @MainActor
-final class EditAudio {
+package final class EditAudio {
     private var players: [Int: AVPlayer] = [:]
-    private(set) var active: Int?
-    static let maxDriftMs: Int64 = 250
+    package private(set) var active: Int?
+    package static let maxDriftMs: Int64 = 250
 
-    func update(source: Int?, url: URL?, filePositionMs: Int64?, playing: Bool, volume: Float) {
+    package func update(source: Int?, url: URL?, filePositionMs: Int64?, playing: Bool, volume: Float) {
         if active != source, let old = active { players[old]?.pause() }
         active = source
         guard let source, let url, let position = filePositionMs, playing else {
@@ -287,7 +291,7 @@ final class EditAudio {
         }
     }
 
-    func close() {
+    package func close() {
         for p in players.values { p.pause() }
         players = [:]
         active = nil

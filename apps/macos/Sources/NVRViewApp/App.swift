@@ -7,6 +7,7 @@ import VideoKit
 import AppBase
 import AppUpdates
 import AppAlerts
+import AppRecordings
 
 // An unbundled executable gets no window from a SwiftUI `WindowGroup`, so
 // this uses the AppKit lifecycle (like NVRViewDemo); SwiftUI draws the

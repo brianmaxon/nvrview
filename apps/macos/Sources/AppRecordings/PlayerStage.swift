@@ -2,6 +2,7 @@ import AppKit
 import NVRCore
 import SwiftUI
 import VideoKit
+import AppBase
 
 /// Draws the player's cameras with the app's Metal grid renderer, the one
 /// live view uses: each cell shows its `CoreTile`'s newest decoded picture
@@ -16,23 +17,29 @@ import VideoKit
 /// untouched (docs/UX.md "Recordings"). Playback streams are fixed per play,
 /// so the live tiles' zoom-driven quality switch has nothing to do here.
 @MainActor
-final class PlayerStageView: NSView {
-    struct Item: Equatable {
-        let tile: CoreTile
+package final class PlayerStageView: NSView {
+    package struct Item: Equatable {
+        package let tile: CoreTile
         /// The cell in points, top-left origin.
-        var rect: CGRect
-        var camera: RecordingCamera
-        static func == (a: Item, b: Item) -> Bool { a.tile === b.tile && a.rect == b.rect && a.camera == b.camera }
+        package var rect: CGRect
+        package var camera: RecordingCamera
+        package static func == (a: Item, b: Item) -> Bool { a.tile === b.tile && a.rect == b.rect && a.camera == b.camera }
+
+        package init(tile: CoreTile, rect: CGRect, camera: RecordingCamera) {
+            self.tile = tile
+            self.rect = rect
+            self.camera = camera
+        }
     }
 
-    let grid: MetalGridView?
-    weak var player: RecordingsPlayer?
-    var items: [Item] = [] {
+    package let grid: MetalGridView?
+    package weak var player: RecordingsPlayer?
+    package var items: [Item] = [] {
         didSet { if items != oldValue { lastKey = nil } }
     }
 
     /// The pictures' layout sizes by camera, as drawn last (the zoom's base).
-    private(set) var pictureSizes: [RecordingCamera: CGSize] = [:]
+    package private(set) var pictureSizes: [RecordingCamera: CGSize] = [:]
     /// The source and destination the renderer was given last, by camera
     /// (the self-test checks them against the zoom).
     private var rendered: [RecordingCamera: (source: CGRect?, destination: CGRect, dewarp: DewarpConstants?)] = [:]
@@ -40,22 +47,32 @@ final class PlayerStageView: NSView {
     private var zoomEasing = ZoomEasing<RecordingCamera>()
     private var fisheyeEasing = FisheyeZoomEasing<RecordingCamera>()
     /// The clock the easing runs on (the self-test sets its own).
-    var now: () -> Double = { ProcessInfo.processInfo.systemUptime }
+    package var now: () -> Double = { ProcessInfo.processInfo.systemUptime }
     private var monitor: Any?
 
     private struct RenderKey: Equatable {
-        var tiles: [ObjectIdentifier]
-        var rects: [CGRect]
-        var versions: [UInt64]
-        var sizes: [CGSize]
-        var zooms: [TileZoom]
-        var fills: [Bool]
-        var dewarps: [DewarpConstants?]
+        package var tiles: [ObjectIdentifier]
+        package var rects: [CGRect]
+        package var versions: [UInt64]
+        package var sizes: [CGSize]
+        package var zooms: [TileZoom]
+        package var fills: [Bool]
+        package var dewarps: [DewarpConstants?]
+
+        package init(tiles: [ObjectIdentifier], rects: [CGRect], versions: [UInt64], sizes: [CGSize], zooms: [TileZoom], fills: [Bool], dewarps: [DewarpConstants?]) {
+            self.tiles = tiles
+            self.rects = rects
+            self.versions = versions
+            self.sizes = sizes
+            self.zooms = zooms
+            self.fills = fills
+            self.dewarps = dewarps
+        }
     }
 
     private var lastKey: RenderKey?
 
-    override init(frame: NSRect) {
+    package override init(frame: NSRect) {
         // A view without Metal (a machine without a GPU) stays black.
         grid = (try? GridRenderer()).map(MetalGridView.init(renderer:))
         super.init(frame: frame)
@@ -72,16 +89,16 @@ final class PlayerStageView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    override var isFlipped: Bool { true }
+    package override var isFlipped: Bool { true }
 
     isolated deinit {
         if let monitor { NSEvent.removeMonitor(monitor) }
     }
 
     /// Frames drawn so far (the self-test checks pictures reach the screen).
-    var framesDrawn: Int { grid?.framesDrawn ?? 0 }
+    package var framesDrawn: Int { grid?.framesDrawn ?? 0 }
 
     // MARK: Drawing
 
@@ -92,14 +109,14 @@ final class PlayerStageView: NSView {
     }
 
     /// Whether the camera is a fisheye camera the app can dewarp.
-    func isFisheye(_ camera: RecordingCamera) -> Bool { player?.app?.isFisheye(ref(camera)) == true }
+    package func isFisheye(_ camera: RecordingCamera) -> Bool { player?.app?.isFisheye(ref(camera)) == true }
 
-    func mount(_ camera: RecordingCamera) -> FisheyeMount { player?.app?.cameraOptions(ref(camera)).fisheyeMount ?? .ceiling }
+    package func mount(_ camera: RecordingCamera) -> FisheyeMount { player?.app?.cameraOptions(ref(camera)).fisheyeMount ?? .ceiling }
 
     /// The dewarp of the camera's view drawn `tileSize` pixels big, or nil
     /// when it draws its picture as is (not a fisheye camera, Original, or
     /// the circle is not known yet).
-    func dewarp(_ camera: RecordingCamera, picture: DecodedPicture?, tileSize: CGSize) -> FisheyeDewarp? {
+    package func dewarp(_ camera: RecordingCamera, picture: DecodedPicture?, tileSize: CGSize) -> FisheyeDewarp? {
         let setting = views.fisheyeSetting(camera)
         guard setting.mode.dewarps, let app = player?.app, app.isFisheye(ref(camera)),
             let lens = app.fisheyeLens(ref(camera), picture: picture)
@@ -190,24 +207,24 @@ final class PlayerStageView: NSView {
     }
 
     /// Whether a cell's zoom map is shown (self-test).
-    func zoomMapShown(_ camera: RecordingCamera) -> Bool { insets[camera]?.isShown == true }
+    package func zoomMapShown(_ camera: RecordingCamera) -> Bool { insets[camera]?.isShown == true }
 
     /// The source rectangle the renderer samples for the camera's cell, in
     /// buffer pixels, and where it draws it (self-test).
-    func renderedSource(of camera: RecordingCamera) -> CGRect? { rendered[camera]?.source }
-    func renderedDestination(of camera: RecordingCamera) -> CGRect? { rendered[camera]?.destination }
-    func renderedDewarp(of camera: RecordingCamera) -> DewarpConstants? { rendered[camera]?.dewarp }
+    package func renderedSource(of camera: RecordingCamera) -> CGRect? { rendered[camera]?.source }
+    package func renderedDestination(of camera: RecordingCamera) -> CGRect? { rendered[camera]?.destination }
+    package func renderedDewarp(of camera: RecordingCamera) -> DewarpConstants? { rendered[camera]?.dewarp }
 
     /// Draws once now, as the display would (self-test).
-    func drawNow() { if let grid { grid.prepare?(grid.renderer, grid.drawableSize) } }
+    package func drawNow() { if let grid { grid.prepare?(grid.renderer, grid.drawableSize) } }
 
     // MARK: Digital zoom (docs/UX.md "Digital zoom")
 
     /// The cell under `p`.
-    func item(at p: CGPoint) -> Item? { items.last { $0.rect.contains(p) } }
+    package func item(at p: CGPoint) -> Item? { items.last { $0.rect.contains(p) } }
 
     /// How the camera's picture sits in its cell at 1x.
-    func zoomBase(_ item: Item) -> ZoomBase {
+    package func zoomBase(_ item: Item) -> ZoomBase {
         guard let picture = pictureSizes[item.camera] else { return .whole }
         return ZoomBase(picture: picture, tile: item.rect.size, fill: views.fills(item.camera))
     }
@@ -219,7 +236,7 @@ final class PlayerStageView: NSView {
 
     /// The part of the picture a cell shows now, in buffer pixels (what Save
     /// Zoomed Area saves).
-    func visibleRegion(of camera: RecordingCamera) -> PixelRegion? {
+    package func visibleRegion(of camera: RecordingCamera) -> PixelRegion? {
         guard let item = items.first(where: { $0.camera == camera }), let tile = player?.cells.first(where: { $0.camera == camera })?.tile,
             let picture = tile.latestPicture()
         else { return nil }
@@ -239,7 +256,7 @@ final class PlayerStageView: NSView {
     /// Zooms the cell at `p` by `factor` around `p`: at once (pinch), or
     /// eased over the next refreshes (a mouse-wheel notch). A dewarped
     /// fisheye cell zooms its virtual camera instead (Virtual PTZ only).
-    func zoom(at p: CGPoint, by factor: Double, eased: Bool) {
+    package func zoom(at p: CGPoint, by factor: Double, eased: Bool) {
         guard let item = item(at: p) else { return }
         let camera = item.camera
         if views.fisheyeDewarps(camera) {
@@ -268,12 +285,12 @@ final class PlayerStageView: NSView {
 
     /// Pans the cell at `p` by `delta` points (the picture follows); a
     /// dewarped fisheye cell turns its view.
-    func pan(at p: CGPoint, by delta: CGVector) {
+    package func pan(at p: CGPoint, by delta: CGVector) {
         guard let item = item(at: p) else { return }
         pan(item, by: delta)
     }
 
-    func pan(camera: RecordingCamera, by delta: CGVector) {
+    package func pan(camera: RecordingCamera, by delta: CGVector) {
         guard let item = items.first(where: { $0.camera == camera }) else { return }
         pan(item, by: delta)
     }
@@ -295,14 +312,14 @@ final class PlayerStageView: NSView {
 
     /// Whether a drag on the camera's cell moves the picture (zoomed in, a
     /// filled picture with part hidden, or a dewarped fisheye view).
-    func picturePans(_ camera: RecordingCamera) -> Bool {
+    package func picturePans(_ camera: RecordingCamera) -> Bool {
         guard let item = items.first(where: { $0.camera == camera }) else { return false }
         return views.fisheyeDewarps(camera) || views.canPan(camera, base: zoomBase(item))
     }
 
     /// Back to 1x (and a filled crop to the middle), eased from a zoom; a
     /// dewarped fisheye cell back to its default view.
-    func reset(_ camera: RecordingCamera, eased: Bool = true) {
+    package func reset(_ camera: RecordingCamera, eased: Bool = true) {
         fisheyeEasing.cancel(camera)
         if views.fisheyeDewarps(camera) {
             zoomEasing.cancel(camera)
@@ -320,11 +337,11 @@ final class PlayerStageView: NSView {
     }
 
     /// Whether a mouse-wheel zoom is still easing (self-test).
-    var isEasing: Bool { zoomEasing.isEasing || fisheyeEasing.isEasing }
+    package var isEasing: Bool { zoomEasing.isEasing || fisheyeEasing.isEasing }
 
     /// One step of the wheel easing, on `now`'s clock. Time-based, so it
     /// ends on its target however few refreshes there are.
-    func tick(now: Double) {
+    package func tick(now: Double) {
         if zoomEasing.isEasing {
             let steps = zoomEasing.tick(now: now, current: { views.zoom($0) }, base: { camera, _ in currentBase(camera) })
             for step in steps {
@@ -349,7 +366,7 @@ final class PlayerStageView: NSView {
 
     // MARK: Pointer input
 
-    override func viewDidMoveToWindow() {
+    package override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
@@ -366,12 +383,12 @@ final class PlayerStageView: NSView {
     /// take them: a mouse wheel zooms around the pointer, each notch 1.25x,
     /// eased; a trackpad's scroll pans (and zooms with Option held); a pinch
     /// zooms. False leaves the event to the rest of the window.
-    func handle(_ e: NSEvent) -> Bool {
+    package func handle(_ e: NSEvent) -> Bool {
         guard e.window === window, window != nil else { return false }
         return handle(e, at: convert(e.locationInWindow, from: nil))
     }
 
-    func handle(_ e: NSEvent, at p: NSPoint) -> Bool {
+    package func handle(_ e: NSEvent, at p: NSPoint) -> Bool {
         guard bounds.contains(p), item(at: p) != nil else { return false }
         switch e.type {
         case .magnify:
@@ -395,7 +412,7 @@ final class PlayerStageView: NSView {
     // MARK: Saving
 
     /// What to draw for `kind` from the camera's cell now (Save Picture).
-    func pictureRender(camera: RecordingCamera, kind: PictureKind) -> PictureRender? {
+    package func pictureRender(camera: RecordingCamera, kind: PictureKind) -> PictureRender? {
         guard let tile = player?.cells.first(where: { $0.camera == camera })?.tile else { return nil }
         let size = items.first { $0.camera == camera }?.rect.size
         return PictureRenderBuilder.make(
@@ -407,13 +424,13 @@ final class PlayerStageView: NSView {
 }
 
 /// The player's pictures in SwiftUI.
-struct PlayerStage: NSViewRepresentable {
-    let items: [PlayerStageView.Item]
-    let player: RecordingsPlayer
+package struct PlayerStage: NSViewRepresentable {
+    package let items: [PlayerStageView.Item]
+    package let player: RecordingsPlayer
     /// Hands the view to the window (the self-test reads it).
-    var onView: (PlayerStageView) -> Void = { _ in }
+    package var onView: (PlayerStageView) -> Void = { _ in }
 
-    func makeNSView(context: Context) -> PlayerStageView {
+    package func makeNSView(context: Context) -> PlayerStageView {
         let v = PlayerStageView(frame: .zero)
         v.player = player
         player.stage = v
@@ -421,8 +438,14 @@ struct PlayerStage: NSViewRepresentable {
         return v
     }
 
-    func updateNSView(_ view: PlayerStageView, context: Context) {
+    package func updateNSView(_ view: PlayerStageView, context: Context) {
         view.player = player
         view.items = items
+    }
+
+    package init(items: [PlayerStageView.Item], player: RecordingsPlayer, onView: @escaping (PlayerStageView) -> Void = { _ in }) {
+        self.items = items
+        self.player = player
+        self.onView = onView
     }
 }

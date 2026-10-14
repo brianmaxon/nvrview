@@ -6,11 +6,11 @@ import SwiftUI
 // with up to four cameras, its transport and scrubber, and the day's
 // timeline lanes with the playhead.
 
-struct PlayerColumn: View {
-    @Bindable var browser: RecordingsBrowser
-    var onStage: (PlayerStageView) -> Void = { _ in }
+package struct PlayerColumn: View {
+    @Bindable package var browser: RecordingsBrowser
+    package var onStage: (PlayerStageView) -> Void = { _ in }
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             let lanes = RecordingsPanes.lanesHeight(height: geo.size.height, lanes: browser.lanes.count)
             VStack(spacing: 0) {
@@ -39,13 +39,13 @@ struct PlayerColumn: View {
 
 // MARK: The player
 
-struct PlayerArea: View {
-    let browser: RecordingsBrowser
-    let player: RecordingsPlayer
-    var onStage: (PlayerStageView) -> Void
+package struct PlayerArea: View {
+    package let browser: RecordingsBrowser
+    package let player: RecordingsPlayer
+    package var onStage: (PlayerStageView) -> Void
     @FocusState private var focused: Bool
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             let bounds = CGRect(origin: .zero, size: geo.size).insetBy(dx: 4, dy: 4)
             let cells = PlayerGrid.cells(count: player.cells.count, mode: player.mode, in: bounds, gap: 4)
@@ -112,15 +112,21 @@ struct PlayerArea: View {
             return .handled
         }
     }
+
+    package init(browser: RecordingsBrowser, player: RecordingsPlayer, onStage: @escaping (PlayerStageView) -> Void) {
+        self.browser = browser
+        self.player = player
+        self.onStage = onStage
+    }
 }
 
 /// The message over the player: a saved picture, with Show in Finder. It
 /// goes away by itself.
-struct PlayerToastView: View {
-    let player: RecordingsPlayer
-    let toast: PlayerToast
+package struct PlayerToastView: View {
+    package let player: RecordingsPlayer
+    package let toast: PlayerToast
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 10) {
             Text(toast.text)
             if let title = toast.actionTitle, let url = toast.url {
@@ -138,24 +144,29 @@ struct PlayerToastView: View {
             if player.toast?.id == toast.id { player.toast = nil }
         }
     }
+
+    package init(player: RecordingsPlayer, toast: PlayerToast) {
+        self.player = player
+        self.toast = toast
+    }
 }
 
 /// One camera's cell over the picture: its name and state, its picture
 /// buttons (the tile header model, `TileHeaderLayout`, with the live tiles'
 /// order and overflow), a click to make it large, a double click to show it
 /// alone, a drag that moves a zoomed or filled picture, and its menu.
-struct PlayerCellOverlay: View {
-    let browser: RecordingsBrowser
-    let player: RecordingsPlayer
-    let index: Int
-    let cell: RecordingsPlayer.Cell
-    let rect: CGRect
+package struct PlayerCellOverlay: View {
+    package let browser: RecordingsBrowser
+    package let player: RecordingsPlayer
+    package let index: Int
+    package let cell: RecordingsPlayer.Cell
+    package let rect: CGRect
     @State private var hovering = false
     @State private var lastDrag = CGSize.zero
     @State private var flash = 0.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    var body: some View {
+    package var body: some View {
         let large: Bool = {
             switch PlayerGrid.normalized(player.mode, count: player.cells.count) {
             case .emphasis(let i), .single(let i): i == index
@@ -250,14 +261,14 @@ struct PlayerCellOverlay: View {
     }
 
     /// The dewarped view's name, as a live tile's header names it.
-    static func viewName(_ player: RecordingsPlayer, _ camera: RecordingCamera) -> String? {
+    package static func viewName(_ player: RecordingsPlayer, _ camera: RecordingCamera) -> String? {
         let mode = player.tileViews.fisheyeSetting(camera).mode
         return mode.dewarps ? mode.title : nil
     }
 
     /// The message across a cell without a picture: no recording, or the
     /// device refused the play (with its status, FFI-RECORDINGS.md).
-    static func message(_ c: RecordingsPlayer.Cell) -> String? {
+    package static func message(_ c: RecordingsPlayer.Cell) -> String? {
         switch c.state {
         case "no_recording": "No recording at this time"
         case "failed" where c.reason == "start_rejected":
@@ -266,7 +277,7 @@ struct PlayerCellOverlay: View {
         }
     }
 
-    static func stateText(_ c: RecordingsPlayer.Cell) -> String? {
+    package static func stateText(_ c: RecordingsPlayer.Cell) -> String? {
         switch c.state {
         case "", "buffering": c.tile.latestPicture() == nil ? "Loading" : nil
         case "late": "Catching up"
@@ -280,15 +291,23 @@ struct PlayerCellOverlay: View {
         default: nil
         }
     }
+
+    package init(browser: RecordingsBrowser, player: RecordingsPlayer, index: Int, cell: RecordingsPlayer.Cell, rect: CGRect) {
+        self.browser = browser
+        self.player = player
+        self.index = index
+        self.cell = cell
+        self.rect = rect
+    }
 }
 
 // MARK: Transport
 
-struct TransportBar: View {
-    @Bindable var browser: RecordingsBrowser
-    @Bindable var player: RecordingsPlayer
+package struct TransportBar: View {
+    @Bindable package var browser: RecordingsBrowser
+    @Bindable package var player: RecordingsPlayer
 
-    var body: some View {
+    package var body: some View {
         // The device playback's transport, or the follow cut's or grid's.
         let d = browser.driver
         let t = d.transport
@@ -379,10 +398,10 @@ struct TransportBar: View {
 /// The player's view menu: the incident's cameras as the device plays them,
 /// or, once the incident is downloaded, a follow cut or a 2-up or 4-up grid
 /// made of its files.
-struct PlayerViewMenu: View {
-    let browser: RecordingsBrowser
+package struct PlayerViewMenu: View {
+    package let browser: RecordingsBrowser
 
-    var body: some View {
+    package var body: some View {
         let editable = browser.editable != nil
         Menu {
             ForEach(RecordingsBrowser.PlayerView.allCases) { v in
@@ -407,7 +426,7 @@ struct PlayerViewMenu: View {
         .help("What the player shows: the cameras, or a follow cut or grid of the downloaded incident")
     }
 
-    static func symbol(_ v: RecordingsBrowser.PlayerView) -> String {
+    package static func symbol(_ v: RecordingsBrowser.PlayerView) -> String {
         switch v {
         case .cameras: "rectangle.grid.2x2"
         case .follow: "film.stack"
@@ -415,21 +434,25 @@ struct PlayerViewMenu: View {
         case .grid4: "square.grid.2x2"
         }
     }
+
+    package init(browser: RecordingsBrowser) {
+        self.browser = browser
+    }
 }
 
 /// The scrubber across the incident (with its margins) or the day, or the
 /// follow cut's or grid's range: the events marked by kind, the follow cut's
 /// cuts as white ticks, the playhead, drag to scrub (keyframes while
 /// dragging, the exact picture on release).
-struct Scrubber: View {
-    let browser: RecordingsBrowser
-    let driver: any PlayerTransportDriver
+package struct Scrubber: View {
+    package let browser: RecordingsBrowser
+    package let driver: any PlayerTransportDriver
     @State private var lastSent = Date.distantPast
     /// The point a press on the scrubber grabbed, if it did.
     @State private var grabbed: InOutPoints.Handle?
     @State private var pressed = false
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             let range = browser.scrubRange
             let events = scrubEvents
@@ -524,15 +547,20 @@ struct Scrubber: View {
         let cams = Set(browser.player.cameras)
         return browser.lanes.filter { cams.contains($0.camera) }.flatMap(\.events)
     }
+
+    package init(browser: RecordingsBrowser, driver: any PlayerTransportDriver) {
+        self.browser = browser
+        self.driver = driver
+    }
 }
 
 // MARK: Timeline
 
-struct TimelineLanes: View {
-    @Bindable var browser: RecordingsBrowser
+package struct TimelineLanes: View {
+    @Bindable package var browser: RecordingsBrowser
     private let labelWidth: CGFloat = 130
 
-    var body: some View {
+    package var body: some View {
         let laneHeight = RecordingsPanes.laneHeight, rowHeight = RecordingsPanes.rowHeight
         VStack(spacing: 0) {
             if browser.lanes.isEmpty {
@@ -637,14 +665,14 @@ struct TimelineLanes: View {
 /// the wheel pans; precise horizontal scrolling (trackpad, Magic Mouse)
 /// pans, and with Option held zooms; a pinch zooms. Precise vertical
 /// scrolling is left to the lanes' own vertical scrolling.
-enum TimelineInput: Equatable {
+package enum TimelineInput: Equatable {
     case zoom(factor: Double, eased: Bool)
     /// Points of the lanes' width (positive: later in the day).
     case pan(points: Double)
     /// Line notches (positive: later in the day).
     case panLines(Double)
 
-    init?(_ e: NSEvent) {
+    package init?(_ e: NSEvent) {
         switch e.type {
         case .magnify:
             self = .zoom(factor: 1 + Double(e.magnification), eased: false)
@@ -678,7 +706,7 @@ enum TimelineInput: Equatable {
 extension RecordingsBrowser {
     /// Applies wheel, scroll, or pinch input at the pointer `p` (0 at the
     /// lanes' left edge, 1 at their right) over lanes `width` points wide.
-    func timelineInput(_ input: TimelineInput, at p: Double, width: Double) {
+    package func timelineInput(_ input: TimelineInput, at p: Double, width: Double) {
         switch input {
         case .zoom(let factor, let eased):
             let next = timeline.zoomed(by: factor, at: p)
@@ -696,7 +724,7 @@ extension RecordingsBrowser {
     }
 
     /// The zoom buttons: around the middle of what is shown.
-    func zoomTimeline(by factor: Double) {
+    package func zoomTimeline(by factor: Double) {
         let next = timeline.zoomed(by: factor, at: 0.5)
         withAnimation(.easeOut(duration: 0.15)) { timeline = next }
     }
@@ -706,24 +734,24 @@ extension RecordingsBrowser {
 /// monitor while its window has them over the visible lanes, so clicks
 /// still reach the lanes (it is never hit) and vertical two-finger scrolls
 /// still scroll them.
-struct TimelineInputCatcher: NSViewRepresentable {
-    let browser: RecordingsBrowser
+package struct TimelineInputCatcher: NSViewRepresentable {
+    package let browser: RecordingsBrowser
 
-    func makeNSView(context: Context) -> CatcherView {
+    package func makeNSView(context: Context) -> CatcherView {
         let v = CatcherView()
         v.browser = browser
         return v
     }
 
-    func updateNSView(_ v: CatcherView, context: Context) { v.browser = browser }
+    package func updateNSView(_ v: CatcherView, context: Context) { v.browser = browser }
 
-    final class CatcherView: NSView {
-        weak var browser: RecordingsBrowser?
+    package final class CatcherView: NSView {
+        package weak var browser: RecordingsBrowser?
         private var monitor: Any?
 
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        package override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-        override func viewDidMoveToWindow() {
+        package override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             if let monitor { NSEvent.removeMonitor(monitor) }
             monitor = nil
@@ -738,54 +766,65 @@ struct TimelineInputCatcher: NSViewRepresentable {
 
         /// Handles an event over the visible lanes; false leaves it to the
         /// rest of the window.
-        func handle(_ e: NSEvent) -> Bool {
+        package func handle(_ e: NSEvent) -> Bool {
             guard e.window === window else { return false }
             return handle(e, at: convert(e.locationInWindow, from: nil))
         }
 
         /// Handles an event at `p` in this view's coordinates (the self-test
         /// gives the point).
-        func handle(_ e: NSEvent, at p: NSPoint) -> Bool {
+        package func handle(_ e: NSEvent, at p: NSPoint) -> Bool {
             guard let browser, bounds.width > 0, visibleRect.contains(p), let input = TimelineInput(e) else { return false }
             browser.timelineInput(input, at: Double(p.x / bounds.width), width: Double(bounds.width))
             return true
         }
     }
+
+    package init(browser: RecordingsBrowser) {
+        self.browser = browser
+    }
 }
 
 /// Where a second of the shown day is across the lanes: the lanes draw only
 /// the visible part of the day (never a canvas the size of the zoomed day).
-struct TimelineMap {
-    var day: Int64
-    var zoom: Double
-    var start: Double
+package struct TimelineMap {
+    package var day: Int64
+    package var zoom: Double
+    package var start: Double
     /// The lanes' width in points.
-    var width: CGFloat
+    package var width: CGFloat
 
-    var pointsPerSecond: CGFloat { width * CGFloat(zoom) / CGFloat(DeviceTime.day) }
+    package var pointsPerSecond: CGFloat { width * CGFloat(zoom) / CGFloat(DeviceTime.day) }
 
-    func x(_ second: Int64) -> CGFloat {
+    package func x(_ second: Int64) -> CGFloat {
         (CGFloat(second - day) / CGFloat(DeviceTime.day) - CGFloat(start)) * CGFloat(zoom) * width
     }
 
-    func x(ms: Int64) -> CGFloat {
+    package func x(ms: Int64) -> CGFloat {
         (CGFloat(ms - day * 1000) / CGFloat(DeviceTime.day * 1000) - CGFloat(start)) * CGFloat(zoom) * width
     }
 
-    func second(atX x: CGFloat) -> Int64 {
+    package func second(atX x: CGFloat) -> Int64 {
         let f = Double(start) + Double(x / max(width, 1)) / zoom
         return day + Int64((min(max(f, 0), 1) * Double(DeviceTime.day)).rounded(.down))
+    }
+
+    package init(day: Int64, zoom: Double, start: Double, width: CGFloat) {
+        self.day = day
+        self.zoom = zoom
+        self.start = start
+        self.width = width
     }
 }
 
 /// The player's position across the lanes.
-struct Playhead: View, @preconcurrency Animatable {
-    let browser: RecordingsBrowser
-    var zoom: Double
-    var start: Double
+package struct Playhead: View, @preconcurrency Animatable {
+    package let browser: RecordingsBrowser
+    package var zoom: Double
+    package var start: Double
 
     // Zoom and start animate together (a wheel notch eases).
-    var animatableData: AnimatablePair<Double, Double> {
+    package var animatableData: AnimatablePair<Double, Double> {
         get { AnimatablePair(zoom, start) }
         set {
             zoom = newValue.first
@@ -793,7 +832,7 @@ struct Playhead: View, @preconcurrency Animatable {
         }
     }
 
-    var body: some View {
+    package var body: some View {
         let player = browser.player
         let edit = browser.playerView != .cameras
         let position = edit ? browser.editPlayer.positionMs : player.positionMs
@@ -804,15 +843,21 @@ struct Playhead: View, @preconcurrency Animatable {
             ctx.fill(Path(CGRect(x: x - 0.75, y: 0, width: 1.5, height: size.height)), with: .color(.red))
         }
     }
+
+    package init(browser: RecordingsBrowser, zoom: Double, start: Double) {
+        self.browser = browser
+        self.zoom = zoom
+        self.start = start
+    }
 }
 
-struct HourRuler: View, @preconcurrency Animatable {
-    let day: Int64
-    var zoom: Double
-    var start: Double
+package struct HourRuler: View, @preconcurrency Animatable {
+    package let day: Int64
+    package var zoom: Double
+    package var start: Double
 
     // Zoom and start animate together (a wheel notch eases).
-    var animatableData: AnimatablePair<Double, Double> {
+    package var animatableData: AnimatablePair<Double, Double> {
         get { AnimatablePair(zoom, start) }
         set {
             zoom = newValue.first
@@ -824,7 +869,7 @@ struct HourRuler: View, @preconcurrency Animatable {
     /// apart is used.
     private static let steps = [5, 10, 15, 30, 60, 120, 180, 360]
 
-    var body: some View {
+    package var body: some View {
         Canvas { ctx, size in
             let map = TimelineMap(day: day, zoom: zoom, start: start, width: size.width)
             let step = Self.steps.first { CGFloat($0 * 60) * map.pointsPerSecond >= 56 } ?? 360
@@ -845,16 +890,22 @@ struct HourRuler: View, @preconcurrency Animatable {
             }
         }
     }
+
+    package init(day: Int64, zoom: Double, start: Double) {
+        self.day = day
+        self.zoom = zoom
+        self.start = start
+    }
 }
 
-struct LaneView: View, @preconcurrency Animatable {
-    let browser: RecordingsBrowser
-    let lane: RecordingsBrowser.Lane
-    var zoom: Double
-    var start: Double
+package struct LaneView: View, @preconcurrency Animatable {
+    package let browser: RecordingsBrowser
+    package let lane: RecordingsBrowser.Lane
+    package var zoom: Double
+    package var start: Double
 
     // Zoom and start animate together (a wheel notch eases).
-    var animatableData: AnimatablePair<Double, Double> {
+    package var animatableData: AnimatablePair<Double, Double> {
         get { AnimatablePair(zoom, start) }
         set {
             zoom = newValue.first
@@ -862,7 +913,7 @@ struct LaneView: View, @preconcurrency Animatable {
         }
     }
 
-    var body: some View {
+    package var body: some View {
         let day = browser.day
         let selected = Set(browser.selected.map { i in i.events.filter { $0.camera == lane.camera } } ?? [])
         Canvas { ctx, size in
@@ -922,26 +973,33 @@ struct LaneView: View, @preconcurrency Animatable {
     private func distance(_ e: RecordedEvent, _ t: Int64) -> Int64 {
         t < e.start ? e.start - t : (t > e.end ? t - e.end : 0)
     }
+
+    package init(browser: RecordingsBrowser, lane: RecordingsBrowser.Lane, zoom: Double, start: Double) {
+        self.browser = browser
+        self.lane = lane
+        self.zoom = zoom
+        self.start = start
+    }
 }
 
 extension Color {
     /// The timeline's color for a sound (other than an alarm) and for loudness.
-    static let soundLane = Color(red: 0.86, green: 0.36, blue: 0.62)
-    static let loudness = Color.teal
+    package static let soundLane = Color(red: 0.86, green: 0.36, blue: 0.62)
+    package static let loudness = Color.teal
 }
 
 /// A lane's loudness under it (`nv_recordings_loudness`): the loudest
 /// second of each bucket light, its average dark, from -80 dBFS (nothing)
 /// to 0 (full height). Blank where no audio was analyzed, which is not
 /// silence.
-struct LoudnessStrip: View, @preconcurrency Animatable {
-    let lane: LoudnessLane?
-    let day: Int64
-    var zoom: Double
-    var start: Double
+package struct LoudnessStrip: View, @preconcurrency Animatable {
+    package let lane: LoudnessLane?
+    package let day: Int64
+    package var zoom: Double
+    package var start: Double
 
     // Zoom and start animate together (a wheel notch eases).
-    var animatableData: AnimatablePair<Double, Double> {
+    package var animatableData: AnimatablePair<Double, Double> {
         get { AnimatablePair(zoom, start) }
         set {
             zoom = newValue.first
@@ -949,7 +1007,7 @@ struct LoudnessStrip: View, @preconcurrency Animatable {
         }
     }
 
-    var body: some View {
+    package var body: some View {
         Canvas { ctx, size in
             ctx.fill(Path(CGRect(x: 0, y: 0, width: size.width, height: size.height)), with: .color(.secondary.opacity(0.05)))
             guard let lane, lane.bucket > 0 else { return }
@@ -971,17 +1029,24 @@ struct LoudnessStrip: View, @preconcurrency Animatable {
         }
     }
 
-    static func help(_ lane: LoudnessLane?, listening: Bool) -> String {
+    package static func help(_ lane: LoudnessLane?, listening: Bool) -> String {
         if lane?.heard == true { return "Loudness: light is the loudest second, dark the average" }
         return listening
             ? "No sound analyzed on this day yet"
             : "No sound analyzed: sound is analyzed while the camera is on screen or listens for sounds, or for a downloaded day with Analyze Sounds"
     }
+
+    package init(lane: LoudnessLane?, day: Int64, zoom: Double, start: Double) {
+        self.lane = lane
+        self.day = day
+        self.zoom = zoom
+        self.start = start
+    }
 }
 
 /// What the loudness strips show.
-struct LoudnessLegend: View {
-    var body: some View {
+package struct LoudnessLegend: View {
+    package var body: some View {
         HStack(spacing: 4) {
             Text("Loudness:")
             RoundedRectangle(cornerRadius: 1).fill(Color.loudness.opacity(0.35)).frame(width: 10, height: 7)
@@ -1003,12 +1068,12 @@ struct LoudnessLegend: View {
 // MARK: Export
 
 /// The in and out points over the timeline lanes.
-struct InOutBand: View {
-    let browser: RecordingsBrowser
-    let zoom: Double
-    let start: Double
+package struct InOutBand: View {
+    package let browser: RecordingsBrowser
+    package let zoom: Double
+    package let start: Double
 
-    var body: some View {
+    package var body: some View {
         let points = browser.points
         Canvas { ctx, size in
             guard browser.player.playback != nil || browser.playerView != .cameras, !points.isEmpty else { return }
@@ -1023,21 +1088,27 @@ struct InOutBand: View {
             }
         }
     }
+
+    package init(browser: RecordingsBrowser, zoom: Double, start: Double) {
+        self.browser = browser
+        self.zoom = zoom
+        self.start = start
+    }
 }
 
 extension RecordingsBrowser {
     /// The cameras a trim can name: the playing ones, or the edit's.
-    var trimCameras: [RecordingCamera] {
+    package var trimCameras: [RecordingCamera] {
         playerView == .cameras ? player.cameras : (editPlayer.plan?.sources.map(\.camera) ?? [])
     }
 }
 
 /// A running or just-ended export: progress, cancel, and what was written.
-struct ExportStrip: View {
-    let job: ExportJob
-    let export: ExportModel
+package struct ExportStrip: View {
+    package let job: ExportJob
+    package let export: ExportModel
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 8) {
             if job.running {
                 Text(job.title).font(.caption)
@@ -1055,17 +1126,22 @@ struct ExportStrip: View {
         .padding(.horizontal, 12).padding(.vertical, 4)
         .background(.quaternary.opacity(0.4))
     }
+
+    package init(job: ExportJob, export: ExportModel) {
+        self.job = job
+        self.export = export
+    }
 }
 
 /// One header button of a player cell: Save Picture, Reset Zoom, the Fisheye
 /// View menu, or "…" with what did not fit.
-struct PlayerHeaderButton: View {
-    let player: RecordingsPlayer
-    let index: Int
-    let item: TileHeaderItem
-    let layout: TileHeaderLayout
+package struct PlayerHeaderButton: View {
+    package let player: RecordingsPlayer
+    package let index: Int
+    package let item: TileHeaderItem
+    package let layout: TileHeaderLayout
 
-    var body: some View {
+    package var body: some View {
         switch item {
         case .quality:
             Menu {
@@ -1109,7 +1185,7 @@ struct PlayerHeaderButton: View {
         }
     }
 
-    static func symbol(_ item: TileHeaderItem) -> String {
+    package static func symbol(_ item: TileHeaderItem) -> String {
         switch item {
         case .savePicture: "camera"
         case .resetZoom: "1.magnifyingglass"
@@ -1117,15 +1193,22 @@ struct PlayerHeaderButton: View {
         default: "questionmark"
         }
     }
+
+    package init(player: RecordingsPlayer, index: Int, item: TileHeaderItem, layout: TileHeaderLayout) {
+        self.player = player
+        self.index = index
+        self.item = item
+        self.layout = layout
+    }
 }
 
 /// The Quality menu of a player cell: Auto, High (main stream), Low
 /// (sub-stream), as the live tiles' Quality menu.
-struct PlayerQualityMenu: View {
-    let player: RecordingsPlayer
-    let index: Int
+package struct PlayerQualityMenu: View {
+    package let player: RecordingsPlayer
+    package let index: Int
 
-    var body: some View {
+    package var body: some View {
         if player.cells.indices.contains(index) {
             let camera = player.cells[index].camera
             let current = player.streams.quality(camera)
@@ -1137,14 +1220,19 @@ struct PlayerQualityMenu: View {
             Text("Playing the " + player.streams.label(camera))
         }
     }
+
+    package init(player: RecordingsPlayer, index: Int) {
+        self.player = player
+        self.index = index
+    }
 }
 
 /// The Fisheye View menu of a player cell: the view, then the camera's mount.
-struct PlayerFisheyeMenu: View {
-    let player: RecordingsPlayer
-    let index: Int
+package struct PlayerFisheyeMenu: View {
+    package let player: RecordingsPlayer
+    package let index: Int
 
-    var body: some View {
+    package var body: some View {
         if player.cells.indices.contains(index) {
             let camera = player.cells[index].camera
             let current = player.tileViews.fisheyeSetting(camera).mode
@@ -1159,16 +1247,21 @@ struct PlayerFisheyeMenu: View {
             }
         }
     }
+
+    package init(player: RecordingsPlayer, index: Int) {
+        self.player = player
+        self.index = index
+    }
 }
 
 /// The picture items of a player cell's menu (the right-click menu, or the
 /// "…" menu): the live tiles' list and wording (`TileHeaderLayout.menu`).
-struct PlayerTileMenu: View {
-    let player: RecordingsPlayer
-    let index: Int
-    let entries: [TileHeaderMenuEntry]
+package struct PlayerTileMenu: View {
+    package let player: RecordingsPlayer
+    package let index: Int
+    package let entries: [TileHeaderMenuEntry]
 
-    var body: some View {
+    package var body: some View {
         ForEach(entries, id: \.item.rawValue) { entry in
             switch entry.item {
             case .quality:
@@ -1186,5 +1279,11 @@ struct PlayerTileMenu: View {
                 Button(entry.label) { player.perform(entry.item, at: index) }
             }
         }
+    }
+
+    package init(player: RecordingsPlayer, index: Int, entries: [TileHeaderMenuEntry]) {
+        self.player = player
+        self.index = index
+        self.entries = entries
     }
 }

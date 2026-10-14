@@ -9,21 +9,27 @@ import VideoKit
 /// scrubbing and from 2×), and gives the renderer the edit's tiles for the
 /// view's drawable. It redraws only when a picture or the layout changed.
 @MainActor
-final class EditStageView: NSView {
-    let grid: MetalGridView?
-    weak var player: EditPlayer?
+package final class EditStageView: NSView {
+    package let grid: MetalGridView?
+    package weak var player: EditPlayer?
     /// The edit's area in points (top-left origin), inside the view.
-    var area: CGRect = .zero
+    package var area: CGRect = .zero
 
     private struct RenderKey: Equatable {
-        var pictures: [ObjectIdentifier]
-        var destinations: [CGRect]
-        var sources: [CGRect?]
+        package var pictures: [ObjectIdentifier]
+        package var destinations: [CGRect]
+        package var sources: [CGRect?]
+
+        package init(pictures: [ObjectIdentifier], destinations: [CGRect], sources: [CGRect?]) {
+            self.pictures = pictures
+            self.destinations = destinations
+            self.sources = sources
+        }
     }
 
     private var lastKey: RenderKey?
 
-    override init(frame: NSRect) {
+    package override init(frame: NSRect) {
         grid = (try? GridRenderer()).map(MetalGridView.init(renderer:))
         super.init(frame: frame)
         wantsLayer = true
@@ -39,11 +45,11 @@ final class EditStageView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    override var isFlipped: Bool { true }
+    package override var isFlipped: Bool { true }
 
-    var framesDrawn: Int { grid?.framesDrawn ?? 0 }
+    package var framesDrawn: Int { grid?.framesDrawn ?? 0 }
 
     private func prepare(renderer: GridRenderer, drawable: CGSize) {
         let points = bounds
@@ -66,33 +72,39 @@ final class EditStageView: NSView {
     }
 }
 
-struct EditStage: NSViewRepresentable {
-    let player: EditPlayer
-    let area: CGRect
-    var onView: (EditStageView) -> Void = { _ in }
+package struct EditStage: NSViewRepresentable {
+    package let player: EditPlayer
+    package let area: CGRect
+    package var onView: (EditStageView) -> Void = { _ in }
 
-    func makeNSView(context: Context) -> EditStageView {
+    package func makeNSView(context: Context) -> EditStageView {
         let v = EditStageView(frame: .zero)
         v.player = player
         onView(v)
         return v
     }
 
-    func updateNSView(_ view: EditStageView, context: Context) {
+    package func updateNSView(_ view: EditStageView, context: Context) {
         view.player = player
         view.area = area
+    }
+
+    package init(player: EditPlayer, area: CGRect, onView: @escaping (EditStageView) -> Void = { _ in }) {
+        self.player = player
+        self.area = area
+        self.onView = onView
     }
 }
 
 /// The follow cut or grid in the player: the pictures, and over them the
 /// shown camera's name (and the device time) in the follow cut, or each
 /// cell's camera in a grid, with the camera whose sound plays marked.
-struct EditArea: View {
-    let browser: RecordingsBrowser
-    let player: EditPlayer
-    var onStage: (EditStageView) -> Void
+package struct EditArea: View {
+    package let browser: RecordingsBrowser
+    package let player: EditPlayer
+    package var onStage: (EditStageView) -> Void
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             let bounds = CGRect(origin: .zero, size: geo.size).insetBy(dx: 4, dy: 4)
             ZStack(alignment: .topLeading) {
@@ -161,14 +173,20 @@ struct EditArea: View {
             }
         }
     }
+
+    package init(browser: RecordingsBrowser, player: EditPlayer, onStage: @escaping (EditStageView) -> Void) {
+        self.browser = browser
+        self.player = player
+        self.onStage = onStage
+    }
 }
 
-struct EditLabel: View {
-    let name: String
-    let time: String?
-    let audible: Bool
+package struct EditLabel: View {
+    package let name: String
+    package let time: String?
+    package let audible: Bool
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 4) {
             Text(name).font(.caption.weight(.medium)).lineLimit(1)
             if let time { Text(time).font(.caption.monospacedDigit()) }
@@ -178,5 +196,11 @@ struct EditLabel: View {
         .padding(.horizontal, 6).padding(.vertical, 3)
         .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
         .padding(6)
+    }
+
+    package init(name: String, time: String?, audible: Bool) {
+        self.name = name
+        self.time = time
+        self.audible = audible
     }
 }

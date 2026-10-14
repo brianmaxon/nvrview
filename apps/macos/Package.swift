@@ -46,6 +46,8 @@ let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     ("AppPTZ", ["AppBase"]),
     // Smart alerts on this computer: settings, the events window, evidence
     // and verification views, and the model behind them.
+    // Recordings: browsing, playback, editing, and export.
+    ("AppRecordings", ["AppBase", "AppCapture"]),
     ("AppAlerts", ["AppBase", "AppCapture", "AlertHost", "DetectorKit"]),
 ]
 

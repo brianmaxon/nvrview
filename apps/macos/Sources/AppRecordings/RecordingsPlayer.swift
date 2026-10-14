@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import NVRCore
 import Observation
+import AppBase
 
 /// The Recordings window's player (docs/UX.md "Recordings"): one playback
 /// (FFI-RECORDINGS.md section 6) of up to four cameras of the shown day,
@@ -18,22 +19,30 @@ import Observation
 /// (`playback_closed`).
 @MainActor
 @Observable
-final class RecordingsPlayer {
+package final class RecordingsPlayer {
     /// One camera of the playback.
-    struct Cell: Identifiable, Equatable {
-        var camera: RecordingCamera
-        let tile: CoreTile
+    package struct Cell: Identifiable, Equatable {
+        package var camera: RecordingCamera
+        package let tile: CoreTile
         /// The latest `playback_camera` state: `buffering`, `playing`,
         /// `late`, `no_recording`, `ended`, `failed`.
-        var state: String = ""
-        var reason: String?
+        package var state: String = ""
+        package var reason: String?
         /// With `start_rejected`: the status the device refused the play with.
-        var status: Int?
-        var id: ObjectIdentifier { ObjectIdentifier(tile) }
+        package var status: Int?
+        package var id: ObjectIdentifier { ObjectIdentifier(tile) }
 
-        static func == (a: Cell, b: Cell) -> Bool {
+        package static func == (a: Cell, b: Cell) -> Bool {
             a.camera == b.camera && a.tile === b.tile && a.state == b.state && a.reason == b.reason
                 && a.status == b.status
+        }
+
+        package init(camera: RecordingCamera, tile: CoreTile, state: String = "", reason: String? = nil, status: Int? = nil) {
+            self.camera = camera
+            self.tile = tile
+            self.state = state
+            self.reason = reason
+            self.status = status
         }
     }
 
@@ -41,74 +50,74 @@ final class RecordingsPlayer {
     @ObservationIgnored private var timer: Timer?
 
     /// The open playback, if any.
-    private(set) var playback: UInt64?
-    private(set) var cells: [Cell] = []
+    package private(set) var playback: UInt64?
+    package private(set) var cells: [Cell] = []
     /// The playback's range and where it is (device-local milliseconds).
-    private(set) var startMs: Int64 = 0
-    private(set) var endMs: Int64 = 0
-    private(set) var positionMs: Int64 = 0
-    private(set) var state: PlaybackState?
-    private(set) var rate: Double = 1
+    package private(set) var startMs: Int64 = 0
+    package private(set) var endMs: Int64 = 0
+    package private(set) var positionMs: Int64 = 0
+    package private(set) var state: PlaybackState?
+    package private(set) var rate: Double = 1
     /// The day the playback covers.
-    private(set) var day: Int64?
+    package private(set) var day: Int64?
     /// The incident the playback was last positioned for.
-    private(set) var incidentKey: String?
+    package private(set) var incidentKey: String?
     /// How the cameras share the player.
-    var mode: PlayerGridMode = .grid {
+    package var mode: PlayerGridMode = .grid {
         didSet { if mode != oldValue { updateAudio(); refreshStreams() } }
     }
-    var muted = false { didSet { if muted != oldValue { updateAudio() } } }
+    package var muted = false { didSet { if muted != oldValue { updateAudio() } } }
     /// 0...1.
-    var volume: Float = 1 { didSet { if volume != oldValue { updateAudio() } } }
+    package var volume: Float = 1 { didSet { if volume != oldValue { updateAudio() } } }
     /// Why the player shows nothing (a refused open), if it does not.
-    private(set) var message: String?
+    package private(set) var message: String?
     /// Each camera's digital zoom, Fill choice and fisheye view (docs/UX.md
     /// "Recordings"). It belongs to the player's tile: play, pause, seeks,
     /// speed changes, another incident of the same cameras and the grid,
     /// large and single views keep it; a camera that leaves the player
     /// forgets it. Nothing downloaded, exported or edited reads it.
-    var tileViews = PlayerTileViews() { didSet { if tileViews != oldValue { refreshStreams() } } }
+    package var tileViews = PlayerTileViews() { didSet { if tileViews != oldValue { refreshStreams() } } }
     /// Each camera's stream choice (Auto, High, Low) and what plays now
     /// (docs/UX.md "Recordings", "Quality"). A change restarts only that
     /// camera's play at the position; the zoom above is kept.
-    private(set) var streams = PlayerStreams()
+    package private(set) var streams = PlayerStreams()
     /// The view that draws the cells (it takes the pointer's zoom and pan).
-    @ObservationIgnored weak var stage: PlayerStageView?
+    @ObservationIgnored package weak var stage: PlayerStageView?
     /// The cell under the pointer, if any (the keys act on it).
-    var hovered: Int?
+    package var hovered: Int?
     /// A short message over the player (a saved picture), with what it offers.
-    var toast: PlayerToast?
+    package var toast: PlayerToast?
     /// Pictures saved and the last one (self-test).
-    @ObservationIgnored var pictureSaves = 0
-    @ObservationIgnored var lastPictureSave: PictureSaveRecord?
+    @ObservationIgnored package var pictureSaves = 0
+    @ObservationIgnored package var lastPictureSave: PictureSaveRecord?
     /// Counts saves, so a cell can flash (the shutter).
-    var flashCount = 0
-    var flashCamera: RecordingCamera?
+    package var flashCount = 0
+    package var flashCamera: RecordingCamera?
     /// How many playbacks this player opened and seeks it sent (self-test).
-    @ObservationIgnored private(set) var opens = 0
-    @ObservationIgnored private(set) var seeks = 0
+    @ObservationIgnored package private(set) var opens = 0
+    @ObservationIgnored package private(set) var seeks = 0
     /// How many stream changes this player asked the core for (self-test).
-    @ObservationIgnored private(set) var streamChanges = 0
+    @ObservationIgnored package private(set) var streamChanges = 0
 
-    init(model: RecordingsModel) {
+    package init(model: RecordingsModel) {
         self.model = model
     }
 
-    var app: AppModel? { model.app }
+    package var app: (any RecordingsHost)? { model.app }
 
-    var transport: TransportState {
+    package var transport: TransportState {
         TransportState(startMs: startMs, endMs: endMs, positionMs: positionMs, state: state, rate: rate)
     }
 
     /// The cameras in the player, in order.
-    var cameras: [RecordingCamera] { cells.map(\.camera) }
+    package var cameras: [RecordingCamera] { cells.map(\.camera) }
 
     // MARK: Showing
 
     /// Plays an incident: its first four cameras over `day`, from its start
     /// less its margin. With the same cameras and day already open, only
     /// seeks.
-    func show(_ incident: Incident, day: Int64) {
+    package func show(_ incident: Incident, day: Int64) {
         let cams = PlayerGrid.cameras(incident.cameras.map(\.camera))
         let at = (incident.start - incident.margin) * 1000
         show(cameras: cams, day: day, at: at)
@@ -119,11 +128,11 @@ final class RecordingsPlayer {
     }
 
     /// The incident whose playback could not be opened.
-    var failedFor: String?
+    package var failedFor: String?
 
     /// The selected incident changed shape (a camera added or removed by an
     /// edit): the player follows its cameras without moving the playhead.
-    func follow(_ incident: Incident, day: Int64) {
+    package func follow(_ incident: Incident, day: Int64) {
         let want = PlayerGrid.cameras(incident.cameras.map(\.camera))
         guard playback != nil, self.day == day else { return show(incident, day: day) }
         for c in cameras where !want.contains(c) { remove(c) }
@@ -133,10 +142,10 @@ final class RecordingsPlayer {
 
     /// The incident the player plays got a new key (a split kept the part
     /// at the playhead).
-    func renamed(to key: String) { incidentKey = key }
+    package func renamed(to key: String) { incidentKey = key }
 
     /// Plays these cameras (at most four) over `day` from `at`.
-    func show(cameras: [RecordingCamera], day: Int64, at: Int64) {
+    package func show(cameras: [RecordingCamera], day: Int64, at: Int64) {
         incidentKey = nil
         let cams = PlayerGrid.cameras(cameras)
         guard !cams.isEmpty else { return close() }
@@ -182,7 +191,7 @@ final class RecordingsPlayer {
     }
 
     /// Closes the playback (every tile closes with it).
-    func close() {
+    package func close() {
         timer?.invalidate()
         timer = nil
         if let p = playback { model.closePlayback(p, tiles: cells.map(\.tile)) }
@@ -206,21 +215,21 @@ final class RecordingsPlayer {
 
     // MARK: Transport
 
-    func play() {
+    package func play() {
         guard let p = playback else { return }
         model.playbackCall { core throws(CoreStatus) in try core.playbackPlay(p) }
     }
 
-    func pause() {
+    package func pause() {
         guard let p = playback else { return }
         model.playbackCall { core throws(CoreStatus) in try core.playbackPause(p) }
     }
 
-    func togglePlay() { transport.isPlaying ? pause() : play() }
+    package func togglePlay() { transport.isPlaying ? pause() : play() }
 
     /// Seeks: `exact` shows the picture at the time (a click or a release);
     /// otherwise the keyframe before it (dragging).
-    func seek(to ms: Int64, exact: Bool = true) {
+    package func seek(to ms: Int64, exact: Bool = true) {
         guard let p = playback else { return }
         let target = transport.clamp(ms)
         positionMs = target
@@ -228,9 +237,9 @@ final class RecordingsPlayer {
         model.playbackCall { core throws(CoreStatus) in try core.playbackSeek(p, positionMs: target, mode: exact ? .exact : .keyframe) }
     }
 
-    func skip(by delta: Int64) { seek(to: transport.skipped(by: delta)) }
+    package func skip(by delta: Int64) { seek(to: transport.skipped(by: delta)) }
 
-    func setRate(_ new: Double) {
+    package func setRate(_ new: Double) {
         guard PlaybackSpeed.all.contains(new), new != rate else { return }
         rate = new
         updateAudio()
@@ -240,7 +249,7 @@ final class RecordingsPlayer {
     }
 
     /// Takes a camera out of the player (Remove from Incident does it too).
-    func remove(_ camera: RecordingCamera) {
+    package func remove(_ camera: RecordingCamera) {
         guard let p = playback, let i = cells.firstIndex(where: { $0.camera == camera }) else { return }
         let tile = cells[i].tile
         cells.remove(at: i)
@@ -256,7 +265,7 @@ final class RecordingsPlayer {
     }
 
     /// Adds a camera to the player (at most four), joining at the position.
-    func add(_ camera: RecordingCamera) {
+    package func add(_ camera: RecordingCamera) {
         guard let p = playback, cells.count < PlayerGrid.maxCameras, !cameras.contains(camera) else { return }
         var joining = streams
         let tier = joining.wanted(
@@ -275,7 +284,7 @@ final class RecordingsPlayer {
     // MARK: Quality
 
     /// The camera's choice: Auto, High (main stream) or Low (sub-stream).
-    func setQuality(_ quality: PlayerQuality, for camera: RecordingCamera) {
+    package func setQuality(_ quality: PlayerQuality, for camera: RecordingCamera) {
         guard streams.quality(camera) != quality else { return }
         streams.setQuality(quality, for: camera)
         refreshStreams()
@@ -285,7 +294,7 @@ final class RecordingsPlayer {
     /// one wanted now (the layout, the speed, the zoom and the choice
     /// decide: `PlayerStreams`). The core restarts that camera's play at the
     /// position, in the group-start rules; the picture and zoom stay.
-    func refreshStreams() {
+    package func refreshStreams() {
         guard playback != nil else { return }
         let views = tileViews
         let wanted = streams.changes(
@@ -298,8 +307,8 @@ final class RecordingsPlayer {
         }
     }
 
-    func click(_ i: Int) { mode = PlayerGrid.click(mode, on: i, count: cells.count) }
-    func doubleClick(_ i: Int) { mode = PlayerGrid.doubleClick(mode, on: i, count: cells.count) }
+    package func click(_ i: Int) { mode = PlayerGrid.click(mode, on: i, count: cells.count) }
+    package func doubleClick(_ i: Int) { mode = PlayerGrid.doubleClick(mode, on: i, count: cells.count) }
 
     // MARK: Sound
 
@@ -314,7 +323,7 @@ final class RecordingsPlayer {
     }
 
     /// The camera whose sound plays, if any.
-    var audibleCamera: RecordingCamera? {
+    package var audibleCamera: RecordingCamera? {
         guard !muted, PlaybackSpeed.hasSound(rate), let i = PlayerGrid.audibleIndex(mode, count: cells.count) else {
             return nil
         }
@@ -335,7 +344,7 @@ final class RecordingsPlayer {
     }
 
     /// Reads the position and state now.
-    func tick() {
+    package func tick() {
         guard let p = playback, let now = model.playbackPosition(p) else { return }
         if now.positionMs != positionMs { positionMs = now.positionMs }
         if now.state != state { state = now.state }
@@ -343,7 +352,7 @@ final class RecordingsPlayer {
 
     // MARK: Events
 
-    func apply(_ e: PlaybackEvent) {
+    package func apply(_ e: PlaybackEvent) {
         switch e {
         case .state(_, let s, let position, let r):
             state = s

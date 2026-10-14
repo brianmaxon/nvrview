@@ -13,32 +13,32 @@ import Observation
 /// (`RecordingsPlayer`).
 @MainActor
 @Observable
-final class RecordingsBrowser {
+package final class RecordingsBrowser {
     /// What the middle of the window shows.
-    enum Center: String, CaseIterable, Identifiable {
+    package enum Center: String, CaseIterable, Identifiable {
         case player = "Player"
         case downloads = "Downloads"
-        var id: String { rawValue }
+        package var id: String { rawValue }
     }
 
     /// The scrubber's span: the selected incident (with its margins) or the
     /// whole day.
-    enum ScrubScope: String, CaseIterable, Identifiable {
+    package enum ScrubScope: String, CaseIterable, Identifiable {
         case incident = "Incident"
         case day = "Day"
-        var id: String { rawValue }
+        package var id: String { rawValue }
     }
 
     /// What the player shows: the device playback of the incident's cameras,
     /// or, from its downloaded files, a follow cut or a 2-up or 4-up grid.
-    enum PlayerView: String, CaseIterable, Identifiable {
+    package enum PlayerView: String, CaseIterable, Identifiable {
         case cameras = "Cameras"
         case follow = "Follow Cut"
         case grid2 = "2-Up"
         case grid4 = "4-Up"
-        var id: String { rawValue }
+        package var id: String { rawValue }
 
-        var edit: EditPlayer.Kind? {
+        package var edit: EditPlayer.Kind? {
             switch self {
             case .cameras: nil
             case .follow: .follow
@@ -49,26 +49,34 @@ final class RecordingsBrowser {
     }
 
     /// Which incidents the list shows: all, a camera group's, or a camera's.
-    enum Scope: Hashable {
+    package enum Scope: Hashable {
         case all
         case group(String)
         case camera(RecordingCamera)
     }
 
     /// One timeline lane: a camera's recording spans and events for the day.
-    struct Lane: Identifiable, Equatable {
-        var camera: RecordingCamera
-        var name: String
-        var spans: [RecordingSpan]
-        var events: [RecordedEvent]
+    package struct Lane: Identifiable, Equatable {
+        package var camera: RecordingCamera
+        package var name: String
+        package var spans: [RecordingSpan]
+        package var events: [RecordedEvent]
         /// The device could not search this camera's day.
-        var failed: Bool
-        var id: RecordingCamera { camera }
+        package var failed: Bool
+        package var id: RecordingCamera { camera }
+
+        package init(camera: RecordingCamera, name: String, spans: [RecordingSpan], events: [RecordedEvent], failed: Bool) {
+            self.camera = camera
+            self.name = name
+            self.spans = spans
+            self.events = events
+            self.failed = failed
+        }
     }
 
-    @ObservationIgnored let model: RecordingsModel
+    @ObservationIgnored package let model: RecordingsModel
     /// This window's `nv_recordings_hold_today` number.
-    @ObservationIgnored let holdID: UInt64
+    @ObservationIgnored package let holdID: UInt64
     @ObservationIgnored private var token: UUID?
     /// The cameras the shown day was last asked for.
     @ObservationIgnored private var asked: (day: Int64, cameras: Set<RecordingCamera>)?
@@ -77,36 +85,36 @@ final class RecordingsBrowser {
     @ObservationIgnored private var heldCameras: [RecordingCamera] = []
 
     /// The player of this window.
-    let player: RecordingsPlayer
+    package let player: RecordingsPlayer
     /// The follow cut and grids of a downloaded incident.
-    let editPlayer: EditPlayer
+    package let editPlayer: EditPlayer
     /// In and out points, the export switches, and the running export.
-    let export = ExportModel()
+    package let export = ExportModel()
     /// What the player shows.
-    private(set) var playerView = PlayerView.cameras
+    package private(set) var playerView = PlayerView.cameras
     /// The follow cut's and grid's picture view, once shown (the self-test).
-    @ObservationIgnored weak var editStage: EditStageView?
+    @ObservationIgnored package weak var editStage: EditStageView?
 
     /// The shown day (device-local, its first second).
-    private(set) var day: Int64
+    package private(set) var day: Int64
     /// The calendar's month (its first second).
-    private(set) var month: Int64
-    var center = Center.player
-    var scrubScope = ScrubScope.incident
+    package private(set) var month: Int64
+    package var center = Center.player
+    package var scrubScope = ScrubScope.incident
     /// The side panes the user wants (a narrow window may still hide them;
     /// `RecordingsPanes.shown`).
-    var showSidebar = true
-    var showInspector = true
+    package var showSidebar = true
+    package var showInspector = true
     /// The right pane's tab: the incident's details or the Export tab (kept
     /// across incidents).
-    var inspectorTab = InspectorTab.incident
+    package var inspectorTab = InspectorTab.incident
     /// What the window last laid out: its width and the panes it showed.
-    @ObservationIgnored var shownPanes: (width: CGFloat, sidebar: Bool, inspector: Bool)?
-    var kindFilters: Set<KindFilter> = [] { didSet { applyFilters() } }
-    var scope = Scope.all { didSet { reloadIncidents() } }
-    var lockedOnly = false { didSet { applyFilters() } }
+    @ObservationIgnored package var shownPanes: (width: CGFloat, sidebar: Bool, inspector: Bool)?
+    package var kindFilters: Set<KindFilter> = [] { didSet { applyFilters() } }
+    package var scope = Scope.all { didSet { reloadIncidents() } }
+    package var lockedOnly = false { didSet { applyFilters() } }
     /// Selected incidents, by key. One selected incident plays.
-    var selection: Set<String> = [] {
+    package var selection: Set<String> = [] {
         didSet {
             guard selection != oldValue else { return }
             player.failedFor = nil
@@ -115,15 +123,15 @@ final class RecordingsBrowser {
     }
     /// The part of the day the timeline lanes show (zoom 1: the whole day
     /// in the lanes' width).
-    var timeline = TimelineViewport() { didSet { if timeline.zoom != oldValue.zoom { reloadLoudness() } } }
-    var showingGroups = false
+    package var timeline = TimelineViewport() { didSet { if timeline.zoom != oldValue.zoom { reloadLoudness() } } }
+    package var showingGroups = false
     /// Each lane's loudness for the shown day, at `loudnessBucket`.
-    private(set) var loudness: [RecordingCamera: LoudnessLane] = [:]
+    package private(set) var loudness: [RecordingCamera: LoudnessLane] = [:]
     /// The lanes' width in points (the view reports it), for the loudness
     /// bucket.
-    var lanesWidth: Double = 600 { didSet { if abs(lanesWidth - oldValue) >= 1 { reloadLoudness() } } }
+    package var lanesWidth: Double = 600 { didSet { if abs(lanesWidth - oldValue) >= 1 { reloadLoudness() } } }
     /// About one loudness value per two points at the zoom shown.
-    var loudnessBucket: Int64 {
+    package var loudnessBucket: Int64 {
         LoudnessScale.bucket(visibleSeconds: Double(DeviceTime.day) * timeline.visible, width: lanesWidth)
     }
     @ObservationIgnored private var loudnessAsked: (day: Int64, bucket: Int64, cameras: [RecordingCamera], revision: Int)?
@@ -131,25 +139,25 @@ final class RecordingsBrowser {
     /// event (FFI-RECORDINGS.md section 2a, "a pull API").
     @ObservationIgnored private var loudnessTimer: Timer?
     /// How often the loudness lanes were read (the self-test).
-    @ObservationIgnored private(set) var loudnessReads = 0
+    @ObservationIgnored package private(set) var loudnessReads = 0
 
     /// Days of the calendar's month that have recordings on an enabled camera.
-    private(set) var recordedDays: Set<Int64> = []
-    private(set) var lanes: [Lane] = []
+    package private(set) var recordedDays: Set<Int64> = []
+    package private(set) var lanes: [Lane] = []
     /// The day's incidents in scope, newest first, before the kind and lock filters.
-    private(set) var dayIncidents: [Incident] = []
+    package private(set) var dayIncidents: [Incident] = []
     /// What the list shows.
-    private(set) var incidents: [Incident] = []
+    package private(set) var incidents: [Incident] = []
     /// Whether this window holds today.
-    private(set) var holding = false
+    package private(set) var holding = false
     /// A message from the last request, if it was refused.
-    var message: String?
+    package var message: String?
     /// How often the window re-read the index (the self-test).
-    @ObservationIgnored private(set) var reloads = 0
+    @ObservationIgnored package private(set) var reloads = 0
     /// Months asked for alone, in order (the self-test).
-    @ObservationIgnored private(set) var monthRequests: [Int64] = []
+    @ObservationIgnored package private(set) var monthRequests: [Int64] = []
 
-    init(model: RecordingsModel) {
+    package init(model: RecordingsModel) {
         self.model = model
         export.defaultQuality = { [weak model] in model?.app?.exportQuality ?? .main }
         holdID = model.newHold()
@@ -170,15 +178,15 @@ final class RecordingsBrowser {
         loudnessTimer = t
     }
 
-    var isToday: Bool { day == model.today }
+    package var isToday: Bool { day == model.today }
 
     /// The cameras this window shows (every enabled camera).
-    var cameras: [RecordingCamera] { model.enabledCameras }
+    package var cameras: [RecordingCamera] { model.enabledCameras }
 
     // MARK: Navigation
 
     /// Shows a day: asks the core for it, holds today only while it is today.
-    func show(day newDay: Int64) {
+    package func show(day newDay: Int64) {
         let d = DeviceTime.dayStart(newDay)
         guard d <= model.today else { return }
         if d != day {
@@ -195,7 +203,7 @@ final class RecordingsBrowser {
 
     /// Pages the calendar; a month other than the shown day's is asked for
     /// alone (its calendar only), once per set of cameras.
-    func showMonth(adding months: Int) {
+    package func showMonth(adding months: Int) {
         let next = DeviceTime.month(containing: DeviceTime.month(month, adding: months)).start
         guard next <= model.today else { return }
         month = next
@@ -216,18 +224,18 @@ final class RecordingsBrowser {
         monthRequests.append(month)
     }
 
-    func previousDay() { show(day: day - DeviceTime.day) }
-    func nextDay() { show(day: day + DeviceTime.day) }
+    package func previousDay() { show(day: day - DeviceTime.day) }
+    package func nextDay() { show(day: day + DeviceTime.day) }
 
     /// Searches the shown day again on the device (pull to refresh).
-    func refresh() {
+    package func refresh() {
         message = model.want(cameras, days: [day], force: true)
         asked = (day, Set(cameras))
     }
 
     /// The window closes: its playback closes, its hold ends, its thumbnail
     /// requests are dropped.
-    func close() {
+    package func close() {
         loudnessTimer?.invalidate()
         loudnessTimer = nil
         closeEdit()
@@ -244,7 +252,7 @@ final class RecordingsBrowser {
 
     /// Re-reads everything the window shows (after an event, a navigation,
     /// or an enablement change). Asks for cameras newly enabled.
-    func reload() {
+    package func reload() {
         reloads += 1
         let cams = Set(cameras)
         if asked?.day != day || !(cams.isSubset(of: asked?.cameras ?? [])) {
@@ -263,7 +271,7 @@ final class RecordingsBrowser {
 
     /// Reads the shown day's loudness lanes when the day, the cameras, the
     /// bucket, or the index changed (`force`: also when nothing did).
-    func reloadLoudness(force: Bool = false) {
+    package func reloadLoudness(force: Bool = false) {
         let bucket = loudnessBucket, cams = cameras, revision = model.indexRevision
         if !force, let a = loudnessAsked, a.day == day, a.bucket == bucket, a.cameras == cams, a.revision == revision {
             return
@@ -279,22 +287,22 @@ final class RecordingsBrowser {
 
     /// Analyzes the shown day's sound from the downloaded video, for one
     /// lane's camera or for all the searched cameras (the lanes).
-    func analyzeSound(_ camera: RecordingCamera? = nil) {
+    package func analyzeSound(_ camera: RecordingCamera? = nil) {
         model.analyzeSound(of: camera.map { [$0] } ?? lanes.map(\.camera), day: day)
     }
 
-    func cancelAnalysis(_ camera: RecordingCamera) { model.cancelAnalysis(camera, day: day) }
+    package func cancelAnalysis(_ camera: RecordingCamera) { model.cancelAnalysis(camera, day: day) }
 
     /// A lane's sound analysis while it waits or runs.
-    func analysis(of camera: RecordingCamera) -> SoundAnalysis.Entry? {
+    package func analysis(of camera: RecordingCamera) -> SoundAnalysis.Entry? {
         model.analysis(camera, day: day).flatMap { $0.active ? $0 : nil }
     }
 
     /// Whether any lane can still be asked to analyze.
-    var canAnalyze: Bool { lanes.contains { !model.isAnalyzing($0.camera, day: day) } }
+    package var canAnalyze: Bool { lanes.contains { !model.isAnalyzing($0.camera, day: day) } }
 
     /// The loudness a lane shows (its camera's microphone).
-    func loudness(of camera: RecordingCamera) -> LoudnessLane? { loudness[LoudnessScale.microphone(of: camera)] }
+    package func loudness(of camera: RecordingCamera) -> LoudnessLane? { loudness[LoudnessScale.microphone(of: camera)] }
 
     /// Holds today (for the enabled cameras) while today is shown; the core
     /// is told only when that changes.
@@ -349,25 +357,25 @@ final class RecordingsBrowser {
     }
 
     /// The selected keys that name an incident of the day.
-    var selectedKeys: [String] { dayIncidents.map(\.key).filter { selection.contains($0) } }
+    package var selectedKeys: [String] { dayIncidents.map(\.key).filter { selection.contains($0) } }
 
     // MARK: Names
 
     /// A camera's name as the camera list shows it: the user's override
     /// (kept with the camera groups), else the device's channel name with
     /// the lens for a multi-lens camera, else "Channel N".
-    func cameraName(_ c: RecordingCamera) -> String {
+    package func cameraName(_ c: RecordingCamera) -> String {
         if let override = model.groups.cameraNames.first(where: { $0.camera == c }) { return override.name }
         return model.app?.name(of: CameraRef(device: c.device, channel: c.channel, lens: c.lens))
             ?? "Channel \(c.channel + 1)"
     }
 
-    var dayTitle: String { (isToday ? "Today, " : "") + DeviceTime.longDay(day) }
+    package var dayTitle: String { (isToday ? "Today, " : "") + DeviceTime.longDay(day) }
 
     // MARK: Selection and the player
 
     /// The one selected incident, if exactly one is selected.
-    var selected: Incident? {
+    package var selected: Incident? {
         let keys = selectedKeys
         guard keys.count == 1, let key = keys.first else { return nil }
         return dayIncidents.first { $0.key == key }
@@ -390,10 +398,10 @@ final class RecordingsBrowser {
     // MARK: Follow cut and grids
 
     /// The transport the controls drive now.
-    var driver: any PlayerTransportDriver { playerView == .cameras ? player : editPlayer }
+    package var driver: any PlayerTransportDriver { playerView == .cameras ? player : editPlayer }
 
     /// The incident a follow cut or grid would be made of, and its finished download.
-    var editable: (incident: Incident, download: DownloadProgress)? {
+    package var editable: (incident: Incident, download: DownloadProgress)? {
         guard let incident = playingIncident ?? selected, let d = model.finishedDownload(of: incident.key) else { return nil }
         return (incident, d)
     }
@@ -401,7 +409,7 @@ final class RecordingsBrowser {
     /// Shows the device playback, or a follow cut or grid of the incident's
     /// downloaded files from the playhead (the device playback pauses
     /// meanwhile and continues from the edit's position afterward).
-    func show(view: PlayerView) {
+    package func show(view: PlayerView) {
         guard let kind = view.edit else {
             guard playerView != .cameras else { return }
             let at = editPlayer.positionMs
@@ -444,7 +452,7 @@ final class RecordingsBrowser {
 
     /// A click on an incident row: selects it alone, or with ⌘ adds or
     /// removes it (several selected incidents can be merged).
-    func click(_ key: String, extend: Bool) {
+    package func click(_ key: String, extend: Bool) {
         if extend {
             if selection.contains(key) { selection.remove(key) } else { selection.insert(key) }
         } else {
@@ -453,7 +461,7 @@ final class RecordingsBrowser {
     }
 
     /// Selects the incident that holds an event.
-    func select(event e: RecordedEvent) {
+    package func select(event e: RecordedEvent) {
         if let i = dayIncidents.first(where: { i in
             i.involves(e.camera) && i.events.contains { $0.camera == e.camera && $0.start <= e.end && e.start <= $0.end }
         }) {
@@ -464,7 +472,7 @@ final class RecordingsBrowser {
     /// A click on a lane at `seconds`: the player seeks there when it plays
     /// that camera; a click on an event of another camera selects (and so
     /// plays) its incident; anywhere else that camera plays alone from there.
-    func laneClick(_ camera: RecordingCamera, at seconds: Int64, near event: RecordedEvent? = nil) {
+    package func laneClick(_ camera: RecordingCamera, at seconds: Int64, near event: RecordedEvent? = nil) {
         let ms = seconds * 1000
         if playerView != .cameras {
             // Inside the follow cut's or grid's range, for one of its
@@ -490,30 +498,30 @@ final class RecordingsBrowser {
     }
 
     /// The incident the player is positioned for, if it is still of the day.
-    var playingIncident: Incident? {
+    package var playingIncident: Incident? {
         guard let key = player.incidentKey, player.playback != nil else { return nil }
         return dayIncidents.first { $0.key == key }
     }
 
     /// The second "Split Here" would split `incident` at: the playhead's,
     /// when the player plays that incident and the playhead is inside it.
-    func splitSecond(_ incident: Incident) -> Int64? {
+    package func splitSecond(_ incident: Incident) -> Int64? {
         guard player.incidentKey == incident.key, player.playback != nil else { return nil }
         return IncidentSplit.second(start: incident.start, end: incident.end, playheadMs: player.positionMs)
     }
 
-    func splitHere(_ incident: Incident) {
+    package func splitHere(_ incident: Incident) {
         guard let at = splitSecond(incident) else { return }
         split(incident.key, at: at)
     }
 
-    func merge() {
+    package func merge() {
         let keys = selectedKeys
         guard keys.count >= 2, let merged = model.edit(.merge(keys)) else { return }
         selection = Set(merged.prefix(1))
     }
 
-    func split(_ key: String, at: Int64) {
+    package func split(_ key: String, at: Int64) {
         guard let keys = model.edit(.split(key: key, at: at)) else { return }
         // The part that holds the playhead stays selected (and keeps playing).
         let parts = keys.compactMap { k in model.incident(k) }
@@ -526,31 +534,31 @@ final class RecordingsBrowser {
         }
     }
 
-    func rename(_ key: String, _ name: String) { model.edit(.rename(key: key, name: name)) }
-    func revert(_ key: String) { model.edit(.revert(key: key)) }
-    func add(_ camera: RecordingCamera, to key: String) { model.edit(.addCamera(key: key, camera: camera)) }
+    package func rename(_ key: String, _ name: String) { model.edit(.rename(key: key, name: name)) }
+    package func revert(_ key: String) { model.edit(.revert(key: key)) }
+    package func add(_ camera: RecordingCamera, to key: String) { model.edit(.addCamera(key: key, camera: camera)) }
 
     /// Remove from Incident: the camera leaves the incident (and the player).
-    func remove(_ camera: RecordingCamera, from key: String) {
+    package func remove(_ camera: RecordingCamera, from key: String) {
         guard model.edit(.removeCamera(key: key, camera: camera)) != nil else { return }
         if player.incidentKey == key { player.remove(camera) }
     }
 
-    func setLocked(_ key: String, _ locked: Bool) { model.lock(key, locked) }
-    func download(_ key: String) { model.download(incident: key) }
+    package func setLocked(_ key: String, _ locked: Bool) { model.lock(key, locked) }
+    package func download(_ key: String) { model.download(incident: key) }
 
     /// Cameras that could be added to an incident.
-    func addable(to i: Incident) -> [RecordingCamera] { cameras.filter { !i.involves($0) } }
+    package func addable(to i: Incident) -> [RecordingCamera] { cameras.filter { !i.involves($0) } }
 
     /// The scope choices: all, each group, each camera.
-    var scopes: [(Scope, String)] {
+    package var scopes: [(Scope, String)] {
         [(Scope.all, "All Cameras")] + model.groups.groups.map { (Scope.group($0.name), $0.name) }
             + cameras.map { (Scope.camera($0), cameraName($0)) }
     }
 
     /// The scrubber's range in milliseconds: the incident with its margins,
     /// or the player's day.
-    var scrubRange: (start: Int64, end: Int64)? {
+    package var scrubRange: (start: Int64, end: Int64)? {
         if playerView != .cameras {
             guard let plan = editPlayer.plan else { return nil }
             return (plan.startMs, plan.endMs)

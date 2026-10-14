@@ -139,17 +139,85 @@ package enum SavePicturePanel {
 /// Keeps a save panel's file name extension in step with its format menu.
 @MainActor
 private final class PanelFormatHandler: NSObject {
-    let panel: NSSavePanel
-    let popup: NSPopUpButton
+    package let panel: NSSavePanel
+    package let popup: NSPopUpButton
 
-    init(panel: NSSavePanel, popup: NSPopUpButton) {
+    package init(panel: NSSavePanel, popup: NSPopUpButton) {
         self.panel = panel
         self.popup = popup
     }
 
-    @objc func changed(_ sender: Any?) {
+    @objc package func changed(_ sender: Any?) {
         let format = PictureFormat.allCases[max(popup.indexOfSelectedItem, 0)]
         let stem = (panel.nameFieldStringValue as NSString).deletingPathExtension
         panel.nameFieldStringValue = "\(stem).\(format.fileExtension)"
+    }
+}
+
+/// Which picture a save makes.
+package enum PictureKind {
+    /// What the tile shows, at the source's size: a fisheye tile's dewarped
+    /// view; otherwise the whole picture, whatever the zoom.
+    case view
+    /// The visible region of a zoomed (or cropped) tile.
+    case zoomedArea
+    /// A fisheye camera's circle as received, not dewarped.
+    case originalFisheye
+}
+
+/// A finished save, with what it was made from (self-test).
+package struct PictureSaveRecord {
+    package var result: Result<PictureSaver.Saved, PictureSaver.Failure>
+    package var kind: PictureKind
+    package var picture: DecodedPicture
+    package var color: YCbCrToRGB
+    package var region: CGRect
+    package var dewarped: Bool
+
+    package init(result: Result<PictureSaver.Saved, PictureSaver.Failure>, kind: PictureKind, picture: DecodedPicture, color: YCbCrToRGB, region: CGRect, dewarped: Bool) {
+        self.result = result
+        self.kind = kind
+        self.picture = picture
+        self.color = color
+        self.region = region
+        self.dewarped = dewarped
+    }
+}
+
+/// What a save draws from a tile (shared by the live tiles and the recording
+/// player's, so a saved picture is made one way): the tile's newest decoded
+/// picture, its color matrix, and the region or the dewarp.
+package enum PictureRenderBuilder {
+    /// Nil without a picture. `tileSize` is the tile in points (for the
+    /// zoomed area); `dewarp` gives the fisheye view for the picture at its
+    /// layout size, or nil to draw the picture as is.
+    @MainActor
+    package static func make(
+        tile: CoreTile, kind: PictureKind, tileSize: CGSize?, fill: Bool, zoom: TileZoom,
+        dewarp: (DecodedPicture, CGSize) -> FisheyeDewarp?
+    ) -> PictureRender? {
+        guard let picture = tile.latestPicture() else { return nil }
+        let snapshot = tile.snapshot
+        let mapping = PictureMapping(
+            snapshot: snapshot, pictureSize: PixelSize(width: UInt32(picture.width), height: UInt32(picture.height)))
+        let layout = CGSize(width: Int(mapping.layoutSize.width), height: Int(mapping.layoutSize.height))
+        let offset = CGPoint(x: CGFloat(mapping.offset.x), y: CGFloat(mapping.offset.y))
+        guard layout.width >= 1, layout.height >= 1 else { return nil }
+        let color = snapshot.color.flatMap { YCbCrToRGB(rowMajor: $0.ycbcrToRGB) }
+            ?? YCbCrToRGB(r: [1, 0, 0, 0], g: [0, 1, 0, 0], b: [0, 0, 1, 0])
+        let whole = PictureRegion.whole(layoutSize: layout, offset: offset)
+        // A dewarped fisheye view is drawn at the source's resolution.
+        if kind != .originalFisheye, let dewarp = dewarp(picture, layout) {
+            return PictureRender(
+                picture: picture, color: color, source: whole.rect, dewarp: dewarp.constants, width: whole.width,
+                height: whole.height)
+        }
+        var region = whole
+        if kind == .zoomedArea, let tileSize {
+            region = PictureRegion.visible(layoutSize: layout, offset: offset, tile: tileSize, fill: fill, zoom: zoom)
+                ?? whole
+        }
+        return PictureRender(
+            picture: picture, color: color, source: region.rect, width: region.width, height: region.height)
     }
 }

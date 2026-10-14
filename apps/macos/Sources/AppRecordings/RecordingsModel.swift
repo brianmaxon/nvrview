@@ -8,12 +8,18 @@ import AppBase
 /// Which cameras of a device the user lets the recordings screens search
 /// (`nv_recordings_enable`), saved between launches. The core does not keep
 /// this list: the app enables every listed device again at each launch.
-struct RecordingsEnablement: Codable, Equatable, Sendable {
-    var device: String
-    var cameras: [RecordingCamera]
+package struct RecordingsEnablement: Codable, Equatable, Sendable {
+    package var device: String
+    package var cameras: [RecordingCamera]
     /// The cameras that listen for sounds (`nv_sound_watch`; the core does
     /// not keep this list either). Absent in older files.
-    var listen: [RecordingCamera]?
+    package var listen: [RecordingCamera]?
+
+    package init(device: String, cameras: [RecordingCamera], listen: [RecordingCamera]? = nil) {
+        self.device = device
+        self.cameras = cameras
+        self.listen = listen
+    }
 }
 
 /// The recordings side of the app (docs/UX.md "Recordings"), shared by every
@@ -27,44 +33,44 @@ struct RecordingsEnablement: Codable, Equatable, Sendable {
 /// background queue.
 @MainActor
 @Observable
-final class RecordingsModel {
+package final class RecordingsModel {
     @ObservationIgnored private let bridge: CoreBridge
     @ObservationIgnored private let enablementFile: JSONFileStore<RecordingsEnablement>
     /// The app, for device and camera names.
-    @ObservationIgnored weak var app: AppModel?
+    @ObservationIgnored package weak var app: (any RecordingsHost)?
 
     /// False until the core accepted the configuration (a core without
     /// recordings, minor < 5, never does; the screens then stay hidden).
-    private(set) var available = false
+    package private(set) var available = false
     /// Where downloads go (`downloads_dir`).
-    private(set) var downloadsFolder: URL?
+    package private(set) var downloadsFolder: URL?
     /// The searched cameras, by device key.
-    private(set) var enabled: [String: [RecordingCamera]] = [:]
+    package private(set) var enabled: [String: [RecordingCamera]] = [:]
     /// The cameras that listen for sounds, by device key.
-    private(set) var listening: [String: [RecordingCamera]] = [:]
+    package private(set) var listening: [String: [RecordingCamera]] = [:]
     /// Each listening camera's latest `sound_watch` state and reason.
-    private(set) var listenStates: [RecordingCamera: (state: String, reason: String?)] = [:]
+    package private(set) var listenStates: [RecordingCamera: (state: String, reason: String?)] = [:]
     /// Each camera-day's latest sound analysis (`nv_sound_analyze_day`), by
     /// camera as asked and the day's start.
-    private(set) var soundAnalyses: [AnalysisKey: SoundAnalysis.Entry] = [:]
+    package private(set) var soundAnalyses: [AnalysisKey: SoundAnalysis.Entry] = [:]
     /// Each enabled device's search lane: `idle`, `busy`, `waiting_device`, `ended`.
-    private(set) var indexStates: [String: (state: String, pendingDays: Int)] = [:]
+    package private(set) var indexStates: [String: (state: String, pendingDays: Int)] = [:]
     /// Grows with every `recordings_changed` (and enablement change).
-    private(set) var indexRevision = 0
+    package private(set) var indexRevision = 0
     /// Grows with every `incidents_changed`.
-    private(set) var incidentsRevision = 0
+    package private(set) var incidentsRevision = 0
     /// Camera-days the device could not search (not retried by the core).
-    private(set) var failedDays: [RecordingCamera: Set<Int64>] = [:]
+    package private(set) var failedDays: [RecordingCamera: Set<Int64>] = [:]
     /// The camera groups for incidents.
-    private(set) var groups = IncidentGroups()
+    package private(set) var groups = IncidentGroups()
     /// Every known download, in the order they appeared.
-    private(set) var downloads: [DownloadProgress] = []
+    package private(set) var downloads: [DownloadProgress] = []
     /// Cover thumbnails the screens show.
-    private(set) var thumbnails = ThumbnailBoard()
+    package private(set) var thumbnails = ThumbnailBoard()
     /// How many keyframes were decoded into small images and put back.
-    private(set) var thumbnailsPut = 0
+    package private(set) var thumbnailsPut = 0
     /// A message for the user (shown at the bottom of a recordings window).
-    var notice: String?
+    package var notice: String?
 
     @ObservationIgnored private var board = DownloadBoard()
     @ObservationIgnored private var publishScheduled = false
@@ -75,28 +81,28 @@ final class RecordingsModel {
     @ObservationIgnored private let decodeQueue = DispatchQueue(label: "nvrview.thumbnails", qos: .utility)
     /// Moves a download's folder to the Trash (the system's recycle; the
     /// self-test records it instead).
-    @ObservationIgnored var trasher: (URL) -> Void = { url in
+    @ObservationIgnored package var trasher: (URL) -> Void = { url in
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         NSWorkspace.shared.recycle([url]) { _, error in
             if let error { NSLog("could not move a download to the Trash: %@", error.localizedDescription) }
         }
     }
     /// Shows files in the Finder (the self-test records it instead).
-    @ObservationIgnored var revealer: ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }
+    @ObservationIgnored package var revealer: ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }
     /// The computer's time (fixed by tests).
-    @ObservationIgnored var now: () -> Date = { Date() }
+    @ObservationIgnored package var now: () -> Date = { Date() }
 
-    init(bridge: CoreBridge, enablementFile: JSONFileStore<RecordingsEnablement>) {
+    package init(bridge: CoreBridge, enablementFile: JSONFileStore<RecordingsEnablement>) {
         self.bridge = bridge
         self.enablementFile = enablementFile
     }
 
     /// The device's offset from UTC: the computer's (FFI-RECORDINGS.md,
     /// Decision 6, until the core reads the device's own zone).
-    var utcOffset: Int { TimeZone.current.secondsFromGMT(for: now()) }
+    package var utcOffset: Int { TimeZone.current.secondsFromGMT(for: now()) }
 
     /// Today on the devices.
-    var today: Int64 { DeviceTime.today(now: now(), utcOffset: utcOffset) }
+    package var today: Int64 { DeviceTime.today(now: now(), utcOffset: utcOffset) }
 
     private func core() -> (any CoreAPI)? {
         guard !closed else { return nil }
@@ -108,7 +114,7 @@ final class RecordingsModel {
     /// Configures recordings with a downloads folder, enables the saved
     /// cameras, and reads the groups and downloads. Without recordings in the
     /// core, nothing is shown.
-    func start(downloads: URL) {
+    package func start(downloads: URL) {
         guard let core = core() else { return }
         try? FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
         let config = #"{"downloads_dir":\#(Self.quoted(downloads.path))}"#
@@ -136,7 +142,7 @@ final class RecordingsModel {
 
     /// The app quits: every open playback closes first (its plays stop on
     /// the device), then nothing more is asked of the core.
-    func shutdown() {
+    package func shutdown() {
         for player in players.values.compactMap(\.value) { player.close() }
         players.removeAll()
         closed = true
@@ -151,13 +157,13 @@ final class RecordingsModel {
 
     /// Calls `body` (once per run of changes) when the index, the
     /// incidents, the groups, or the enabled cameras change. Keep the token.
-    func subscribe(_ body: @escaping () -> Void) -> UUID {
+    package func subscribe(_ body: @escaping () -> Void) -> UUID {
         let token = UUID()
         listeners[token] = body
         return token
     }
 
-    func unsubscribe(_ token: UUID) { listeners[token] = nil }
+    package func unsubscribe(_ token: UUID) { listeners[token] = nil }
 
     private func changed() {
         guard !changeScheduled else { return }
@@ -172,7 +178,7 @@ final class RecordingsModel {
     }
 
     /// A hold number for a window (`nv_recordings_hold_today`).
-    func newHold() -> UInt64 {
+    package func newHold() -> UInt64 {
         defer { nextHold += 1 }
         return nextHold
     }
@@ -180,14 +186,14 @@ final class RecordingsModel {
     // MARK: Enabled cameras
 
     /// Every camera the recordings screens search, in device and channel order.
-    var enabledCameras: [RecordingCamera] {
+    package var enabledCameras: [RecordingCamera] {
         enabled.keys.sorted().flatMap { enabled[$0] ?? [] }
     }
 
-    func isEnabled(_ camera: RecordingCamera) -> Bool { enabled[camera.device]?.contains(camera) == true }
+    package func isEnabled(_ camera: RecordingCamera) -> Bool { enabled[camera.device]?.contains(camera) == true }
 
     /// Turns searching one camera on or off.
-    func setEnabled(_ camera: RecordingCamera, _ on: Bool) {
+    package func setEnabled(_ camera: RecordingCamera, _ on: Bool) {
         var list = enabled[camera.device] ?? []
         if on, !list.contains(camera) {
             list.append(camera)
@@ -202,7 +208,7 @@ final class RecordingsModel {
     }
 
     /// Every camera of a device on, or all off.
-    func setEnabled(device: String, cameras: [RecordingCamera]) {
+    package func setEnabled(device: String, cameras: [RecordingCamera]) {
         enabled[device] = cameras.isEmpty ? nil : cameras
         applyEnablement(device)
         saveEnablement()
@@ -232,24 +238,29 @@ final class RecordingsModel {
 
     // MARK: Analyzing a day's sound
 
-    struct AnalysisKey: Hashable {
-        var camera: RecordingCamera
-        var day: Int64
+    package struct AnalysisKey: Hashable {
+        package var camera: RecordingCamera
+        package var day: Int64
+
+        package init(camera: RecordingCamera, day: Int64) {
+            self.camera = camera
+            self.day = day
+        }
     }
 
     /// The analysis of a camera's day, if one was asked for.
-    func analysis(_ camera: RecordingCamera, day: Int64) -> SoundAnalysis.Entry? {
+    package func analysis(_ camera: RecordingCamera, day: Int64) -> SoundAnalysis.Entry? {
         soundAnalyses[AnalysisKey(camera: camera, day: DeviceTime.dayStart(day))]
     }
 
     /// Whether a camera's day is waiting for or being analyzed.
-    func isAnalyzing(_ camera: RecordingCamera, day: Int64) -> Bool { analysis(camera, day: day)?.active == true }
+    package func isAnalyzing(_ camera: RecordingCamera, day: Int64) -> Bool { analysis(camera, day: day)?.active == true }
 
     /// Asks for the sound of these cameras' day to be analyzed from the
     /// downloaded video (`nv_sound_analyze_day`); progress and the outcome
     /// come back as `sound_analyze` events. Sets `notice` when nothing can
     /// be asked.
-    func analyzeSound(of cameras: [RecordingCamera], day: Int64) {
+    package func analyzeSound(of cameras: [RecordingCamera], day: Int64) {
         guard let core = core() else { return }
         guard downloadsFolder != nil else {
             notice = SoundAnalysis.failure(reason: "no_source")
@@ -272,7 +283,7 @@ final class RecordingsModel {
     }
 
     /// Cancels a camera's analysis (`nv_sound_analyze_cancel`).
-    func cancelAnalysis(_ camera: RecordingCamera, day: Int64) {
+    package func cancelAnalysis(_ camera: RecordingCamera, day: Int64) {
         guard let core = core(), let e = analysis(camera, day: day), e.active else { return }
         do throws(CoreStatus) { try core.soundAnalyzeCancel(e.request) } catch {
             // Already over: its own event says how.
@@ -298,16 +309,16 @@ final class RecordingsModel {
 
     // MARK: Listening for sounds
 
-    func isListening(_ camera: RecordingCamera) -> Bool { listening[camera.device]?.contains(camera) == true }
+    package func isListening(_ camera: RecordingCamera) -> Bool { listening[camera.device]?.contains(camera) == true }
 
     /// Every camera that listens for sounds.
-    var listeningCameras: [RecordingCamera] { listening.keys.sorted().flatMap { listening[$0] ?? [] } }
+    package var listeningCameras: [RecordingCamera] { listening.keys.sorted().flatMap { listening[$0] ?? [] } }
 
     /// Turns listening for sounds on or off for a camera (`nv_sound_watch`:
     /// its sub-stream stays open with no tile; at most four per device).
     /// Returns false (with `notice` set) when it was refused.
     @discardableResult
-    func setListening(_ camera: RecordingCamera, _ on: Bool, save: Bool = true) -> Bool {
+    package func setListening(_ camera: RecordingCamera, _ on: Bool, save: Bool = true) -> Bool {
         if on, !SoundListening.canAdd(camera, to: listeningCameras) {
             notice = "At most \(SoundListening.maxPerDevice) cameras of a device listen for sounds"
             return false
@@ -344,7 +355,7 @@ final class RecordingsModel {
     }
 
     /// Loudness lanes for `cameras` over `[start, end]` (memory only).
-    func loudness(start: Int64, end: Int64, bucket: Int64, cameras: [RecordingCamera]) -> LoudnessAnswer? {
+    package func loudness(start: Int64, end: Int64, bucket: Int64, cameras: [RecordingCamera]) -> LoudnessAnswer? {
         guard !cameras.isEmpty else { return nil }
         let q = LoudnessScale.query(start: start, end: end, bucket: bucket, cameras: cameras)
         return query { core throws(CoreStatus) in try core.recordingsLoudness(query: q) }
@@ -352,7 +363,7 @@ final class RecordingsModel {
 
     /// The core named a device differently (first connection): its cameras
     /// follow.
-    func rekey(_ old: String, to new: String) {
+    package func rekey(_ old: String, to new: String) {
         guard old != new else { return }
         if let heard = listening[old] {
             for c in heard { setListening(c, false, save: false) }
@@ -368,7 +379,7 @@ final class RecordingsModel {
     }
 
     /// A device the user removed is no longer searched.
-    func deviceRemoved(_ key: String) {
+    package func deviceRemoved(_ key: String) {
         for c in listening[key] ?? [] { setListening(c, false) }
         guard enabled[key] != nil else { return }
         setEnabled(device: key, cameras: [])
@@ -379,7 +390,7 @@ final class RecordingsModel {
     /// Asks for `day` of `cameras` to be searched (and refreshes it with
     /// `force`). Returns a message when the core refused.
     @discardableResult
-    func want(_ cameras: [RecordingCamera], days: [Int64], force: Bool = false) -> String? {
+    package func want(_ cameras: [RecordingCamera], days: [Int64], force: Bool = false) -> String? {
         guard available, !cameras.isEmpty, !days.isEmpty, let core = core() else { return nil }
         for c in cameras {
             for d in days { failedDays[c]?.remove(d) }
@@ -395,7 +406,7 @@ final class RecordingsModel {
     /// Asks for months' calendars alone (minor 7; a calendar paged to
     /// another month). Returns a message when the core refused.
     @discardableResult
-    func want(_ cameras: [RecordingCamera], months: [Int64]) -> String? {
+    package func want(_ cameras: [RecordingCamera], months: [Int64]) -> String? {
         guard available, !cameras.isEmpty, !months.isEmpty, let core = core() else { return nil }
         do throws(CoreStatus) {
             try core.recordingsWant(json: RecordingsRequest.want(cameras, months: months))
@@ -406,14 +417,14 @@ final class RecordingsModel {
     }
 
     /// Keeps today fresh for a window's cameras (`cameras` nil releases).
-    func hold(_ hold: UInt64, cameras: [RecordingCamera]?) {
+    package func hold(_ hold: UInt64, cameras: [RecordingCamera]?) {
         guard available, let core = core() else { return }
         let json = cameras.flatMap { $0.isEmpty ? nil : RecordingsRequest.hold($0) }
         try? core.recordingsHoldToday(hold, json: json)
     }
 
     /// Whether some enabled device is searching (and how many camera-days wait).
-    var searching: (busy: Bool, pendingDays: Int, waitingDevice: Bool) {
+    package var searching: (busy: Bool, pendingDays: Int, waitingDevice: Bool) {
         let states = indexStates.filter { enabled[$0.key] != nil }.values
         return (
             states.contains { $0.state == "busy" }, states.reduce(0) { $0 + $1.pendingDays },
@@ -430,30 +441,30 @@ final class RecordingsModel {
         return T.parse(answer: json)
     }
 
-    func calendar(start: Int64, end: Int64, cameras: [RecordingCamera]) -> CalendarAnswer? {
+    package func calendar(start: Int64, end: Int64, cameras: [RecordingCamera]) -> CalendarAnswer? {
         guard !cameras.isEmpty else { return nil }
         let q = RecordingsRequest.query(start: start, end: end, cameras: cameras)
         return query { core throws(CoreStatus) in try core.recordingsCalendar(query: q) }
     }
 
-    func spans(start: Int64, end: Int64, cameras: [RecordingCamera]) -> SpansAnswer? {
+    package func spans(start: Int64, end: Int64, cameras: [RecordingCamera]) -> SpansAnswer? {
         guard !cameras.isEmpty else { return nil }
         let q = RecordingsRequest.query(start: start, end: end, cameras: cameras)
         return query { core throws(CoreStatus) in try core.recordingsSpans(query: q) }
     }
 
-    func events(start: Int64, end: Int64, cameras: [RecordingCamera]) -> EventsAnswer? {
+    package func events(start: Int64, end: Int64, cameras: [RecordingCamera]) -> EventsAnswer? {
         guard !cameras.isEmpty else { return nil }
         let q = RecordingsRequest.query(start: start, end: end, cameras: cameras)
         return query { core throws(CoreStatus) in try core.recordingsEvents(query: q) }
     }
 
-    func incidents(start: Int64, end: Int64, cameras: [RecordingCamera]?, group: String?) -> IncidentsAnswer? {
+    package func incidents(start: Int64, end: Int64, cameras: [RecordingCamera]?, group: String?) -> IncidentsAnswer? {
         let q = RecordingsRequest.query(start: start, end: end, cameras: cameras, group: group)
         return query { core throws(CoreStatus) in try core.incidentsGet(query: q) }
     }
 
-    func incident(_ key: String) -> Incident? {
+    package func incident(_ key: String) -> Incident? {
         let answer: IncidentAnswer? = query { core throws(CoreStatus) in try core.incidentGet(key: key) }
         return answer?.incident
     }
@@ -463,7 +474,7 @@ final class RecordingsModel {
     /// Applies an edit; the incidents reload on the `incidents_changed` that
     /// follows. Returns the resulting keys, or nil (with `notice` set).
     @discardableResult
-    func edit(_ edit: IncidentEdit) -> [String]? {
+    package func edit(_ edit: IncidentEdit) -> [String]? {
         guard let core = core() else { return nil }
         do throws(CoreStatus) {
             let answer = try core.incidentEdit(json: edit.json)
@@ -483,7 +494,7 @@ final class RecordingsModel {
     /// Locks or unlocks an incident; tells the user when its video is not
     /// being kept.
     @discardableResult
-    func lock(_ key: String, _ locked: Bool) -> LockAnswer? {
+    package func lock(_ key: String, _ locked: Bool) -> LockAnswer? {
         guard let core = core() else { return nil }
         do throws(CoreStatus) {
             let answer = LockAnswer.parse(answer: try core.incidentLock(key: key, locked: locked))
@@ -506,7 +517,7 @@ final class RecordingsModel {
     /// Replaces the camera groups. Renaming or changing a group changes the
     /// keys of its incidents (edits of locked incidents follow).
     @discardableResult
-    func putGroups(_ new: IncidentGroups) -> Bool {
+    package func putGroups(_ new: IncidentGroups) -> Bool {
         guard let core = core() else { return false }
         do throws(CoreStatus) {
             try core.cameraGroupsPut(json: new.putJSON)
@@ -521,7 +532,7 @@ final class RecordingsModel {
     // MARK: Thumbnails
 
     /// A view shows `key`: asks the core for it unless it is known.
-    func requestThumbnail(_ key: ThumbnailKey) {
+    package func requestThumbnail(_ key: ThumbnailKey) {
         guard available else { return }
         guard thumbnails.needsRequest(key) else {
             thumbnails.touch(key)
@@ -577,7 +588,7 @@ final class RecordingsModel {
     }
 
     /// The window moved on: drops the fetches still queued for it.
-    func cancelThumbnails() {
+    package func cancelThumbnails() {
         guard let core = core() else { return }
         try? core.thumbnailCancel(key: nil)
         thumbnails.forgetPending()
@@ -586,7 +597,7 @@ final class RecordingsModel {
     // MARK: Downloads
 
     /// Queues an incident's download (every camera, main stream).
-    func download(incident key: String) {
+    package func download(incident key: String) {
         guard let core = core() else { return }
         do throws(CoreStatus) {
             let answer = QueuedDownload.parse(answer: try core.downloadIncident(json: RecordingsRequest.download(incident: key)))
@@ -604,7 +615,7 @@ final class RecordingsModel {
     /// Queues a range download of `cameras` (`nv_download_range`); nil with
     /// `notice` set when it was refused.
     @discardableResult
-    func downloadRange(
+    package func downloadRange(
         cameras: [RecordingCamera], startMs: Int64, endMs: Int64, name: String?, options: ExportOptions,
         quality: ExportQuality = .main
     ) -> QueuedDownload? {
@@ -629,7 +640,7 @@ final class RecordingsModel {
 
     /// Runs `body` once, on the main actor, when download `id` is done or failed
     /// (at once if it already is).
-    func whenFinished(_ id: String, _ body: @escaping (DownloadProgress) -> Void) {
+    package func whenFinished(_ id: String, _ body: @escaping (DownloadProgress) -> Void) {
         if let d = downloads.first(where: { $0.download == id }), d.state == "done" || d.state == "failed" {
             body(d)
         } else {
@@ -647,14 +658,14 @@ final class RecordingsModel {
         }
     }
 
-    func pause(_ id: String, _ paused: Bool) {
+    package func pause(_ id: String, _ paused: Bool) {
         guard let core = core() else { return }
         do throws(CoreStatus) { try core.downloadPause(id, camera: nil, paused: paused) } catch {
             notice = "Could not \(paused ? "pause" : "resume") (status \(error.code))"
         }
     }
 
-    func retry(_ id: String) {
+    package func retry(_ id: String) {
         guard let core = core() else { return }
         do throws(CoreStatus) { try core.downloadRetry(id, camera: nil) } catch {
             notice = "Could not retry (status \(error.code))"
@@ -662,7 +673,7 @@ final class RecordingsModel {
     }
 
     /// Forgets a download (its files stay); a running one is paused first.
-    func forget(_ id: String) {
+    package func forget(_ id: String) {
         guard let core = core() else { return }
         do throws(CoreStatus) { try core.downloadForget(id, deletePartial: true) } catch {
             notice = error == .invalidArgument ? "Pause the download first" : "Could not forget (status \(error.code))"
@@ -671,7 +682,7 @@ final class RecordingsModel {
 
     /// Moves a download's folder to the Trash, once the core has stopped
     /// writing there (its `download_removed` event).
-    func trash(_ id: String) {
+    package func trash(_ id: String) {
         guard let core = core() else { return }
         do throws(CoreStatus) {
             guard let answer = TrashAnswer.parse(answer: try core.downloadTrash(id)) else { return }
@@ -683,7 +694,7 @@ final class RecordingsModel {
     }
 
     /// Shows a download's files (or its folder) in the Finder.
-    func reveal(_ d: DownloadProgress) {
+    package func reveal(_ d: DownloadProgress) {
         let files = d.outputs.map { URL(fileURLWithPath: $0) }
         if !files.isEmpty {
             revealer(files)
@@ -702,12 +713,12 @@ final class RecordingsModel {
 
     /// An incident's finished download (the newest), whose files a follow
     /// cut or a grid is made from.
-    func finishedDownload(of incident: String) -> DownloadProgress? {
+    package func finishedDownload(of incident: String) -> DownloadProgress? {
         downloads.last { $0.incident == incident && $0.state == "done" }
     }
 
     /// `nv_edit_compute` of kind `trim`.
-    func trimPlan(json: String) -> Result<TrimPlan, EditPlanRefusal> {
+    package func trimPlan(json: String) -> Result<TrimPlan, EditPlanRefusal> {
         guard available, let core = core() else { return .failure(.init(text: "Recordings are not available")) }
         do throws(CoreStatus) {
             guard let plan = TrimPlan.parse(try core.editCompute(json: json)) else {
@@ -720,7 +731,7 @@ final class RecordingsModel {
     }
 
     /// `nv_still_plan`.
-    func stillPlan(json: String) -> Result<StillPlan, EditPlanRefusal> {
+    package func stillPlan(json: String) -> Result<StillPlan, EditPlanRefusal> {
         guard available, let core = core() else { return .failure(.init(text: "Recordings are not available")) }
         do throws(CoreStatus) {
             guard let plan = StillPlan.parse(try core.stillPlan(json: json)) else {
@@ -744,7 +755,7 @@ final class RecordingsModel {
 
     /// The newest finished range download that holds `camera` for the whole
     /// of `startMs...endMs`.
-    func finishedRange(covering camera: RecordingCamera, startMs: Int64, endMs: Int64) -> DownloadProgress? {
+    package func finishedRange(covering camera: RecordingCamera, startMs: Int64, endMs: Int64) -> DownloadProgress? {
         downloads.last { d in
             guard d.state == "done", let r = d.range, r.start * 1000 <= startMs, endMs <= r.end * 1000 else { return false }
             return d.cameras.contains { $0.camera == camera && $0.output != nil }
@@ -752,7 +763,7 @@ final class RecordingsModel {
     }
 
     /// `nv_edit_compute`: the plan, or why there is none.
-    func editPlan(json: String) -> Result<EditPlan, EditPlanRefusal> {
+    package func editPlan(json: String) -> Result<EditPlan, EditPlanRefusal> {
         guard available, let core = core() else { return .failure(.init(text: "Recordings are not available")) }
         do throws(CoreStatus) {
             guard let plan = EditPlan.parse(try core.editCompute(json: json)) else {
@@ -774,16 +785,16 @@ final class RecordingsModel {
 
     /// A weak reference to a window's player, for routing events.
     private final class PlayerRef {
-        weak var value: RecordingsPlayer?
-        init(_ p: RecordingsPlayer) { value = p }
+        package weak var value: RecordingsPlayer?
+        package init(_ p: RecordingsPlayer) { value = p }
     }
 
     @ObservationIgnored private var players: [UInt64: PlayerRef] = [:]
 
-    func makePlayer() -> RecordingsPlayer { RecordingsPlayer(model: self) }
+    package func makePlayer() -> RecordingsPlayer { RecordingsPlayer(model: self) }
 
     /// Opens a playback for `player` (its events go to it).
-    func openPlayback(json: String, cameras: [RecordingCamera], tiers: [StreamTier], player: RecordingsPlayer)
+    package func openPlayback(json: String, cameras: [RecordingCamera], tiers: [StreamTier], player: RecordingsPlayer)
         throws(CoreStatus) -> CoreBridge.OpenedTiles
     {
         guard available, !closed else { throw .unsupported }
@@ -793,26 +804,26 @@ final class RecordingsModel {
         return opened
     }
 
-    func closePlayback(_ playback: UInt64, tiles: [CoreTile]) {
+    package func closePlayback(_ playback: UInt64, tiles: [CoreTile]) {
         players[playback] = nil
         bridge.closePlayback(playback, tiles: tiles)
     }
 
-    func forgetPlaybackTiles(_ tiles: [CoreTile]) { bridge.forgetTiles(tiles) }
+    package func forgetPlaybackTiles(_ tiles: [CoreTile]) { bridge.forgetTiles(tiles) }
 
-    func removePlaybackCamera(_ playback: UInt64, tile: CoreTile) {
+    package func removePlaybackCamera(_ playback: UInt64, tile: CoreTile) {
         bridge.removePlaybackCamera(playback, tile: tile)
     }
 
     /// Restarts a playback camera's play at the position in `tier`.
-    func setPlaybackTier(_ tile: CoreTile, _ tier: StreamTier) {
+    package func setPlaybackTier(_ tile: CoreTile, _ tier: StreamTier) {
         guard !closed else { return }
         do throws(CoreStatus) { try bridge.setPlaybackTileTier(tile, tier) } catch {
             if error != .unknownID { notice = "The player could not change the quality (status \(error.code))" }
         }
     }
 
-    func addPlaybackCamera(_ playback: UInt64, camera: RecordingCamera, tier: StreamTier = .sub) -> CoreTile? {
+    package func addPlaybackCamera(_ playback: UInt64, camera: RecordingCamera, tier: StreamTier = .sub) -> CoreTile? {
         do throws(CoreStatus) {
             return try bridge.addPlaybackCamera(
                 playback, json: PlaybackCamera(camera: camera, tier: tier == .main ? "main" : "sub").json,
@@ -824,25 +835,25 @@ final class RecordingsModel {
     }
 
     /// A playback call that returns at once (play, pause, seek, rate).
-    func playbackCall(_ body: (any CoreAPI) throws(CoreStatus) -> Void) {
+    package func playbackCall(_ body: (any CoreAPI) throws(CoreStatus) -> Void) {
         guard let core = core() else { return }
         do throws(CoreStatus) { try body(core) } catch {
             if error != .unknownID { notice = "The player could not do that (status \(error.code))" }
         }
     }
 
-    func playbackPosition(_ playback: UInt64) -> PlaybackPosition? {
+    package func playbackPosition(_ playback: UInt64) -> PlaybackPosition? {
         guard !closed else { return nil }
         return bridge.playbackPosition(playback)
     }
 
     /// A playback tile's sound through the core's tile audio path.
-    func setPlaybackAudio(_ tile: CoreTile, audible: Bool, volume: Float) {
+    package func setPlaybackAudio(_ tile: CoreTile, audible: Bool, volume: Float) {
         guard !closed else { return }
         try? bridge.setTileAudio(tile, audible: audible, volume: volume)
     }
 
-    func applyPlayback(_ e: PlaybackEvent) {
+    package func applyPlayback(_ e: PlaybackEvent) {
         let id: UInt64
         switch e {
         case .state(let p, _, _, _), .camera(let p, _, _, _, _), .seek(let p, _, _, _), .closed(let p, _): id = p
@@ -854,7 +865,7 @@ final class RecordingsModel {
 
     // MARK: Events
 
-    func apply(_ e: RecordingsEvent) {
+    package func apply(_ e: RecordingsEvent) {
         guard !closed else { return }
         switch e {
         case .index(let device, let state, let pending, _):

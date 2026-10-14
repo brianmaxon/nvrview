@@ -11,7 +11,6 @@ import VideoKit
 package protocol AlertsHost: CaptureHost {
     /// Where the core keeps its data (kept evidence lives under it).
     var coreDataDirectory: URL? { get }
-    var pictureRenderer: PictureRenderer { get }
     /// The on-device alert host, once started.
     var smartAlerts: SmartAlertsController? { get }
     /// The smart-alerts model this app owns.

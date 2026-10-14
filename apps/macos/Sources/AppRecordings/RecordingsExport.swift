@@ -14,14 +14,14 @@ import AppBase
 
 /// The folder the last export went to, kept between launches as a
 /// security-scoped bookmark (a sandboxed build keeps its access).
-struct ExportFolder {
-    static let key = "exportFolderBookmark"
+package struct ExportFolder {
+    package static let key = "exportFolderBookmark"
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    package init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     /// The remembered folder, if it still exists.
-    var url: URL? {
+    package var url: URL? {
         guard let data = defaults.data(forKey: Self.key) else { return nil }
         var stale = false
         guard
@@ -35,9 +35,9 @@ struct ExportFolder {
         return url
     }
 
-    func forget() { defaults.removeObject(forKey: Self.key) }
+    package func forget() { defaults.removeObject(forKey: Self.key) }
 
-    func remember(_ folder: URL) {
+    package func remember(_ folder: URL) {
         let data = (try? folder.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil))
             ?? (try? folder.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
         if let data { defaults.set(data, forKey: Self.key) }
@@ -46,9 +46,9 @@ struct ExportFolder {
 
 /// The system panels an export asks its destination with; the self-test
 /// replaces them.
-enum ExportPanels {
+package enum ExportPanels {
     @MainActor
-    static func save(name: String, directory: URL?, type: UTType) -> URL? {
+    package static func save(name: String, directory: URL?, type: UTType) -> URL? {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
         panel.directoryURL = directory
@@ -58,7 +58,7 @@ enum ExportPanels {
     }
 
     @MainActor
-    static func folder(message: String, directory: URL?) -> URL? {
+    package static func folder(message: String, directory: URL?) -> URL? {
         let panel = NSOpenPanel()
         panel.message = message
         panel.prompt = "Save Here"
@@ -74,18 +74,18 @@ enum ExportPanels {
 /// One export running (or just ended), for the strip above the transport.
 @MainActor
 @Observable
-final class ExportJob {
-    let title: String
-    let control = ExportControl()
-    private(set) var fraction = 0.0
-    private(set) var running = true
+package final class ExportJob {
+    package let title: String
+    package let control = ExportControl()
+    package private(set) var fraction = 0.0
+    package private(set) var running = true
     /// What happened, once it ended.
-    private(set) var result: String?
+    package private(set) var result: String?
     /// The files written.
-    private(set) var files: [URL] = []
+    package private(set) var files: [URL] = []
     @ObservationIgnored private var timer: Timer?
 
-    init(title: String) {
+    package init(title: String) {
         self.title = title
         let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
@@ -98,9 +98,9 @@ final class ExportJob {
         if running { fraction = control.fraction }
     }
 
-    func cancel() { control.cancel() }
+    package func cancel() { control.cancel() }
 
-    func finish(_ outcomes: [ExportOutcome]) {
+    package func finish(_ outcomes: [ExportOutcome]) {
         timer?.invalidate()
         timer = nil
         running = false
@@ -117,86 +117,86 @@ final class ExportJob {
 }
 
 /// A range download being set up: the Export tab's range and checked cameras.
-struct RangeDownloadRequest: Equatable {
-    var startMs: Int64
-    var endMs: Int64
-    var cameras: Set<RecordingCamera>
-    var name = ""
+package struct RangeDownloadRequest: Equatable {
+    package var startMs: Int64
+    package var endMs: Int64
+    package var cameras: Set<RecordingCamera>
+    package var name = ""
 }
 
 /// What the export menu and keys keep: the points, the switches, the job.
 @MainActor
 @Observable
-final class ExportModel {
+package final class ExportModel {
     /// The points the user set (device-local milliseconds); the window shows
     /// only those inside the scrubber's range (`RecordingsBrowser.points`).
-    var points = InOutPoints()
+    package var points = InOutPoints()
     /// No metadata of the app's own and neutral camera names in what is written.
-    var shareSafe: Bool { didSet { defaults.set(shareSafe, forKey: Self.shareSafeKey) } }
+    package var shareSafe: Bool { didSet { defaults.set(shareSafe, forKey: Self.shareSafeKey) } }
     /// Trim by re-encoding to start at the exact picture, instead of copying from the keyframe.
-    var trimExact = false
-    var codec = ExportCodec.h264
-    private(set) var job: ExportJob?
-    @ObservationIgnored var folder = ExportFolder() { didSet { folderPath = directFolder?.path } }
+    package var trimExact = false
+    package var codec = ExportCodec.h264
+    package private(set) var job: ExportJob?
+    @ObservationIgnored package var folder = ExportFolder() { didSet { folderPath = directFolder?.path } }
     /// The Export tab's choices: the kind (nil: the first that applies), the
     /// cameras checked (nil: all), the stream (nil: Settings' choice), sound.
-    var kind: ExportKind?
-    var cameras: Set<RecordingCamera>?
-    var qualityChoice: ExportQuality?
-    var sound = true
+    package var kind: ExportKind?
+    package var cameras: Set<RecordingCamera>?
+    package var qualityChoice: ExportQuality?
+    package var sound = true
     /// Exports go straight into the remembered folder, with no save panel
     /// (set by "Choose…" in the tab; "Ask Each Time" clears it).
-    var direct: Bool { didSet { defaults.set(direct, forKey: Self.directKey); folderPath = directFolder?.path } }
+    package var direct: Bool { didSet { defaults.set(direct, forKey: Self.directKey); folderPath = directFolder?.path } }
     /// The folder shown in the tab, when exports go straight into one.
-    private(set) var folderPath: String?
+    package private(set) var folderPath: String?
     /// Settings > Capture's "Export from" (the app sets it).
-    @ObservationIgnored var defaultQuality: () -> ExportQuality = { .main }
+    @ObservationIgnored package var defaultQuality: () -> ExportQuality = { .main }
     /// The save and folder panels (the self-test answers these itself).
-    @ObservationIgnored var saveURL: @MainActor (_ name: String, _ directory: URL?, _ type: UTType) -> URL? = ExportPanels.save
-    @ObservationIgnored var chooseFolder: @MainActor (_ message: String, _ directory: URL?) -> URL? = ExportPanels.folder
+    @ObservationIgnored package var saveURL: @MainActor (_ name: String, _ directory: URL?, _ type: UTType) -> URL? = ExportPanels.save
+    @ObservationIgnored package var chooseFolder: @MainActor (_ message: String, _ directory: URL?) -> URL? = ExportPanels.folder
     @ObservationIgnored private let defaults: UserDefaults
-    static let shareSafeKey = "exportShareSafe"
-    static let directKey = "exportDirect"
+    package static let shareSafeKey = "exportShareSafe"
+    package static let directKey = "exportDirect"
 
     /// The stream a download reads: the tab's choice, else the setting.
-    var quality: ExportQuality { qualityChoice ?? defaultQuality() }
+    package var quality: ExportQuality { qualityChoice ?? defaultQuality() }
 
     /// The remembered folder when exports go straight into it.
-    var directFolder: URL? { direct ? folder.url : nil }
+    package var directFolder: URL? { direct ? folder.url : nil }
 
     /// "Choose…" in the tab: exports go straight into `url` from now on.
-    func choose(folder url: URL) {
+    package func choose(folder url: URL) {
         folder.remember(url)
         direct = true
         folderPath = url.path
     }
 
     /// "Ask Each Time": the save panels come back.
-    func askEachTime() { direct = false }
+    package func askEachTime() { direct = false }
 
-    init(defaults: UserDefaults = .standard) {
+    package init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         shareSafe = defaults.bool(forKey: Self.shareSafeKey)
         direct = defaults.bool(forKey: Self.directKey)
         folderPath = direct ? ExportFolder(defaults: defaults).url?.path : nil
     }
 
-    var busy: Bool { job?.running == true }
+    package var busy: Bool { job?.running == true }
 
-    func begin(_ title: String) -> ExportJob? {
+    package func begin(_ title: String) -> ExportJob? {
         guard !busy else { return nil }
         let j = ExportJob(title: title)
         job = j
         return j
     }
 
-    func dismissJob() {
+    package func dismissJob() {
         if job?.running == false { job = nil }
     }
 
     /// The options every request carries: the share-safe switch and the
     /// remembered folder (`dest`), which the core checks.
-    func options(useFolder: Bool = true) -> ExportOptions {
+    package func options(useFolder: Bool = true) -> ExportOptions {
         ExportOptions(dest: useFolder ? folder.url?.path : nil, shareSafe: shareSafe)
     }
 }
@@ -205,36 +205,36 @@ extension RecordingsBrowser {
     // MARK: In and out points
 
     /// The scrubber's range as a closed range, if it spans anything.
-    var scrubSpan: ClosedRange<Int64>? {
+    package var scrubSpan: ClosedRange<Int64>? {
         guard let r = scrubRange, r.end > r.start else { return nil }
         return r.start...r.end
     }
 
     /// The points inside the scrubber's range.
-    var points: InOutPoints { scrubSpan.map { export.points.kept(within: $0) } ?? InOutPoints() }
+    package var points: InOutPoints { scrubSpan.map { export.points.kept(within: $0) } ?? InOutPoints() }
 
     /// The span the points select in the scrubber's range, nil when none is set or it is too short.
-    var pointsWindow: (start: Int64, end: Int64)? {
+    package var pointsWindow: (start: Int64, end: Int64)? {
         guard let span = scrubSpan, !points.isEmpty else { return nil }
         return points.window(in: span)
     }
 
-    func markIn() {
+    package func markIn() {
         guard let span = scrubSpan else { return }
         export.points = points
         export.points.setIn(driver.transport.positionMs, within: span)
     }
 
-    func markOut() {
+    package func markOut() {
         guard let span = scrubSpan else { return }
         export.points = points
         export.points.setOut(driver.transport.positionMs, within: span)
     }
 
-    func clearPoints() { export.points.clear() }
+    package func clearPoints() { export.points.clear() }
 
     /// A press or drag on the scrubber moves a point.
-    func movePoint(_ handle: InOutPoints.Handle, to ms: Int64) {
+    package func movePoint(_ handle: InOutPoints.Handle, to ms: Int64) {
         guard let span = scrubSpan else { return }
         export.points = points
         export.points.move(handle, to: ms, within: span)
@@ -245,7 +245,7 @@ extension RecordingsBrowser {
     /// Where an export goes: one file by a save panel, several by a folder
     /// panel (their names from `suggested`); the folder is remembered.
     /// Names already taken in a chosen folder get " (2)" and so on.
-    func destinations(suggested: [String], type: UTType, message: String) -> [URL]? {
+    package func destinations(suggested: [String], type: UTType, message: String) -> [URL]? {
         guard let first = suggested.first else { return nil }
         if let folder = export.directFolder {
             var taken = Set<String>()
@@ -273,7 +273,7 @@ extension RecordingsBrowser {
         }
     }
 
-    static func free(_ url: URL, taken: Set<String>) -> URL {
+    package static func free(_ url: URL, taken: Set<String>) -> URL {
         let stem = url.deletingPathExtension().lastPathComponent, ext = url.pathExtension
         var candidate = url
         var n = 1
@@ -286,7 +286,7 @@ extension RecordingsBrowser {
 
     /// Runs `work` as the window's export: off the main thread, with a
     /// progress strip and a cancel.
-    func run(_ title: String, work: @escaping @Sendable (ExportControl) async -> [ExportOutcome]) {
+    package func run(_ title: String, work: @escaping @Sendable (ExportControl) async -> [ExportOutcome]) {
         guard let job = export.begin(title) else {
             message = "Wait for the export in progress, or cancel it"
             return
@@ -308,7 +308,7 @@ extension RecordingsBrowser {
     /// Trims the cameras (all of the incident's, when nil) to the in and out
     /// points. From the incident's download when it has one; otherwise the
     /// range is downloaded first, then trimmed.
-    func trim(cameras chosen: [RecordingCamera]?) {
+    package func trim(cameras chosen: [RecordingCamera]?) {
         guard let window = pointsWindow ?? scrubSpan.map({ ($0.lowerBound, $0.upperBound) }) else {
             message = "Set an in point and an out point first (I and O)"
             return
@@ -343,7 +343,7 @@ extension RecordingsBrowser {
     }
 
     /// Plans the trim with the core and writes it where the user says.
-    func startTrim(download: String, cameras: [RecordingCamera]?, window: (start: Int64, end: Int64)) {
+    package func startTrim(download: String, cameras: [RecordingCamera]?, window: (start: Int64, end: Int64)) {
         func request(_ options: ExportOptions) -> String {
             ExportRequest.trim(
                 download: download, cameras: cameras, inMs: window.start, outMs: window.end, exact: export.trimExact, options: options)
@@ -388,7 +388,7 @@ extension RecordingsBrowser {
 
     /// Writes the follow cut or a grid of the incident's downloaded files,
     /// cut to the points when they are set, as an MP4.
-    func exportEdit(_ view: PlayerView) {
+    package func exportEdit(_ view: PlayerView) {
         guard let kind = view.edit else { return }
         guard let e = editable else {
             message = "Download the incident to export a follow cut or a grid"
@@ -425,7 +425,7 @@ extension RecordingsBrowser {
     // MARK: Range download
 
     /// Queues the Export tab's download; the Downloads tab lists it.
-    func downloadRange(_ request: RangeDownloadRequest) {
+    package func downloadRange(_ request: RangeDownloadRequest) {
         let cameras = self.cameras.filter { request.cameras.contains($0) }
         var options = ExportOptions(shareSafe: export.shareSafe)
         if let folder = export.directFolder { options.dest = folder.path }
@@ -444,7 +444,7 @@ extension RecordingsBrowser {
     // MARK: Still pictures
 
     /// Saves the current picture, or one per camera, as PNG or JPEG.
-    func saveStills(eachCamera: Bool) {
+    package func saveStills(eachCamera: Bool) {
         guard !export.busy else {
             message = "Wait for the export in progress, or cancel it"
             return

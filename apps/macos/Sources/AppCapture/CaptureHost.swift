@@ -1,6 +1,7 @@
 import AppBase
 import Foundation
 import NVRCore
+import VideoKit
 
 /// Where recordings and saved pictures go unless the user chose a folder.
 package enum CaptureDefaults {
@@ -27,6 +28,7 @@ package protocol CaptureHost: AppHost {
     var shareSafeNames: Bool { get set }
     var recordingsFolder: URL { get set }
     var recordFrom: RecordQuality { get set }
+    var pictureRenderer: PictureRenderer { get }
     var maxRecordingMinutes: Int { get set }
     var maxRecordingGB: Double { get set }
 

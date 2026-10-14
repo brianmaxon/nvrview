@@ -6,6 +6,7 @@ import Foundation
 import FakeCore
 import NVRCore
 import VideoKit
+import AppRecordings
 
 // The recordings window, playback, edits, export, sound analysis (fake and real core): the self-test's "recordings" steps (scripts/macos-selftest-areas.txt).
 // Part of SelfTest (SelfTest.swift has the order of the steps and the shared helpers).
