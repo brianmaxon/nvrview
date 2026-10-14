@@ -180,10 +180,10 @@ public static class ExportRequest
     }
 
     /// <summary><c>nv_download_range</c>: whole seconds, the start rounded down and the end up.</summary>
-    public static string Range(long startMs, long endMs, IEnumerable<RecordingCamera> cameras, string? name, ExportOptions options)
+    public static string Range(long startMs, long endMs, IEnumerable<RecordingCamera> cameras, string? name, ExportOptions options, ExportQuality quality = ExportQuality.Main)
     {
         long start = DeviceTime.FloorDiv(startMs, 1000), end = -DeviceTime.FloorDiv(-endMs, 1000);
-        var list = new JsonArray([.. cameras.Select(c => (JsonNode)new JsonObject { ["camera"] = CameraNode(c), ["tier"] = "main" })]);
+        var list = new JsonArray([.. cameras.Select(c => (JsonNode)new JsonObject { ["camera"] = CameraNode(c), ["tier"] = quality.Tier() })]);
         var o = new JsonObject { ["start"] = start, ["end"] = end, ["cameras"] = list };
         if (!string.IsNullOrWhiteSpace(name))
         {

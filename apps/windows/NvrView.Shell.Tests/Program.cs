@@ -106,6 +106,7 @@ internal static class Program
         RecordingsSoundTests.Run();
         EditPlanTests.Run();
         ExportTests.Run();
+        ExportPanelTests.Run();
         PtzTests.Run();
         PacingTests.Run();
         PlayerTileViewsTests.Run();

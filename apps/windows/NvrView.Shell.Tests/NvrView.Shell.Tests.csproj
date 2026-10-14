@@ -14,6 +14,7 @@
   </ItemGroup>
   <ItemGroup>
     <!-- Vectors shared with the Mac app's tests, beside the test binary. -->
+    <None Include="../../../fixtures/synthetic/export-panel.json" Link="export-panel.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../../fixtures/synthetic/tile-views.json" Link="tile-views.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
