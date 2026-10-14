@@ -103,24 +103,35 @@ internal static class PtzTests
             T.Check(t.End() is null);
         });
 
-        T.Run("ptz: the Alt keys read by key position", () =>
+        T.Run("ptz: the camera keys read by key position", () =>
         {
-            static PtzKey? Key(int vk, int scan = 0, bool alt = true, bool ctrl = false, bool shift = false, bool rep = false, bool text = false) =>
-                PtzKeys.Map(vk, scan, alt, ctrl, shift, rep, text);
+            static PtzKey? Key(int vk, int scan = 0, bool alt = false, bool ctrl = false, bool shift = false, bool rep = false, bool text = false,
+                bool move = true, bool zoom = true) =>
+                PtzKeys.Map(vk, scan, alt, ctrl, shift, rep, text, move, zoom);
+            // A plain arrow steers a camera that pans and tilts; a repeat is the same held move.
             T.Equal(PtzKey.Move(PtzDirection.Left), Key(PtzKeys.VkLeft));
             T.Equal(PtzKey.Move(PtzDirection.Down), Key(PtzKeys.VkDown, rep: true));
-            T.Equal(PtzKey.Zoom(1), Key(0xBB, PtzKeys.ScanEquals));
-            T.Equal(PtzKey.Zoom(-1), Key(0xBD, PtzKeys.ScanMinus));
-            T.Equal(PtzKey.Zoom(1), Key(0xDB, PtzKeys.ScanEquals), "another layout's character on the same position");
-            T.Equal(PtzKey.Preset(1), Key(0x31, 0x02));
-            T.Equal(PtzKey.Preset(9), Key(0, 0x0A));
-            T.Equal(PtzKey.Preset(3), Key(0x33));
-            T.Check(Key(0x39, 0x0A, rep: true) is null);
-            T.Check(Key(0x30, 0x0B) is null, "0 is no preset");
-            T.Check(Key(PtzKeys.VkLeft, alt: false) is null);
+            T.Check(Key(PtzKeys.VkUp, move: false) is null);
+            // Alt with an arrow is the selection's, even on a PTZ tile.
+            T.Check(Key(PtzKeys.VkLeft, alt: true) is null);
             T.Check(Key(PtzKeys.VkLeft, shift: true) is null);
             T.Check(Key(PtzKeys.VkLeft, ctrl: true) is null);
             T.Check(Key(PtzKeys.VkLeft, text: true) is null);
+            // = and - zoom alone on a lens tile, and with Alt anywhere.
+            T.Equal(PtzKey.Zoom(1), Key(0xBB, PtzKeys.ScanEquals));
+            T.Equal(PtzKey.Zoom(-1), Key(0xBD, PtzKeys.ScanMinus));
+            T.Equal(PtzKey.Zoom(1), Key(0xDB, PtzKeys.ScanEquals), "another layout's character on the same position");
+            T.Check(Key(0xBB, PtzKeys.ScanEquals, zoom: false) is null);
+            T.Equal(PtzKey.Zoom(-1), Key(0xBD, PtzKeys.ScanMinus, alt: true, zoom: false));
+            T.Check(Key(0xBB, PtzKeys.ScanEquals, rep: true) is null);
+            // Presets stay on Alt.
+            T.Equal(PtzKey.Preset(1), Key(0x31, 0x02, alt: true));
+            T.Equal(PtzKey.Preset(9), Key(0, 0x0A, alt: true));
+            T.Equal(PtzKey.Preset(3), Key(0x33, alt: true));
+            T.Check(Key(0x39, 0x0A, alt: true, rep: true) is null);
+            T.Check(Key(0x30, 0x0B, alt: true) is null, "0 is no preset");
+            T.Check(Key(0x31, 0x02) is null, "a plain digit is no preset");
+            T.Check(Key(0xBB, PtzKeys.ScanEquals, alt: true, shift: true) is null);
             T.Equal(PtzDirection.Up, PtzKeys.ArrowOf(PtzKeys.VkUp));
             T.Check(PtzKeys.ArrowOf(0x41) is null);
         });
@@ -185,16 +196,14 @@ internal static class PtzTests
             rig.Model.KeyUp(PtzDirection.Right);
             T.Check(rig.Model.Held is null);
             T.Equal("stop", rig.Model.Calls[^1].Text);
-            // Alt up while an arrow holds a move ends it too.
+            // Two arrows: the last pressed wins, and the first one's release changes nothing.
             rig.Model.KeyDown(PtzDirection.Up, Camera);
-            rig.Model.ModifiersChanged(altDown: false);
-            T.Check(rig.Model.Held is null && !rig.Core.IsMoving(TileA));
-            // A button hold is not ended by Alt.
-            rig.Model.Press(PtzDirection.Down, Camera);
-            rig.Model.ModifiersChanged(altDown: false);
+            rig.Model.KeyDown(PtzDirection.Left, Camera);
+            rig.Model.KeyUp(PtzDirection.Up);
+            T.Equal("move left 20", rig.Model.Calls[^1].Text);
             T.Equal(Camera, rig.Model.Held);
             rig.Model.StopAll();
-            T.Check(rig.Model.Held is null);
+            T.Check(rig.Model.Held is null && !rig.Core.IsMoving(TileA));
         });
 
         // macOS step ptz-deadman

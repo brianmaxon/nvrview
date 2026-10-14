@@ -292,7 +292,7 @@ public static class MotionClient
     public const string AutoCorrection = "auto_correction";
 }
 
-/// <summary>What an Alt key does to the selected tile's camera (docs/UX.md "Capture and camera keys").</summary>
+/// <summary>What a camera key does to the selected tile's camera (docs/UX.md "Capture and camera keys").</summary>
 public readonly record struct PtzKey(PtzKeyKind Kind, PtzDirection Direction = PtzDirection.Left, int Value = 0)
 {
     public static PtzKey Move(PtzDirection d) => new(PtzKeyKind.Move, d);
@@ -304,15 +304,15 @@ public readonly record struct PtzKey(PtzKeyKind Kind, PtzDirection Direction = P
 
 public enum PtzKeyKind
 {
-    /// <summary>Alt with an arrow: moves while held.</summary>
+    /// <summary>A plain arrow on a tile that pans and tilts: moves while held.</summary>
     Move,
-    /// <summary>Alt with = or -: lens zoom in (+1) or out (-1).</summary>
+    /// <summary>= or - (alone or with Alt): lens zoom in (+1) or out (-1).</summary>
     Zoom,
     /// <summary>Alt with 1 to 9: recalls preset 1 to 9 (the order of the camera's list).</summary>
     Preset,
 }
 
-/// <summary>Reads the Alt keys by key position, so they work on every layout.</summary>
+/// <summary>Reads the camera keys by key position, so they work on every layout.</summary>
 public static class PtzKeys
 {
     // Windows virtual-key codes of the arrows and the digit row.
@@ -327,22 +327,45 @@ public static class PtzKeys
     private const int ScanDigit1 = 0x02;
 
     /// <summary>
-    /// The camera key for a key press: Alt alone (no Ctrl or Shift), never while text is edited. Arrows
-    /// repeat (the model's timer renews the hold, so a repeat changes nothing); the others ignore repeats.
+    /// The camera key for a key press, never while text is edited. A plain arrow (no modifier) is a move when the tile
+    /// pans and tilts (<paramref name="canMove"/>); otherwise, and with Alt, it is the selection's. Arrows repeat (the
+    /// model's timer renews the hold, so a repeat changes nothing); the others ignore repeats. = and - zoom alone when
+    /// the tile has a zoom lens (<paramref name="canZoom"/>) and with Alt always; digits recall presets with Alt only.
     /// <paramref name="scanCode"/> 0 (unknown) falls back to the virtual key for the digits.
     /// </summary>
-    public static PtzKey? Map(int virtualKey, int scanCode, bool alt, bool ctrl, bool shift, bool isRepeat, bool editingText = false)
+    public static PtzKey? Map(int virtualKey, int scanCode, bool alt, bool ctrl, bool shift, bool isRepeat, bool editingText = false,
+        bool canMove = false, bool canZoom = false)
     {
-        if (editingText || !alt || ctrl || shift)
+        if (editingText || ctrl || shift)
         {
             return null;
         }
-        PtzDirection? arrow = ArrowOf(virtualKey);
-        if (arrow is { } d)
+        if (!alt && ArrowOf(virtualKey) is { } d)
         {
-            return PtzKey.Move(d);
+            return canMove ? PtzKey.Move(d) : null;
         }
         if (isRepeat)
+        {
+            return null;
+        }
+        if (!alt)
+        {
+            // Plain = and - zoom a lens tile.
+            if (!canZoom)
+            {
+                return null;
+            }
+            if (scanCode == ScanEquals || (scanCode == 0 && virtualKey is 0xBB or 0x6B))
+            {
+                return PtzKey.Zoom(1);
+            }
+            if (scanCode == ScanMinus || (scanCode == 0 && virtualKey is 0xBD or 0x6D))
+            {
+                return PtzKey.Zoom(-1);
+            }
+            return null;
+        }
+        if (ArrowOf(virtualKey) is not null)
         {
             return null;
         }

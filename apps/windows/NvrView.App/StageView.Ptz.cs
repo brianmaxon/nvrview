@@ -58,7 +58,7 @@ internal sealed partial class StageView
         // Alt keys while the flyout has the keyboard focus (its popup is outside the window's key route).
         content.Root.KeyDown += (_, e) =>
         {
-            if (HandlePtzKey(e.Key, e.KeyStatus.ScanCode, e.KeyStatus.IsMenuKeyDown, repeat: e.KeyStatus.WasKeyDown))
+            if (HandlePtzKey(e.Key, e.KeyStatus.ScanCode, e.KeyStatus.IsMenuKeyDown, repeat: e.KeyStatus.WasKeyDown, plain: false))
             {
                 e.Handled = true;
             }
@@ -159,18 +159,20 @@ internal sealed partial class StageView
     // ---- keys (docs/UX.md "Capture and camera keys") ----
 
     /// <summary>
-    /// An Alt key for the selected tile's camera (<paramref name="alt"/>: Alt is down). False when the key is not one or the tile has
-    /// no such control (the key goes on).
+    /// A camera key for the selected (or focused) tile's camera (<paramref name="alt"/>: Alt is down;
+    /// <paramref name="plain"/>: plain arrows and = and - count, which a flyout's controls keep for themselves). False when
+    /// the key is not one or the tile has no such control (the key goes on).
     /// </summary>
-    public bool HandlePtzKey(VirtualKey key, uint scanCode, bool alt, bool repeat)
+    public bool HandlePtzKey(VirtualKey key, uint scanCode, bool alt, bool repeat, bool plain = true)
     {
         static bool Down(VirtualKey k) => Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
-        if (PtzKeys.Map((int)key, (int)scanCode, alt, Down(VirtualKey.Control), Down(VirtualKey.Shift), repeat) is not { } mapped)
+        StageTile? s = IsFocused && Renderer.Focus is { } focus ? focus.Tile : Selected;
+        if (s is not { IsEmpty: false } || HeaderTileOf(s) is not { } tile)
         {
             return false;
         }
-        StageTile? s = IsFocused && Renderer.Focus is { } focus ? focus.Tile : Selected;
-        if (s is not { IsEmpty: false } || HeaderTileOf(s) is not { } tile)
+        if (PtzKeys.Map((int)key, (int)scanCode, alt, Down(VirtualKey.Control), Down(VirtualKey.Shift), repeat,
+                canMove: plain && tile.PanTilt, canZoom: plain && tile.Lens) is not { } mapped)
         {
             return false;
         }
@@ -213,9 +215,12 @@ internal sealed partial class StageView
                 });
                 break;
         }
-        PtzAltUsed = true;
+        PtzAltUsed = alt;
         return true;
     }
+
+    /// <summary>The window lost the keyboard focus: nothing stays held.</summary>
+    internal void WindowDeactivated() => _viewer.Ptz.StopAll();
 
     /// <summary>An arrow key came up: the move it held ends.</summary>
     public void HandlePtzKeyUp(VirtualKey key)
@@ -226,10 +231,9 @@ internal sealed partial class StageView
         }
     }
 
-    /// <summary>Alt came up: a move an arrow key still holds ends. True if an Alt key was used since Alt went down (the window then keeps Alt from opening the system menu).</summary>
+    /// <summary>Alt came up. True if an Alt key was used since Alt went down (the window then keeps Alt from opening the system menu).</summary>
     public bool HandlePtzAltUp()
     {
-        _viewer.Ptz.ModifiersChanged(altDown: false);
         bool used = PtzAltUsed;
         PtzAltUsed = false;
         return used;

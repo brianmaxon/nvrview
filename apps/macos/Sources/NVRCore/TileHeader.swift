@@ -240,7 +240,7 @@ public struct TileHeaderLayout: Equatable, Sendable {
         }
         m.append(
             .init(.conversation, tile.conversation ? "End Conversation" : "Start Conversation", mac: "T", windows: "T"))
-        if tile.panTilt { m.append(.init(.panTilt, "Pan and Tilt…", mac: "⌥ arrows", windows: "Alt+arrows")) }
+        if tile.panTilt { m.append(.init(.panTilt, "Pan and Tilt…", mac: "arrows", windows: "arrows")) }
         if tile.presets { m.append(.init(.presets, "Presets", mac: "⌥1–9", windows: "Alt+1–9")) }
         if tile.lens { m.append(.init(.lens, "Zoom and Focus…", mac: "⌥= ⌥-", windows: "Alt+= Alt+-")) }
         if tile.zoomed { m.append(.init(.resetZoom, "Reset Zoom", mac: "0", windows: "0")) }
