@@ -196,8 +196,7 @@ Details settled while building it (macOS; Windows does the same except where
   the header shows; a faded header takes no clicks), the Speaker button
   listens to several cameras with Ctrl-click, and the message over the
   stage ("Picture saved" with Show in folder, "Start Recording is coming soon")
-  is a small pill at the bottom, announced to screen readers. Entrance is in its place in the menus but
-  unavailable, because Windows has no entrance insets yet. The Menu key and
+  is a small pill at the bottom, announced to screen readers. The Menu key and
   Shift+F10 open the selected tile's right-click menu at its header. The
   right-click menu is the model's list followed, after a separator, by the
   layout's own items with the same wording as on macOS (Focus, Split Side
@@ -845,7 +844,7 @@ not in a separate system window.
   corner, else opposite the corner indicators), and "Reset Position" in an
   inset's menu returns it there. A column never sits over the sidebar's
   edge-reveal zone or the full-screen toolbar's reveal area. On Windows the
-  same rules move the call cards (DIPs for points; the saved key is
+  same rules move the insets (DIPs for points; the saved key is
   `insetAnchor`, as on the Mac).
 
 Details settled while building it (macOS):
@@ -864,8 +863,9 @@ Details settled while building it (macOS):
   do not fit the stage count in "+N more". The corner is a setting
   (Settings > Alerts), opposite the corner indicators by default. The shared
   rules (`InsetBoard`: order, the 10 s minimum, overflow; `InsetGeometry`:
-  the grid) are in NVRCore with unit tests; Windows has call cards only, so
-  it has no inset board yet (docs/PARITY.md).
+  the grid) are in NVRCore with unit tests; the Windows app has the same
+  rules and vectors (`NvrView.Tiles/AlertInsets.cs`), drawn as cards over the
+  stage with the pictures drawn by the window's renderer (docs/PARITY.md).
 - Moving the column: a press on the header (its labels included) becomes a
   drag after 2 pt, one on the picture after the 6 pt click threshold;
   releasing after a drag never swaps. The column follows the pointer with
@@ -892,6 +892,20 @@ Details settled while building it (macOS):
 - A detection whose stop never arrives counts as ended 120 s after its last
   start, so its inset still closes. Using an inset (a click, hovering, its
   call's activity) restarts the minute.
+- Windows (docs/PARITY.md): the same rules and unit-test vectors. The
+  window's renderer draws each inset's picture as one more tile after the
+  grid, from the shared tile, into a transparent hole of the card; the
+  swapped-in camera is one such picture over the whole stage while the
+  layout's own tiles are not drawn (the layout is untouched), with a header
+  and a close control over it. The whole layout in the return inset is the
+  layout's cells scaled into the inset, each camera's picture fitted into its
+  cell (the miniature does not carry each tile's zoom or Fill). A doorbell's
+  call and a conversation are items of the same board: they take a place in
+  the grid, swap and show in "+N more" like the others, and their inset goes
+  when the call ends. Tab goes to the insets only while the stage has the
+  keyboard (not while the sidebar or a card's own controls do). Entrance is
+  in the tile's menu and in Settings > Cameras; the grid is in Settings >
+  Alerts ("Inset rows", "Inset columns").
 
 ## Doorbell calls
 
@@ -1049,13 +1063,16 @@ Details settled while building it (Windows):
   shared tile, as on the Mac; the card holds its own lease while it shows it.
   The cards stack from the inset corner, newest nearest it, sized like the
   Mac's insets but at least 340 wide for the controls: the corner is a
-  setting (Settings, "Doorbell call cards"), opposite the corner indicators
+  setting (Settings, "Alert insets"), opposite the corner indicators
   by default, as on the Mac. When the doorbell fills the stage (focused, or
   the only tile) the same controls show along the bottom of the stage
-  instead of a card, beside the other calls' cards. Calls are the only
-  insets on Windows: smoke, CO and entrance insets, and the swap, are not
-  there yet. The cards move as one column by their header or picture, as
-  above ("Moving them"; Reset Position is in a card's right-click menu).
+  instead of a card, beside the other calls' cards. The calls are insets of
+  the window's alert board like any other: they take a place in the grid
+  with the smoke, CO and entrance insets, swap with the stage, and show "+N
+  more" when the grid is full; a call's inset closes when the call ends. The
+  cards move as one column by their header or picture, as
+  above ("Moving them"; Reset Position and Inset Grid are in a card's
+  right-click menu).
 - Talk-back needs the camera's permission, which on Windows is the tile
   menu's "Allow talk-back" (a checked item, off by default, kept in
   `view-settings.json` and passed to the core before every start and when it

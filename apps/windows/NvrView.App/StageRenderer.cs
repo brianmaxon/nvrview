@@ -186,6 +186,18 @@ internal sealed unsafe class StageRenderer : IDisposable
         set => Volatile.Write(ref _overlays, value);
     }
 
+    private volatile bool _covered;
+
+    /// <summary>
+    /// The layout's tiles are not drawn (a camera swapped onto the stage by an alert inset is drawn
+    /// as an overlay over the whole stage instead); the layout itself is untouched. Set by the UI thread.
+    /// </summary>
+    public bool Covered
+    {
+        get => _covered;
+        set => _covered = value;
+    }
+
     /// <summary>
     /// A follow cut or grid drawn instead of the tiles and overlays (set by the UI thread; null for the tiles). The edit's files
     /// outlive it: set this to null before disposing them.
@@ -464,6 +476,7 @@ internal sealed unsafe class StageRenderer : IDisposable
         int count = tiles.Length;
         double kx = layout.Width > 0 ? dipW / layout.Width : 1, ky = layout.Height > 0 ? dipH / layout.Height : 1;
         FocusAnimation? focus = Focus;
+        bool covered = Covered;
         int focused = -1;
         float progress = 0;
         if (focus is not null)
@@ -505,7 +518,7 @@ internal sealed unsafe class StageRenderer : IDisposable
                 dest = Rect.Lerp(dest, fisheye is null && !fill ? LayoutGeometry.Fit(pw, ph, stage) : stage, progress);
                 view = Rect.Lerp(cell, stage, progress);
             }
-            bool hidden = focused >= 0 && k != focused && progress >= 1;
+            bool hidden = covered || (focused >= 0 && k != focused && progress >= 1);
             Draw(ref _draws[n], t, dest, fisheye is null ? view : null, pw, ph, hidden, bx, by, fill);
             _draws[n].Dewarp = false;
             if (fisheye is not null && !hidden)

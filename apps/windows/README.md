@@ -636,14 +636,34 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   invariant globalization, `PredefinedCulturesOnly` is off in the project file
   (System.Speech names its recognizers by culture, and without this it
   finds none).
-- **Where it shows.** A card per call in every window (`CallPanel.cs`),
-  stacked from the inset corner (Settings > "Doorbell call cards", else
-  opposite the corner indicators; `InsetGeometry` in `NvrView.Tiles/Insets.cs`,
-  the macOS rules and test vectors), newest nearest it. A card is a header,
-  the camera's live picture, and the controls. When the camera fills the
-  stage (its tile is focused, or is the only one) the controls show along
-  the bottom of the stage instead, with no picture of their own. Calls are
-  the only insets on Windows: no smoke, CO or entrance insets, no swap.
+- **Where it shows.** An inset per call in every window (`CallPanel.cs`), in
+  the window's alert board with the smoke, CO and entrance insets (below),
+  stacked from the inset corner (Settings > "Alert insets", else opposite
+  the corner indicators; `InsetGeometry` in `NvrView.Tiles/Insets.cs`, the
+  macOS rules and test vectors), newest nearest it. A card is a header, the
+  camera's live picture, and the controls. When the camera fills the stage
+  (its tile is focused, swapped in, or is the only one) the controls show
+  along the bottom of the stage instead, with no picture of their own.
+- **Alert insets** (docs/UX.md "Alert insets"). `InsetBoard` (`NvrView.Tiles/
+  AlertInsets.cs`, the macOS rules with the same unit-test vectors) is the
+  window's list of insets: stable order, the 10 s minimum on screen, the
+  grid (`InsetGridSetting`: Settings > Alerts, or this window's own, saved
+  as `insetGrid` in `windows.json`), the swap and its return inset, closing
+  by itself. `StageView.Insets.cs` connects it to the viewer: `Viewer.
+  DetectionReceived` opens smoke and CO insets and entrance people (the
+  per-camera Entrance option, `ViewSettings.Entrance`) for a camera the
+  window does not show; `FollowCalls` gives each open call an item (one per
+  window, detached for a call in a call window) and drops it when the call
+  ends; Tab and Esc go to the insets first (`HandleInsetKey`); the slow tick
+  closes what is due. `CallStack` (`CallPanel.cs`) has a card per inset
+  drawn, the "+N more" chip, and the leases. A click on a card's picture
+  (not a drag) swaps it with the stage: the swapped-in camera is one more
+  overlay picture over the whole stage with `StageRenderer.Covered` hiding
+  the layout's tiles (the layout is untouched, so swapping back restores
+  it), the main stream asked for as a focused tile does, and a header and
+  close control in a cover over the stage that keeps the pointer off the
+  layout. The return inset of a layout draws the layout's own cells in
+  miniature, one overlay picture per leaf, from the shared tiles.
 - **The card's picture.** The card's middle is a transparent hole. Once per
   UI frame `CallStack.Publish` hands the window's `StageRenderer` the hole's
   rectangle (DIPs, relative to the swap chain panel) with the card's own

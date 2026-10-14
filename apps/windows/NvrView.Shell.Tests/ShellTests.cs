@@ -346,7 +346,7 @@ internal static class StoreTests
             List<SavedWindow> windows =
             [
                 new(new WindowContent.Layout("layout-1"), new Rect(10, 20, 1180, 700), SidebarCollapsed: true, SidebarWidth: 280),
-                new(new WindowContent.Group("group-1"), new Rect(0, 0, 800, 500), FullScreen: true, InsetX: 1, InsetY: 0.4),
+                new(new WindowContent.Group("group-1"), new Rect(0, 0, 800, 500), FullScreen: true, InsetX: 1, InsetY: 0.4, InsetGrid: new InsetGridSetting(2, 3)),
                 new(new WindowContent.Scratch("Unsaved", LayoutNode.Split(SplitAxis.Row, 0.5,
                     LayoutNode.Leaf(Fixtures.Cam(2)), LayoutNode.Leaf(Fixtures.Cam(4, lens: 1)))), new Rect(-1200, 300, 900, 600)),
             ];
@@ -366,6 +366,12 @@ internal static class StoreTests
             T.Check(!File.Exists(Path.Combine(dir, "windows.json.tmp")));
             T.Check(back[0].InsetX is null && back[0].InsetY is null && back[1].InsetX == 1 && back[1].InsetY == 0.4, "the inset position is kept, and absent while default");
             T.Check(!text.Contains("insetAnchor", StringComparison.Ordinal) || text.IndexOf("insetAnchor", StringComparison.Ordinal) == text.LastIndexOf("insetAnchor", StringComparison.Ordinal), "only the moved window has one");
+            T.Check(back[0].InsetGrid is null && back[1].InsetGrid == new InsetGridSetting(2, 3), "the window's own inset grid is kept, and absent while it follows the Settings");
+            List<SavedWindow> grids = WindowStore.FromJson(JsonNode.Parse("""
+                [{"content":{"layout":{"id":"x"}},"frame":{"x":1,"y":2,"width":900,"height":600},"insetGrid":{"rows":9,"columns":0}},
+                 {"content":{"layout":{"id":"y"}},"frame":{"x":1,"y":2,"width":900,"height":600},"insetGrid":{"rows":"a"}}]
+                """));
+            T.Check(grids[0].InsetGrid == new InsetGridSetting(4, 1) && grids[1].InsetGrid is null, "a saved inset grid is clamped; a damaged one is ignored");
             List<SavedWindow> bad = WindowStore.FromJson(JsonNode.Parse("""
                 [{"content":{"layout":{"id":"x"}},"frame":{"x":1,"y":2,"width":900,"height":600},"insetAnchor":{"x":3,"y":-1}},
                  {"content":{"layout":{"id":"y"}},"frame":{"x":1,"y":2,"width":900,"height":600},"insetAnchor":{"x":"a"}}]

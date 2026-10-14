@@ -227,9 +227,11 @@ internal sealed partial class StageView : UserControl
                     "F1                           this list"),
             },
         };
-        _calls = new CallStack(viewer, () => FillingCamera);
+        _calls = new CallStack(viewer, this);
         if (!fixedTile)
         {
+            // The swapped-in camera's cover (its header, the pointer kept off the layout) under the insets.
+            root.Children.Add(BuildTakeoverCover());
             root.Children.Add(_calls);
         }
         root.Children.Add(_help);
@@ -271,15 +273,16 @@ internal sealed partial class StageView : UserControl
         if (!fixedTile)
         {
             _viewer.CallsChanged += _calls.Sync;
+            _viewer.DetectionReceived += OnDetection;
         }
         _viewer.Leases.TileChanged += OnTileChanged;
         InstallPtz();
         _viewer.IndicatorsChanged += SyncOverlays;
         _viewer.Settings.Changed += SyncOverlays;
-        // The call cards' corner follows the setting (and the indicators', when it is opposite them).
+        // The insets' corner and grid follow the settings (and the indicators' corner, when the inset corner is opposite it).
         if (!fixedTile)
         {
-            _viewer.Settings.Changed += _calls.InvalidateArrange;
+            _viewer.Settings.Changed += OnInsetSettingsChanged;
         }
         // A mount chosen in Settings (or another window) reaches this window's tiles at once.
         _viewer.Settings.Changed += PublishAllFisheye;
@@ -310,7 +313,7 @@ internal sealed partial class StageView : UserControl
     /// tile's): its call shows its controls over the stage instead of a card.
     /// </summary>
     public CameraRef? FillingCamera =>
-        CallInsets.Filling(Renderer?.Focus is { Entering: true } f ? f.Tile.CameraOrNone : null, State.Tree.CameraList);
+        _board.Swap?.Shown ?? CallInsets.Filling(Renderer?.Focus is { Entering: true } f ? f.Tile.CameraOrNone : null, State.Tree.CameraList);
 
     /// <summary>The render thread (set once by the window).</summary>
     public StageRenderer Renderer { get; set; }
@@ -1504,6 +1507,11 @@ internal sealed partial class StageView : UserControl
     public bool HandleKey(VirtualKey key, bool ctrl, bool repeat)
     {
         Interact();
+        // Tab and Esc go to the alert insets first (Tab swaps the top one with the stage, Esc dismisses).
+        if (key is VirtualKey.Tab or VirtualKey.Escape && HandleInsetKey(key, ctrl, repeat))
+        {
+            return true;
+        }
         StageTile? s = Selected;
         if (s is null && _tiles.Length > 0 && key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down or VirtualKey.Space or VirtualKey.Enter or VirtualKey.M)
         {
@@ -1951,6 +1959,7 @@ internal sealed partial class StageView : UserControl
             }
         }
         UpdateCursor();
+        TickInsets();
         TickToast(_viewer.Clock.Now);
         // Countdowns and fades that depend on time alone; status lines that
         // follow the video (starting, recovering).
@@ -2038,12 +2047,14 @@ internal sealed partial class StageView : UserControl
         _timer.Stop();
         _viewer.Changed -= RefreshAll;
         _viewer.CallsChanged -= _calls.Sync;
+        _viewer.DetectionReceived -= OnDetection;
         _viewer.IndicatorsChanged -= SyncOverlays;
         _viewer.Settings.Changed -= SyncOverlays;
-        _viewer.Settings.Changed -= _calls.InvalidateArrange;
+        _viewer.Settings.Changed -= OnInsetSettingsChanged;
         // The cards give their leases back; nothing more is drawn over the grid.
         _calls.Close();
         Renderer.Overlays = [];
+        Renderer.Covered = false;
         _viewer.Leases.TileChanged -= OnTileChanged;
         // A held move ends with its window.
         RemovePtz();

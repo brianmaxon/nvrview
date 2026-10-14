@@ -284,6 +284,9 @@ internal sealed partial class SelfTest
             await CallRecordingEndsWithCall(v, camera);
         }
 
+        // The alert insets: swap with the stage, smoke and CO, the return inset, order, grid, Entrance.
+        await AlertInsetSteps(v, stage, device, camera, clock);
+
         // parity: call-permission-revoke
         // Revoking the permission is the user's too.
         v.SetTalkAllowed(camera, false);
@@ -790,12 +793,13 @@ internal sealed partial class SelfTest
         {
             // parity: inset-drag-snap
             // The header dragged to 10 DIPs from the right edge snaps there and 40% down does not; a
-            // small move on the picture is a click and moves nothing; the picture past the slop drags.
+            // small move on the header is no drag and moves nothing (a short move on the picture is a click: it swaps,
+            // alert-inset-swap); the picture past the slop drags.
             double w = cards.ActualWidth, h = cards.ActualHeight;
             InsetFrame column = cards.Column ?? default;
             bool atDefault = cards.Anchor is null && NearAnchor(MeasuredAnchor(column, w, h), InsetAnchor.FromCorner(v.Settings.InsetCorner));
             InsetFrame f0 = card.Frame;
-            DragCard(card, f0.X + 60, f0.Y + 120, 3, 2, onHeader: false);
+            DragCard(card, f0.X + 60, f0.Y + 10, 1, 1, onHeader: true);
             bool clickMoved = cards.Anchor is not null || changes != 0;
             double freeX = w - 2 * m - column.Width, freeY = h - 2 * m - column.Height;
             DragColumnTo(cards, card, m + freeX - 10, m + 0.4 * freeY);
@@ -807,10 +811,10 @@ internal sealed partial class SelfTest
             DragCard(card, pic.X + 100, pic.Y + 120, -40, 0, onHeader: false);
             cards.UpdateLayout();
             bool pictureDrag = cards.Anchor is { } pa && Math.Abs(pa.X - (freeX - 40) / freeX) < 0.01 && Math.Abs(pa.Y - 0.4) < 0.01;
-            Say($"inset drag: default corner {atDefault}, small move on the picture moves nothing {!clickMoved}, header drag snaps x {snapped} (anchor {anchor}, right edge {placed}), " +
+            Say($"inset drag: default corner {atDefault}, small move on the header moves nothing {!clickMoved}, header drag snaps x {snapped} (anchor {anchor}, right edge {placed}), " +
                 $"saved with the window {saved}, picture drag past the slop {pictureDrag}");
             Expect(atDefault, "the call card column did not start in the default corner");
-            Expect(!clickMoved, "a small move on the card's picture moved the column");
+            Expect(!clickMoved, "a small move on the card's header moved the column");
             Expect(snapped && placed, "dragging the card's header did not snap to the right edge and keep 40% down");
             Expect(saved, "the moved column was not saved with the window");
             Expect(pictureDrag, "dragging the card's picture past the slop did not move the column");

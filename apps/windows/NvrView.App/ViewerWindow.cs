@@ -234,11 +234,15 @@ internal sealed class ViewerWindow
             {
                 Stage.CallCards.RestoreAnchor(new InsetAnchor(ix, iy));
             }
+            // This window's own inset grid (the Settings default while it has none).
+            Stage.RestoreInsetGrid(restore.InsetGrid);
             // Fill Tiles, and each tile's zoom, crop and Fill choice (docs/UX.md "Digital zoom", "Fill Tiles").
             state.Views = restore.PictureViews;
         }
         // Moving the call insets saves the window's record (their position belongs to the window).
         Stage.CallCards.AnchorChanged += () => Changed?.Invoke();
+        // So does choosing this window's own inset grid.
+        Stage.InsetGridChanged += () => Changed?.Invoke();
         // So does a zoom, a crop or a Fill choice.
         Stage.ViewsChanged += () => Changed?.Invoke();
         ApplySidebar();
@@ -408,7 +412,7 @@ internal sealed class ViewerWindow
         WindowContent content = State.Content is WindowContent.Scratch ? new WindowContent.Scratch(State.Name, State.Tree) : State.Content;
         InsetAnchor? inset = Stage.CallCards.Anchor;
         return new SavedWindow(content, _windowedFrame, IsFullScreen, _sidebarCollapsed, _sidebarWidth, inset?.X, inset?.Y,
-            State.Views.Fill, SavedTileViews.Of(State.Views));
+            State.Views.Fill, SavedTileViews.Of(State.Views), InsetGrid: Stage.InsetGridOverride);
     }
 
     // ---- content ----
@@ -813,6 +817,13 @@ internal sealed class ViewerWindow
         if (!e.KeyStatus.IsMenuKeyDown && Stage.HandlePtzKey(e.Key, e.KeyStatus.ScanCode, alt: false, repeat))
         {
             e.Handled = true;
+            return;
+        }
+        // Tab swaps an alert inset with the stage, but only when the stage has the keyboard: a sidebar or an
+        // inset's own control with the focus keeps it to move between its controls.
+        if (e.Key == VirtualKey.Tab && FocusManager.GetFocusedElement(Window.Content.XamlRoot) is DependencyObject tabbed
+            && Within(tabbed, _sidebarHost, _overlay, Stage.CallCards))
+        {
             return;
         }
         e.Handled = Stage.HandleKey(e.Key, ctrl, repeat);

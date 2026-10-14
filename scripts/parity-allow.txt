@@ -28,6 +28,7 @@ tile-menu-no-app-wide       windows  n/a: only the Windows context menu held app
 
 # ---- on Windows only, macOS self-test lacks the check -----------------------
 alert-dismiss-enter         windows  gap: the macOS self-test never raises a tile alert end to end (AlertCenter has unit tests; the smoke inset step dismisses with Esc)
+alert-inset-entrance         windows  gap: the macOS self-test does not drive the Entrance option end to end (a person at a marked camera opening an inset, the tile menu item, the saved setting)
 alert-raise                 windows  gap: no tile alert step in the macOS self-test (red border on every lens, header text, count)
 alert-reduce-motion         windows  gap: the macOS self-test does not check the border against Reduce Motion
 alert-survives-stop         windows  gap: no macOS step for an alert outliving the detection that raised it
@@ -71,13 +72,6 @@ zoom-reset-control          windows  gap: the macOS self-test does not press the
 zoom-touch-pinch            windows  gap: the macOS self-test does not send a magnify gesture to a digitally zoomed tile
 
 # ---- on macOS only ----------------------------------------------------------
-alert-inset-smoke-stays     macos    gap: Windows insets are call cards only, so a smoke alarm does not open one
-alert-inset-return-layout   macos    gap: Windows call cards do not swap with the stage, so there is no return inset
-alert-inset-return-tab      macos    gap: Windows call cards do not swap with the stage, so there is no return inset
-alert-inset-return-single   macos    gap: Windows call cards do not swap with the stage, so there is no return inset
-alert-inset-order           macos    gap: Windows has call cards only, no inset board with a stable order and a chip
-alert-inset-grid            macos    gap: Windows has call cards only, no inset grid setting
-alert-inset-swap            macos    gap: Windows call cards do not swap with the stage
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera

@@ -69,7 +69,7 @@ settings  updates-*
 # Calls: doorbell, call windows, captions, talk-back, insets.
 calls  call-*
 calls  unmute-on-ring
-calls  alert-inset-in-grid
+calls  alert-inset-*
 calls  inset-drag-*
 
 # Recordings window, playback, edits, export, sound analysis.
