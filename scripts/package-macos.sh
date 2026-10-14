@@ -33,7 +33,9 @@
 # leaves build/NVRView.app.tested with the tree hash; both markers need a clean
 # tree). Only the bundled files are then replaced (update-defaults.json,
 # release-notes.json; the binary is untouched, so what ships is what was
-# tested), and the bundle is signed again and zipped. --rebuild forces a build
+# tested, apart from the self-test module only the test build links in; see
+# scripts/macos-real-selftest.sh), and the bundle is signed again and zipped.
+# --rebuild forces a build
 # from scratch. A tree with uncommitted changes always builds.
 #
 # This signing is for local use. Distributing the app needs a Developer ID

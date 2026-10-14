@@ -233,7 +233,7 @@ What the table shows that is not just a platform difference:
 ## The self-test comparison
 
 Both apps have a `--selftest` built from numbered steps
-(`apps/macos/Sources/NVRView/SelfTest*.swift`,
+(`apps/macos/Sources/NVRViewSelfTest/SelfTest*.swift`,
 `apps/windows/NvrView.App/SelfTest*.cs`), split into areas that the test result
 cache reruns on their own (`scripts/macos-selftest-areas.txt`,
 `scripts/windows-selftest-areas.txt`; `scripts/check-selftest-areas.py` checks

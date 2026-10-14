@@ -4,7 +4,7 @@
 Windows: scripts/windows-selftest-areas.txt against the `// parity: <id>`
 steps in apps/windows/NvrView.App/SelfTest*.cs. Mac:
 scripts/macos-selftest-areas.txt against the steps in
-apps/macos/Sources/NVRView/SelfTest*.swift.
+apps/macos/Sources/NVRViewSelfTest/SelfTest*.swift.
 
 Every step must belong to exactly one area: the table's longest matching
 pattern decides, and two patterns of different areas with the same length
@@ -45,9 +45,9 @@ PLATFORMS = {
         "owned": "WINDOWS_OWNED",
     },
     "mac": {
-        "sources": lambda: sorted((ROOT / "apps/macos/Sources/NVRView").glob("SelfTest*.swift")),
+        "sources": lambda: sorted((ROOT / "apps/macos/Sources/NVRViewSelfTest").glob("SelfTest*.swift")),
         "table": ROOT / "scripts/macos-selftest-areas.txt",
-        "names_file": ROOT / "apps/macos/Sources/NVRView/SelfTest.swift",
+        "names_file": ROOT / "apps/macos/Sources/NVRViewSelfTest/SelfTest.swift",
         "names": re.compile(r"static let areaNames\s*=\s*\[([^\]]*)\]"),
         "names_label": "SelfTest.areaNames",
         "calls": re.compile(r"\bruns\(([^)]*)\)"),

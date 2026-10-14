@@ -1,4 +1,4 @@
-# The macOS app self-test's areas (apps/macos/Sources/NVRView/SelfTest.swift).
+# The macOS app self-test's areas (apps/macos/Sources/NVRViewSelfTest/SelfTest.swift).
 #
 # `NVRView --fake ... --selftest N --areas a,b` runs only those areas (plus
 # "startup", which always runs); scripts/suite-cache.py caches each area on

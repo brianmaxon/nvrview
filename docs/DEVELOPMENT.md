@@ -114,7 +114,7 @@ at the end shows each suite as ran or cached, with its time.
   The macOS app self-test (fake core) is cached by area the same way
   (`mac-app.AREA`: startup, viewer, tiles, layouts, header, settings, calls,
   recordings, capture, ptz, alerts): `scripts/macos-selftest-areas.txt` maps
-  its steps, `NVRView --selftest N --areas a,b` runs some, the larger areas'
+  its steps, `NVRView --selftest N --areas a,b` (a self-test build) runs some, the larger areas'
   steps live in `SelfTest+Area.swift` files, and `MAC_OWNED` in
   `scripts/suite-cache.py` lists the files only one area exercises. Its
   real-core run is not cached; it runs in full runs only.
@@ -170,7 +170,19 @@ at the end shows each suite as ran or cached, with its time.
   clean tree leaves `build/NVRView.app.tested` (tree hash and a hash of the
   bundled files); `scripts/package-macos.sh` then zips that bundle, redoing only
   the bundled files and the signature (`--rebuild` forces a build). The core
-  framework is built once per tree (`scripts/build-xcframework.sh`). On Windows
+  framework is built once per tree (`scripts/build-xcframework.sh`).
+  **The self-test is a module of its own.** The app's code is the SwiftPM
+  library `NVRViewApp`; `NVRViewSelfTest` holds the self-test and its mocks;
+  the executable `NVRView` is only `main.swift`. The shipped app links no
+  self-test (`--selftest` answers "this build has no self-test"); building
+  with `NVRVIEW_SELFTEST=1` links it (what the checks and
+  `scripts/macos-real-selftest.sh` do). The bundle test builds that variant in
+  the same build folder, so `NVRViewApp`, the other modules and the core are
+  the very objects the bundle was linked from, and runs it from a copy of the
+  bundle with the self-test executable swapped in; the only difference from the
+  shipped binary is the self-test module and the entry point that starts it.
+  (`NVRViewApp` is built with `-enable-testing` in release so the self-test
+  can `@testable import` its internals.) On Windows
   the stamp records the host that ran the app half (`; host NAME`), and
   `scripts/windows-check.sh --package` builds the package on that host, where
   the tested publish output is. Every Windows run prints a `split decision:`

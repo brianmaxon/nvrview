@@ -62,6 +62,7 @@ EOF
 cat >"$bin/ditto" <<'EOF'
 #!/bin/sh
 echo "ditto" >>"$FAKE_LOG"
+if [ "$1" != -c ]; then cp -R "$1" "$2"; exit 0; fi
 for last; do :; done
 echo zip >"$last"
 EOF

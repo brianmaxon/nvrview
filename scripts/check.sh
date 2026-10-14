@@ -376,7 +376,7 @@ mac_selftest() {
   mac_data=$(mktemp -d)
   mac_rc=0
   # shellcheck disable=SC2046 # --areas and its list are separate words
-  (cd apps/macos && swift build --product NVRView &&
+  (cd apps/macos && NVRVIEW_SELFTEST=1 swift build --product NVRView &&
     .build/debug/NVRView --fake --data-dir "$mac_data" --selftest 60 $([ "$mac_all" = 1 ] || echo "--areas $mac_areas") \
       ../../fixtures/synthetic/h264-basic.h264 ../../fixtures/synthetic/h265-basic.h265 \
       ../../fixtures/synthetic/fisheye/h264-fisheye.h264) >"$mac_log" 2>&1 || mac_rc=$?

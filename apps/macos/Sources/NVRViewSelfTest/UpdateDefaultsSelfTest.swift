@@ -1,3 +1,4 @@
+@testable import NVRViewApp
 import CryptoKit
 import Foundation
 import NVRCore
