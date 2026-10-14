@@ -185,6 +185,7 @@ restore_tested_publish() {
     [ -n "$cand" ] && [ -f "$store/$cand/publish.tested" ] && [ -d "$store/$cand/publish" ] || continue
     echo "restoring the tested publish output kept for tree $cand"
     rm -rf "$out/publish" "$out/publish.tested" "$out/publish.pending"
+    mkdir -p "$out"
     cp -Rp "$store/$cand/publish" "$out/publish"
     cp -p "$store/$cand/publish.tested" "$out/publish.tested"
     if tested_publish_reusable; then tb_touch "$store" "$cand"; return 0; fi
@@ -280,7 +281,7 @@ make_zip() {
   mkdir -p "$(dirname "$1")"
   rm -f "$1"
   zip_win="$(cygpath -w "$1")"
-  (cd "$(dirname "$exe")" && /c/Windows/System32/tar.exe -a -c -f "$zip_win" -- *)
+  (cd "$(dirname "$exe")" && "${NVRVIEW_TAR:-/c/Windows/System32/tar.exe}" -a -c -f "$zip_win" -- *)
 }
 
 # The update package for a release: builds, then writes

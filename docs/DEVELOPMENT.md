@@ -37,7 +37,14 @@ Each run prints the computer's free disk space (and warns under 10 GB), then
 the seconds every step took. Parallel sessions give themselves a worker folder
 with `NVRVIEW_WINDOWS_WORKER=<name>` (default `main`); each keeps about 5 GB of
 build output, so delete a finished one with
-`NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh --clean <name>`.
+`NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh --clean <name>`, or,
+after merging its branch, on every computer of `NVRVIEW_WINDOWS_HOSTS` with
+`scripts/windows-check.sh --remove-worker <name>` (it refuses the kept workers
+`merge`, `fullcheck` and `main`, and reports and fails on a computer it cannot
+reach or a folder that stays). Both mirror an empty folder over the worker with
+robocopy before deleting it, because `rmdir /s` cannot remove the long paths of
+cargo and dotnet builds; every sync replaces the worker's `src\` the same way.
+Tested release builds are not in a worker: see "Releases ship what was tested".
 The worker builds without debug information (`NVRVIEW_WORKER_DEBUGINFO=1`
 keeps it) and builds the release library and the C# projects in the
 background while the Rust tests run. Optionally, in an administrator
@@ -171,6 +178,22 @@ at the end shows each suite as ran or cached, with its time.
   bundled files); `scripts/package-macos.sh` then zips that bundle, redoing only
   the bundled files and the signature (`--rebuild` forces a build). The core
   framework is built once per tree (`scripts/build-xcframework.sh`).
+  **Tested builds outlive their worktree.** `build/` belongs to one checkout,
+  and the full check usually runs elsewhere than the release (the background
+  full check in `.worktrees/fullcheck`, an agent's worktree, or a suite taken
+  from the test result cache, which runs nothing and leaves no bundle), so a
+  release from the main checkout used to find no tested bundle and compiled one
+  (release 0.7.0: "== macOS package", then Swift compiling). A pass now also
+  copies the bundle to `nvrview-builds/macos/<tree>/` in the common git
+  directory, and the Windows app test run copies the passing publish output to
+  `%USERPROFILE%\nvrview\tested\<tree>\` on the Windows computer
+  (`scripts/windows-app.sh mark-tested`). Each store keeps the newest 3 trees
+  (`NVRVIEW_KEPT_BUILDS`; `scripts/tested-builds-lib.sh`). Packaging restores
+  the kept build for its tree, or for a tree that differs from it in `VERSION`
+  alone, when the checkout or worker holds none; the Windows copy is checked
+  against its file fingerprint first. A tree with no kept build is built, and
+  the output says so. Tests: `scripts/test-macos-package.sh`,
+  `scripts/test-windows-builds.sh`.
   **The self-test is a module of its own.** The app's code is the SwiftPM
   library `NVRViewApp`; `NVRViewSelfTest` holds the self-test and its mocks;
   the executable `NVRView` is only `main.swift`. The shipped app links no

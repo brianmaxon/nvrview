@@ -497,7 +497,8 @@ It writes what it measured and `selftest: PASS` or `selftest: FAIL` to the
 log, which the script prints. `scripts/windows-worker.sh` builds the app on
 every run and runs this self-test when `NVRVIEW_APP_SELFTEST=1` (passed
 through by `scripts/windows-check.sh`), since it needs a logged-in user.
-Worker run times, disk use, `--clean`, and the optional Microsoft Defender
+Worker run times, disk use, `--clean`, `--remove-worker` (a finished worker on
+every host; long paths are removed with robocopy), and the optional Microsoft Defender
 folder exclusions are described in docs/DEVELOPMENT.md ("Windows test computers").
 
 ### The plain start test
@@ -1061,7 +1062,9 @@ runs them at the same time when a second computer is free:
   area, and the step. Suite passes, the test result cache, the stamp, and the
   step-time log are the same as a one-host run's: keyed by tree and inputs, not
   host. (`scripts/windows-check.sh --package` reuses a tested publish output
-  only on the host that has it; otherwise it builds afresh.)
+  only on the host that has it, kept in `%USERPROFILE%\nvrview\tested\<tree>`
+  outside the worker folders so that removing the worker does not lose it, the
+  newest 3 trees; otherwise it builds afresh.)
 
 `NVRVIEW_WINDOWS_SPLIT=0` turns the split off. The tests are
 `scripts/test-windows-split.sh` (fake ssh, no real computer).
