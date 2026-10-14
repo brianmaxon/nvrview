@@ -65,8 +65,9 @@ NvrView-0.4.0-win-x64.zip        the Windows package
   (`unsupported_format`): an older app does not guess at a newer layout.
 - `version` is a semantic version (`MAJOR.MINOR.PATCH`, optionally
   `-prerelease`; build metadata after `+` is ignored when comparing). The apps
-  compare it with their own version, which both read from the `VERSION` file
-  at the repository root when they are built.
+  compare it with their own version, which both take from the `VERSION` file
+  at the repository root when they are packaged (macOS: `Info.plist`; Windows:
+  `version.txt` next to the executable), not when they are compiled.
 - `published` (optional, recommended; `sign-update manifest` always sets
   it) is when the manifest was made, and `expires` (optional) is when apps
   stop accepting it, both UTC as `YYYY-MM-DDTHH:MM:SSZ`; `expires` must be
@@ -512,7 +513,9 @@ release bundle, with the bundled update defaults and release notes when
 bundled files and the signature are redone). The shipped files are the tested
 ones. The two packages are made at the same time. After a version bump that changes only `VERSION`,
 `scripts/release.sh` accepts the stamps of the previous tree and says so
-(packages are still built and signed fresh); `--full-check` runs both checks
+(the packages are signed fresh, but the tested builds are reused: the new
+version goes into `Info.plist` and `version.txt` and nothing is recompiled;
+docs/DEVELOPMENT.md, "Versions"); `--full-check` runs both checks
 fresh instead. A merge that skipped its Windows run
 (`scripts/merge-branch.sh`) leaves a different stamp that a release never
 accepts, and so does a check that took suites from the test result cache

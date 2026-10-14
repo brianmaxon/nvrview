@@ -36,7 +36,9 @@
 # or both at once from scripts/release-check.sh). Without --full-check it does
 # not rerun them. Version-only rule: stamps of another tree are accepted when
 # the only file that differs between that tree and HEAD's is VERSION (a
-# version bump after a full check); the output says so. A stamp written for a
+# version bump after a full check); the output says so, and the packages reuse
+# the tested builds (the version is written into Info.plist and version.txt at
+# packaging time; see docs/DEVELOPMENT.md, "Versions"). A stamp written for a
 # merge that skipped its Windows run (scripts/merge-branch.sh) never counts
 # for Windows. The packages are always built and signed fresh, and the Windows
 # package reuses the publish output the Windows check tested when it is the
