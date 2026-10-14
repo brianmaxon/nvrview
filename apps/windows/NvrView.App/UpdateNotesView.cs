@@ -47,7 +47,7 @@ internal static class UpdateNotesView
             {
                 continue;
             }
-            var paragraph = new Paragraph();
+            var paragraph = new Microsoft.UI.Xaml.Documents.Paragraph();
             switch (line.Kind)
             {
                 case NoteLineKind.Heading:
