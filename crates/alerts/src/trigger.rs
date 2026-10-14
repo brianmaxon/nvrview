@@ -45,6 +45,12 @@ pub struct Trigger {
     /// source's mapped cameras. Never set by a real input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only_camera: Option<CameraId>,
+    /// A simulated trigger from the alert settings. It runs the full check
+    /// but keeps its own episodes and cooldowns: it never opens, extends,
+    /// or uses a real episode, and real triggers never quiet it. Never set
+    /// by a real input.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub test: bool,
 }
 
 impl Trigger {
@@ -97,6 +103,7 @@ pub fn from_detection(
         received_ms,
         catch_up: false,
         only_camera: None,
+        test: false,
     })
 }
 
@@ -162,6 +169,7 @@ pub fn from_external(
         received_ms,
         catch_up: false,
         only_camera: None,
+        test: false,
     })
 }
 

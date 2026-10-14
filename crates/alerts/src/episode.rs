@@ -155,6 +155,26 @@ impl Timeliness {
         self.next_alert_id = self.next_alert_id.max(next.max(1));
     }
 
+    /// The ID the next new alert will get.
+    pub fn next_alert_id(&self) -> u64 {
+        self.next_alert_id
+    }
+
+    /// What [`Timeliness::admit`] would answer now, without changing
+    /// anything.
+    pub fn preview_admit(
+        &self,
+        key: EpisodeKey,
+        severity: Severity,
+        always: bool,
+        incident: Option<&str>,
+        now: Millis,
+        timing: &TimingSettings,
+    ) -> Admission {
+        self.clone()
+            .admit(key, severity, always, incident, now, timing)
+    }
+
     pub fn get(&self, key: &EpisodeKey) -> Option<&Episode> {
         self.episodes.get(key)
     }
