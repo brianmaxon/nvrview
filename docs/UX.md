@@ -1704,6 +1704,14 @@ sentence; "Older…" pages back.
   camera, severity or higher, source (Camera AI, Sound, Sensor), decision
   (Alerts, Quiet, Suppressed), and class. They go to the core as the
   `nv_alerts_get` query, and new decisions refresh the list.
+- **Bursts.** Consecutive alerts for the same camera and class whose
+  neighbors are at most a minute apart (the cooldown) fold into one row, for
+  example "3 vehicles in 40 s", with how many of them notified. A click (or
+  Space on the focused row) expands it into its members, each a row of its own
+  with its own picture icon when pictures are kept. A member that did not
+  notify says "not notified: cooldown" in orange, and its detail pane says why:
+  every real detection is logged and its pictures kept, even when an earlier
+  alert's cooldown kept it from interrupting you.
 - **More filters (minor 14):** the decision groups are Alerts, Not confirmed
   (the camera's AI reported it and our check did not confirm it), Quiet,
   Suppressed, and Tests (a simulated trigger, whatever its decision), and a

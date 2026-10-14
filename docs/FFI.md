@@ -812,13 +812,17 @@ made.
   the first frame also becomes that alert's snapshot (`nv_alert_snapshot_get`).
 
 Retention is a setting of `nv_alerts_configure`: `"evidence":
-{"retention_min":120}` (30 to 1440, clamped; default 120). A set expires that
-long after it was created, and the short-lived store is capped at 300 sets
-and 200 MiB, oldest first, whichever comes first. Everything is local, under
+{"retention_min":120,"night_hold_h":4}` (30 to 1440, clamped, default 120; and
+0 to 12, clamped, default 4). A set expires that long after it was created, or
+for a set created during the night (NOTIFICATIONS.md, "Evidence") that many
+hours after the night ends if that is later; `expires_ms` says when, and is
+recomputed when the settings change. The short-lived store is capped at 600
+sets and 400 MiB, oldest first, whichever comes first (pinned sets are not
+touched). Everything is local, under
 `data_dir/alerts/evidence/` (memory only without a data directory), and
 deleted when it expires; the core expires on its own clock, so an expired set
 answers NV_ERR_UNKNOWN_ID. `nv_alerts_get`'s status gains `evidence`
-(`sets`, `pinned`, `bytes`, `retention_min`).
+(`sets`, `pinned`, `bytes`, `retention_min`, `night_hold_h`).
 
 **Settings.** `nv_alerts_configure` takes the settings document of
 NOTIFICATIONS.md ("Settings": `cameras`, `always_alert`, `mode`,
@@ -967,6 +971,14 @@ alert's end when its episode settles:
 {"type":"alert","state":"settled","alert_id":4,"rev":1,"trigger_id":12,"camera":{"device":1,"channel":2,"lens":0},"class":"person","at_ms":1718900130000}
 {"type":"trigger_rejected","source":"external","reason":"rate_limit"}
 ```
+
+A detection inside a cooldown is an `alert` decision with
+`"quieted":{"why":"cooldown","left_ms":n,"since_ms":n}` and the state
+`quieted`: it is logged and its evidence kept, but no output and no desktop
+notification is raised (an app notifies only for `new` and `update`). It
+carries a summary like a `logged` decision. The `timing` setting gains
+`check_spacing_s` (0 to 60, default 5): the least time between two checks
+inside one cooldown for a camera and class.
 
 Only alerts (`new`, `update`) carry the full `trace` in events. A `logged`
 decision (quiet or suppressed) carries a short `summary` instead and no

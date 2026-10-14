@@ -538,6 +538,9 @@ extension SelfTest {
         // parity: alerts-ha-test-alert
         // parity: alerts-evidence-kept
         // parity: alerts-events-overlay
+        // parity: alerts-cooldown-logs-second
+        // parity: alerts-night-evidence-expiry
+        // parity: alerts-cooldown-always-alert
         Task { @MainActor [self] in
             problems += await AlertsSelfTest(model: model, openEvents: { [weak app] in app?.openSmartAlertEvents() }).run()
             checkLogRest()
