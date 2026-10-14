@@ -10,16 +10,16 @@ import SwiftUI
 
 @MainActor
 @Observable
-final class SensorMessagesModel {
-    @ObservationIgnored let app: AppModel
-    let key: String
-    private(set) var log = SensorMessageLog()
-    var filter: SensorOutcomeFilter = .all
+package final class SensorMessagesModel {
+    @ObservationIgnored package let app: any AlertsHost
+    package let key: String
+    package private(set) var log = SensorMessageLog()
+    package var filter: SensorOutcomeFilter = .all
     /// The core cannot say (smart alerts off, or no such sensor).
-    private(set) var unavailable = false
+    package private(set) var unavailable = false
     @ObservationIgnored private var timer: Timer?
 
-    init(app: AppModel, key: String) {
+    package init(app: any AlertsHost, key: String) {
         self.app = app
         self.key = key
         refresh()
@@ -30,13 +30,13 @@ final class SensorMessagesModel {
         }
     }
 
-    func stop() {
+    package func stop() {
         timer?.invalidate()
         timer = nil
     }
 
     /// Fetches the messages that came since the last refresh (all pages).
-    func refresh() {
+    package func refresh() {
         let alerts = app.alertsModel!
         var guardCount = 0
         while guardCount < 10 {
@@ -52,24 +52,24 @@ final class SensorMessagesModel {
         alerts.refreshStatus()
     }
 
-    func clear() {
+    package func clear() {
         _ = app.alertsModel.clearSensorMessages(key: key)
         log.clear()
     }
 
-    var shown: [SensorMessage] { log.shown(filter) }
+    package var shown: [SensorMessage] { log.shown(filter) }
 
-    var title: String {
+    package var title: String {
         let name = app.alertsModel.settings.sensors.first { $0.key == key }?.name ?? ""
         return "Sensor Messages: \(name.isEmpty ? key : name)"
     }
 
     /// The connection line above the list.
-    var connection: String? {
+    package var connection: String? {
         SensorConnection.find(id: key, in: app.alertsModel.status)?.line()
     }
 
-    static func time(_ ms: Int64) -> String {
+    package static func time(_ ms: Int64) -> String {
         let f = DateFormatter()
         f.dateStyle = .none
         f.timeStyle = .medium
@@ -78,11 +78,11 @@ final class SensorMessagesModel {
 }
 
 @MainActor
-final class SensorMessagesWindowController: NSWindowController, NSWindowDelegate {
-    let messages: SensorMessagesModel
-    var onClose: (SensorMessagesWindowController) -> Void = { _ in }
+package final class SensorMessagesWindowController: NSWindowController, NSWindowDelegate {
+    package let messages: SensorMessagesModel
+    package var onClose: (SensorMessagesWindowController) -> Void = { _ in }
 
-    init(app: AppModel, key: String) {
+    package init(app: any AlertsHost, key: String) {
         messages = SensorMessagesModel(app: app, key: key)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
@@ -99,18 +99,18 @@ final class SensorMessagesWindowController: NSWindowController, NSWindowDelegate
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    func windowWillClose(_ notification: Notification) {
+    package func windowWillClose(_ notification: Notification) {
         messages.stop()
         onClose(self)
     }
 }
 
-struct SensorMessagesView: View {
-    @Bindable var messages: SensorMessagesModel
+package struct SensorMessagesView: View {
+    @Bindable package var messages: SensorMessagesModel
 
-    var body: some View {
+    package var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Picker("Show", selection: $messages.filter) {

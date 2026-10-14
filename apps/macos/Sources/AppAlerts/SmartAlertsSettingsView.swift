@@ -10,18 +10,18 @@ import AppBase
 // edit goes through `SmartAlertsModel.update` (saved, then sent to
 // the core); passwords and tokens go to the Keychain only.
 
-enum SmartAlertsSection: String, CaseIterable, Identifiable {
+package enum SmartAlertsSection: String, CaseIterable, Identifiable {
     case general = "General", cameras = "Cameras", sensors = "Sensors", outputs = "Outputs", view = "Live View"
-    var id: String { rawValue }
+    package var id: String { rawValue }
 }
 
-struct SmartAlertsSettingsView: View {
-    let model: AppModel
+package struct SmartAlertsSettingsView: View {
+    package let model: any AlertsHost
     @State private var section: SmartAlertsSection = .general
 
     private var alerts: SmartAlertsModel { model.alertsModel }
 
-    var body: some View {
+    package var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $section) {
                 ForEach(SmartAlertsSection.allCases) { Text($0.rawValue).tag($0) }
@@ -39,6 +39,10 @@ struct SmartAlertsSettingsView: View {
             }
         }
         .onAppear { alerts.refreshStatus() }
+    }
+
+    package init(model: any AlertsHost) {
+        self.model = model
     }
 }
 
@@ -64,12 +68,12 @@ private func minuteBinding(_ b: Binding<Int>) -> Binding<Date> {
 
 // MARK: General
 
-struct SmartAlertsGeneralView: View {
-    let alerts: SmartAlertsModel
+package struct SmartAlertsGeneralView: View {
+    package let alerts: SmartAlertsModel
 
     private var editor: NightLocationEditor { alerts.locationEditor }
 
-    var body: some View {
+    package var body: some View {
         Form {
             Section {
                 Toggle("Smart alerts", isOn: setting(alerts, \.enabled))
@@ -169,15 +173,19 @@ struct SmartAlertsGeneralView: View {
         .formStyle(.grouped)
         .onAppear { editor.load() }
     }
+
+    package init(alerts: SmartAlertsModel) {
+        self.alerts = alerts
+    }
 }
 
 /// Today's predicted sunrise, sunset, and night window, in local time. It
 /// follows the location and the night margins (both are read here), and a
 /// new minute of the clock refreshes it, which covers midnight.
 private struct SunTimesLines: View {
-    let alerts: SmartAlertsModel
+    package let alerts: SmartAlertsModel
 
-    var body: some View {
+    package var body: some View {
         TimelineView(.everyMinute) { context in
             let night = alerts.settings.night
             let _ = (alerts.settings.location, night.afterSunsetMin, night.beforeSunriseMin)
@@ -189,18 +197,22 @@ private struct SunTimesLines: View {
             }
         }
     }
+
+    package init(alerts: SmartAlertsModel) {
+        self.alerts = alerts
+    }
 }
 
 // MARK: Cameras
 
-struct SmartAlertsCamerasView: View {
-    let model: AppModel
+package struct SmartAlertsCamerasView: View {
+    package let model: any AlertsHost
     @State private var selection: CameraRef?
     @State private var editingZone: Int?
 
     private var alerts: SmartAlertsModel { model.alertsModel }
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 0) {
             List(selection: $selection) {
                 ForEach(model.devices) { d in
@@ -389,19 +401,23 @@ struct SmartAlertsCamerasView: View {
             .accessibilityLabel("Remove Time Window")
         }
     }
+
+    package init(model: any AlertsHost) {
+        self.model = model
+    }
 }
 
 // MARK: Sensors
 
-struct SmartAlertsSensorsView: View {
-    let model: AppModel
+package struct SmartAlertsSensorsView: View {
+    package let model: any AlertsHost
     @State private var selection: String?
     @State private var password = ""
     @State private var regionFor: CameraRef?
 
     private var alerts: SmartAlertsModel { model.alertsModel }
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 List(selection: $selection) {
@@ -631,18 +647,22 @@ struct SmartAlertsSensorsView: View {
         }
         .formStyle(.grouped)
     }
+
+    package init(model: any AlertsHost) {
+        self.model = model
+    }
 }
 
 // MARK: Outputs
 
-struct SmartAlertsOutputsView: View {
-    let model: AppModel
+package struct SmartAlertsOutputsView: View {
+    package let model: any AlertsHost
     @State private var token = ""
     @State private var confirmTestAlert = false
 
     private var alerts: SmartAlertsModel { model.alertsModel }
 
-    var body: some View {
+    package var body: some View {
         let ha = alerts.settings.homeAssistant
         Form {
             Section("Desktop notifications") {
@@ -715,11 +735,15 @@ struct SmartAlertsOutputsView: View {
             )
         }
     }
+
+    package init(model: any AlertsHost) {
+        self.model = model
+    }
 }
 
-struct HARuleRow: View {
-    let model: AppModel
-    let index: Int
+package struct HARuleRow: View {
+    package let model: any AlertsHost
+    package let index: Int
 
     private var alerts: SmartAlertsModel { model.alertsModel }
 
@@ -729,7 +753,7 @@ struct HARuleRow: View {
             set: { v in alerts.update { if $0.homeAssistant.rules.indices.contains(index) { $0.homeAssistant.rules[index][keyPath: path] = v } } })
     }
 
-    var body: some View {
+    package var body: some View {
         let r = alerts.settings.homeAssistant.rules[index]
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -782,14 +806,19 @@ struct HARuleRow: View {
             if on { s.homeAssistant.rules[index][keyPath: path].append(value) }
         }
     }
+
+    package init(model: any AlertsHost, index: Int) {
+        self.model = model
+        self.index = index
+    }
 }
 
 // MARK: Live view
 
-struct SmartAlertsLiveViewSettings: View {
-    let alerts: SmartAlertsModel
+package struct SmartAlertsLiveViewSettings: View {
+    package let alerts: SmartAlertsModel
 
-    var body: some View {
+    package var body: some View {
         Form {
             Section("Live checks") {
                 Picker("Show checks", selection: setting(alerts, \.view.placement)) {
@@ -808,24 +837,28 @@ struct SmartAlertsLiveViewSettings: View {
         }
         .formStyle(.grouped)
     }
+
+    package init(alerts: SmartAlertsModel) {
+        self.alerts = alerts
+    }
 }
 
 // MARK: Drawing a region on a still
 
-struct RegionEditorSheet: View {
-    let alerts: SmartAlertsModel
-    let camera: CameraRef
-    let title: String
-    let points: [ROIPoint]
-    let onSave: ([ROIPoint]) -> Void
-    let onCancel: () -> Void
+package struct RegionEditorSheet: View {
+    package let alerts: SmartAlertsModel
+    package let camera: CameraRef
+    package let title: String
+    package let points: [ROIPoint]
+    package let onSave: ([ROIPoint]) -> Void
+    package let onCancel: () -> Void
 
     @State private var editor = ROIEditor()
     @State private var still: CGImage?
     @State private var loading = true
     @State private var started = false
 
-    var body: some View {
+    package var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.headline)
             caption("Click to add corners (at least three), drag a corner to move it. A box counts where its feet are.")
@@ -890,5 +923,14 @@ struct RegionEditorSheet: View {
             still = await alerts.still(of: camera)
             loading = false
         }
+    }
+
+    package init(alerts: SmartAlertsModel, camera: CameraRef, title: String, points: [ROIPoint], onSave: @escaping ([ROIPoint]) -> Void, onCancel: @escaping () -> Void) {
+        self.alerts = alerts
+        self.camera = camera
+        self.title = title
+        self.points = points
+        self.onSave = onSave
+        self.onCancel = onCancel
     }
 }

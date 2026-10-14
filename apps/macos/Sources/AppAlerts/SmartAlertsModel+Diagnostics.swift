@@ -12,7 +12,7 @@ extension SmartAlertsModel {
 
     /// The messages that came after `after` (the next sequence number the
     /// caller holds), nil when the core cannot say.
-    func sensorMessages(key: String, after: Int64) -> SensorMessagePage? {
+    package func sensorMessages(key: String, after: Int64) -> SensorMessagePage? {
         guard
             let text = try? bridge.smartAlertsAPI().alertsMessages(
                 request: SensorMessagePage.request(input: key, after: after))
@@ -22,7 +22,7 @@ extension SmartAlertsModel {
 
     /// Empties the sensor's log in the core.
     @discardableResult
-    func clearSensorMessages(key: String) -> Bool {
+    package func clearSensorMessages(key: String) -> Bool {
         (try? bridge.smartAlertsAPI().alertsMessages(
             request: SensorMessagePage.request(input: key, after: 0, limit: 1, clear: true))) != nil
     }
@@ -33,7 +33,7 @@ extension SmartAlertsModel {
     /// `camera`). The decision is marked as a test; Home Assistant gets it
     /// only with `sendToHomeAssistant`.
     @discardableResult
-    func simulate(sensor key: String, camera: AlertCamera? = nil, sendToHomeAssistant: Bool = false) -> UInt64? {
+    package func simulate(sensor key: String, camera: AlertCamera? = nil, sendToHomeAssistant: Bool = false) -> UInt64? {
         guard let sensor = settings.sensors.first(where: { $0.key == key }) else { return nil }
         var sent: UInt64?
         var o: [String: Any] = [
@@ -60,17 +60,17 @@ extension SmartAlertsModel {
         return sent
     }
 
-    func cameraName(_ c: AlertCamera) -> String { model.cameraRef(c).map(model.name(of:)) ?? "Camera \(c.channel + 1)" }
+    package func cameraName(_ c: AlertCamera) -> String { model.cameraRef(c).map(model.name(of:)) ?? "Camera \(c.channel + 1)" }
 
     // MARK: Send test alert
 
     /// The Home Assistant output's position in the core's `outputs` (after
     /// the desktop one).
-    static let homeAssistantOutputIndex = 1
+    package static let homeAssistantOutputIndex = 1
 
     /// Delivers one test alert through the configured Home Assistant output
     /// (a pulse of its rules' entities); the result arrives as an event.
-    func sendHomeAssistantTestAlert() {
+    package func sendHomeAssistantTestAlert() {
         homeAssistantSend = "Sending…"
         do throws(CoreStatus) {
             try bridge.smartAlertsAPI().alertsOutputTest(request: #"{"output":\#(Self.homeAssistantOutputIndex)}"#)
@@ -86,7 +86,7 @@ extension SmartAlertsModel {
 
     // MARK: Evidence
 
-    func evidenceList(sinceMs: Int64? = nil) -> EvidenceList? {
+    package func evidenceList(sinceMs: Int64? = nil) -> EvidenceList? {
         var q: [String: Any] = [:]
         if let sinceMs { q["since_ms"] = sinceMs }
         let data = (try? JSONSerialization.data(withJSONObject: q, options: [.sortedKeys])) ?? Data("{}".utf8)
@@ -95,21 +95,21 @@ extension SmartAlertsModel {
         return EvidenceList.parse(text)
     }
 
-    func evidence(trigger: UInt64) -> AlertEvidence? {
+    package func evidence(trigger: UInt64) -> AlertEvidence? {
         guard let text = try? bridge.smartAlertsAPI().alertEvidenceGet(query: #"{"trigger_id":\#(trigger)}"#),
             let json = JSONValue.parse(text)
         else { return nil }
         return AlertEvidence(json)
     }
 
-    func evidenceFrame(trigger: UInt64, index: Int) -> NSImage? {
+    package func evidenceFrame(trigger: UInt64, index: Int) -> NSImage? {
         guard let data = try? bridge.smartAlertsAPI().alertEvidenceFrameGet(triggerID: trigger, index: UInt32(index))
         else { return nil }
         return NSImage(data: data)
     }
 
     @discardableResult
-    func pinEvidence(trigger: UInt64) -> Bool {
+    package func pinEvidence(trigger: UInt64) -> Bool {
         (try? bridge.smartAlertsAPI().alertEvidencePin(triggerID: trigger)) != nil
     }
 }

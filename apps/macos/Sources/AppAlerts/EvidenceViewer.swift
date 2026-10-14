@@ -10,18 +10,18 @@ import SwiftUI
 
 /// Two panes with a draggable divider; the position (a fraction of the
 /// space) is kept in the user defaults under `key`.
-struct PersistentSplit<First: View, Second: View>: View {
-    let vertical: Bool
-    let key: String
-    let minFirst: CGFloat
-    let minSecond: CGFloat
-    let first: First
-    let second: Second
+package struct PersistentSplit<First: View, Second: View>: View {
+    package let vertical: Bool
+    package let key: String
+    package let minFirst: CGFloat
+    package let minSecond: CGFloat
+    package let first: First
+    package let second: Second
     @State private var fraction: Double
 
-    static var thickness: CGFloat { 7 }
+    package static var thickness: CGFloat { 7 }
 
-    init(
+    package init(
         vertical: Bool, key: String, defaultFraction: Double, minFirst: CGFloat, minSecond: CGFloat,
         defaults: UserDefaults = .standard, @ViewBuilder first: () -> First, @ViewBuilder second: () -> Second
     ) {
@@ -34,7 +34,7 @@ struct PersistentSplit<First: View, Second: View>: View {
         _fraction = State(initialValue: defaults.object(forKey: key) as? Double ?? defaultFraction)
     }
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             let total = vertical ? geo.size.height : geo.size.width
             let f = SplitLayout.clamped(
@@ -81,11 +81,11 @@ struct PersistentSplit<First: View, Second: View>: View {
 }
 
 /// A checkbox per method: its boxes shown or not, with its color and shape.
-struct MethodToggles: View {
-    @Bindable var events: SmartAlertEventsModel
-    let evidence: AlertEvidence
+package struct MethodToggles: View {
+    @Bindable package var events: SmartAlertEventsModel
+    package let evidence: AlertEvidence
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 14) {
             ForEach(Array(evidence.methods.enumerated()), id: \.element.name) { i, m in
                 Toggle(isOn: Binding(get: { events.visibleMethods.contains(m.name) }, set: { _ in events.toggleMethod(m.name) })) {
@@ -104,10 +104,10 @@ struct MethodToggles: View {
 }
 
 /// The picture's context menu in the pane.
-struct EvidencePictureMenu: View {
-    let events: SmartAlertEventsModel
+package struct EvidencePictureMenu: View {
+    package let events: SmartAlertEventsModel
 
-    var body: some View {
+    package var body: some View {
         Button("Open in Preview") { events.openInPreview() }
         Button("Save Picture With Detection Boxes As…") { events.savePictureAs(withBoxes: true, window: NSApp.keyWindow) }
             .disabled(!(events.subject?.hasBoxes ?? false))
@@ -118,28 +118,32 @@ struct EvidencePictureMenu: View {
             Button("Show in Finder") { events.showInFinder() }
         }
     }
+
+    package init(events: SmartAlertEventsModel) {
+        self.events = events
+    }
 }
 
 // MARK: The large viewer
 
 /// A window that passes the viewer's keys on (arrows, Esc) wherever the
 /// focus is inside it.
-final class EvidenceViewerWindow: NSWindow {
-    var onKey: (EvidenceViewerKey) -> Void = { _ in }
+package final class EvidenceViewerWindow: NSWindow {
+    package var onKey: (EvidenceViewerKey) -> Void = { _ in }
 
-    override func keyDown(with event: NSEvent) {
+    package override func keyDown(with event: NSEvent) {
         if let key = EvidenceViewerKey(keyCode: event.keyCode) { onKey(key) } else { super.keyDown(with: event) }
     }
 
-    override func cancelOperation(_ sender: Any?) { onKey(.close) }
+    package override func cancelOperation(_ sender: Any?) { onKey(.close) }
 }
 
 @MainActor
-final class EvidenceViewerWindowController: NSWindowController, NSWindowDelegate {
-    let events: SmartAlertEventsModel
-    var onClose: () -> Void = {}
+package final class EvidenceViewerWindowController: NSWindowController, NSWindowDelegate {
+    package let events: SmartAlertEventsModel
+    package var onClose: () -> Void = {}
 
-    init(events: SmartAlertEventsModel) {
+    package init(events: SmartAlertEventsModel) {
         self.events = events
         let window = EvidenceViewerWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 700),
@@ -159,10 +163,10 @@ final class EvidenceViewerWindowController: NSWindowController, NSWindowDelegate
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     /// What a key does: arrows step the frames, Esc closes.
-    func handle(_ key: EvidenceViewerKey) {
+    package func handle(_ key: EvidenceViewerKey) {
         switch key {
         case .previous: events.stepFrame(by: -1)
         case .next: events.stepFrame(by: 1)
@@ -170,14 +174,14 @@ final class EvidenceViewerWindowController: NSWindowController, NSWindowDelegate
         }
     }
 
-    func windowWillClose(_ notification: Notification) { onClose() }
+    package func windowWillClose(_ notification: Notification) { onClose() }
 }
 
-struct EvidenceViewerView: View {
-    @Bindable var events: SmartAlertEventsModel
+package struct EvidenceViewerView: View {
+    @Bindable package var events: SmartAlertEventsModel
     @State private var zoom = TileZoom.none
 
-    var body: some View {
+    package var body: some View {
         VStack(spacing: 0) {
             HStack {
                 if let ev = events.evidence {
@@ -222,7 +226,7 @@ struct EvidenceViewerView: View {
     /// The whole picture's rectangle in the view at `zoom`: the destination
     /// `TileZoom` gives is the part of the view covered, `visible` the part of
     /// the picture shown there.
-    static func pictureFrame(_ zoom: TileZoom, base: ZoomBase, in size: CGSize) -> CGRect {
+    package static func pictureFrame(_ zoom: TileZoom, base: ZoomBase, in size: CGSize) -> CGRect {
         let d = zoom.destination(in: base), v = zoom.visible(in: base)
         guard v.width > 0, v.height > 0 else { return CGRect(origin: .zero, size: size) }
         let w = d.width * size.width / v.width, h = d.height * size.height / v.height
@@ -233,28 +237,28 @@ struct EvidenceViewerView: View {
 /// Wheel and pinch zoom around the pointer, drag to pan, double-click to
 /// reset, and the context menu, over the picture. Units are fractions of
 /// the view (origin top left), as `TileZoom` takes them.
-struct EvidenceViewerInput: NSViewRepresentable {
-    var zoom: (Double, CGPoint) -> Void
-    var pan: (CGVector) -> Void
-    var reset: () -> Void
-    var menu: () -> NSMenu?
+package struct EvidenceViewerInput: NSViewRepresentable {
+    package var zoom: (Double, CGPoint) -> Void
+    package var pan: (CGVector) -> Void
+    package var reset: () -> Void
+    package var menu: () -> NSMenu?
 
-    func makeNSView(context: Context) -> InputView { InputView() }
+    package func makeNSView(context: Context) -> InputView { InputView() }
 
-    func updateNSView(_ view: InputView, context: Context) {
+    package func updateNSView(_ view: InputView, context: Context) {
         view.zoom = zoom
         view.pan = pan
         view.reset = reset
         view.menuProvider = menu
     }
 
-    final class InputView: NSView {
-        var zoom: (Double, CGPoint) -> Void = { _, _ in }
-        var pan: (CGVector) -> Void = { _ in }
-        var reset: () -> Void = {}
-        var menuProvider: () -> NSMenu? = { nil }
+    package final class InputView: NSView {
+        package var zoom: (Double, CGPoint) -> Void = { _, _ in }
+        package var pan: (CGVector) -> Void = { _ in }
+        package var reset: () -> Void = {}
+        package var menuProvider: () -> NSMenu? = { nil }
 
-        override var isFlipped: Bool { true }
+        package override var isFlipped: Bool { true }
 
         private func unit(_ event: NSEvent) -> CGPoint {
             let p = convert(event.locationInWindow, from: nil)
@@ -263,7 +267,7 @@ struct EvidenceViewerInput: NSViewRepresentable {
 
         // A mouse wheel zooms around the pointer; a trackpad's two-finger
         // scroll pans, and zooms with Option held; a pinch zooms (as a tile).
-        override func scrollWheel(with event: NSEvent) {
+        package override func scrollWheel(with event: NSEvent) {
             if event.hasPreciseScrollingDeltas {
                 if event.modifierFlags.contains(.option) {
                     zoom(exp(Double(event.scrollingDeltaY) * 0.01), unit(event))
@@ -275,16 +279,23 @@ struct EvidenceViewerInput: NSViewRepresentable {
             }
         }
 
-        override func magnify(with event: NSEvent) { zoom(1 + Double(event.magnification), unit(event)) }
+        package override func magnify(with event: NSEvent) { zoom(1 + Double(event.magnification), unit(event)) }
 
-        override func mouseDown(with event: NSEvent) {
+        package override func mouseDown(with event: NSEvent) {
             if event.clickCount == 2 { reset() }
         }
 
-        override func mouseDragged(with event: NSEvent) {
+        package override func mouseDragged(with event: NSEvent) {
             pan(CGVector(dx: event.deltaX / max(bounds.width, 1), dy: event.deltaY / max(bounds.height, 1)))
         }
 
-        override func menu(for event: NSEvent) -> NSMenu? { menuProvider() }
+        package override func menu(for event: NSEvent) -> NSMenu? { menuProvider() }
+    }
+
+    package init(zoom: @escaping (Double, CGPoint) -> Void, pan: @escaping (CGVector) -> Void, reset: @escaping () -> Void, menu: @escaping () -> NSMenu?) {
+        self.zoom = zoom
+        self.pan = pan
+        self.reset = reset
+        self.menu = menu
     }
 }

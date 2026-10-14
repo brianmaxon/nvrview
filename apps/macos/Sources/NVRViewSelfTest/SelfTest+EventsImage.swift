@@ -4,6 +4,7 @@ import FakeCore
 import Foundation
 import NVRCore
 import UniformTypeIdentifiers
+import AppAlerts
 
 // Kept pictures out of the Events window (docs/UX.md "Events"): the list's
 // picture icon and "With pictures" filter, the large viewer, Save As, Copy,

@@ -11,62 +11,62 @@ import SwiftUI
 /// The window's state: the filter, the entries, the one opened.
 @MainActor
 @Observable
-final class SmartAlertEventsModel {
-    @ObservationIgnored let app: AppModel
-    var filter = SmartAlertLogFilter() {
+package final class SmartAlertEventsModel {
+    @ObservationIgnored package let app: any AlertsHost
+    package var filter = SmartAlertLogFilter() {
         didSet { if filter != oldValue { reload() } }
     }
     /// The date range choice (`filter.sinceMs` follows it).
-    var range: DateRange = .week {
+    package var range: DateRange = .week {
         didSet { if range != oldValue { applyRange() } }
     }
-    private(set) var entries: [SmartAlertLogEntry] = []
-    private(set) var more = false
+    package private(set) var entries: [SmartAlertLogEntry] = []
+    package private(set) var more = false
     /// The log could not be read (a core without smart alerts).
-    private(set) var unavailable = false
-    var selection: SmartAlertLogEntry.ID?
+    package private(set) var unavailable = false
+    package var selection: SmartAlertLogEntry.ID?
     /// Bursts opened to show their members.
-    var expandedBursts: Set<String> = []
+    package var expandedBursts: Set<String> = []
     /// The opened entry's snapshot.
-    private(set) var snapshot: NSImage?
+    package private(set) var snapshot: NSImage?
     /// The opened entry's kept evidence (frames and every method's boxes),
     /// the frames as pictures, which frame is shown, and which methods'
     /// boxes are drawn.
-    private(set) var evidence: AlertEvidence?
-    private(set) var evidenceImages: [Int: NSImage] = [:]
-    var frame = 0
-    var visibleMethods: Set<String> = []
+    package private(set) var evidence: AlertEvidence?
+    package private(set) var evidenceImages: [Int: NSImage] = [:]
+    package var frame = 0
+    package var visibleMethods: Set<String> = []
     /// Camera AI against our detector over the kept pictures.
-    private(set) var comparison = EvidenceComparison([])
+    package private(set) var comparison = EvidenceComparison([])
     /// Every kept set by trigger (the list's picture icon and its filter).
-    private(set) var evidenceSets: [UInt64: AlertEvidence] = [:]
+    package private(set) var evidenceSets: [UInt64: AlertEvidence] = [:]
     /// The evidence filter "with pictures": only entries whose pictures are
     /// still kept.
-    var withPictures = false {
+    package var withPictures = false {
         didSet { if withPictures != oldValue { reload() } }
     }
     /// What the last action did, in words.
-    var note: String?
+    package var note: String?
     /// The clock (a self-test moves it past an expiry).
-    @ObservationIgnored var now: () -> Date = { Date() }
+    @ObservationIgnored package var now: () -> Date = { Date() }
     /// Where Open in Preview and drags put temporary files.
-    @ObservationIgnored var tempFolder = SmartAlertEventsModel.defaultTempFolder
+    @ObservationIgnored package var tempFolder = SmartAlertEventsModel.defaultTempFolder
     /// Opens a temporary picture (Preview; the self-test replaces it).
-    @ObservationIgnored var opener: (URL) -> Void = { SmartAlertEventsModel.openInPreviewApp($0) }
+    @ObservationIgnored package var opener: (URL) -> Void = { SmartAlertEventsModel.openInPreviewApp($0) }
     /// The large viewer, while it is open.
-    @ObservationIgnored var viewer: EvidenceViewerWindowController?
+    @ObservationIgnored package var viewer: EvidenceViewerWindowController?
     /// Opens the recordings window at a camera and time (set by the app
     /// delegate).
-    @ObservationIgnored var jump: (CameraRef, Int64) -> Void = { _, _ in }
+    @ObservationIgnored package var jump: (CameraRef, Int64) -> Void = { _, _ in }
     @ObservationIgnored private var token: UUID?
     @ObservationIgnored private var reloadQueued = false
 
-    enum DateRange: String, CaseIterable, Identifiable {
+    package enum DateRange: String, CaseIterable, Identifiable {
         case today = "Today", week = "7 Days", month = "30 Days", all = "All"
-        var id: String { rawValue }
+        package var id: String { rawValue }
     }
 
-    init(app: AppModel) {
+    package init(app: any AlertsHost) {
         self.app = app
         applyRange()
         token = app.alertsModel.subscribeEvents { [weak self] e in
@@ -75,7 +75,7 @@ final class SmartAlertEventsModel {
         }
     }
 
-    func close() {
+    package func close() {
         viewer?.close()
         if let token { app.alertsModel.unsubscribeEvents(token) }
         token = nil
@@ -103,7 +103,7 @@ final class SmartAlertEventsModel {
         }
     }
 
-    func reload() {
+    package func reload() {
         guard let page = app.alertsModel.log(filter) else {
             unavailable = true
             entries = []
@@ -121,20 +121,20 @@ final class SmartAlertEventsModel {
     }
 
     /// The row's picture icon: nil when no frames are kept (or they expired).
-    func badge(_ e: SmartAlertLogEntry) -> EvidenceBadge.Info? {
+    package func badge(_ e: SmartAlertLogEntry) -> EvidenceBadge.Info? {
         evidenceSets[e.triggerID].flatMap { EvidenceBadge.info($0, nowMs: Int64(now().timeIntervalSince1970 * 1000)) }
     }
 
     private func passesPictures(_ e: SmartAlertLogEntry) -> Bool { !withPictures || badge(e) != nil }
 
     /// Steps the shown frame (the large viewer's arrow keys).
-    func stepFrame(by delta: Int) {
+    package func stepFrame(by delta: Int) {
         guard let evidence else { return }
         frame = EvidenceFrameStep.step(from: frame, by: delta, in: evidence.frames.map(\.index))
     }
 
     /// Opens the large viewer on the shown frame.
-    func openViewer() {
+    package func openViewer() {
         guard subject != nil else { return }
         if let viewer {
             viewer.showWindow(nil)
@@ -148,22 +148,22 @@ final class SmartAlertEventsModel {
     }
 
     /// The next page (older entries).
-    func loadMore() {
+    package func loadMore() {
         guard more, let last = entries.last, let page = app.alertsModel.log(filter, beforeMs: last.decidedMs) else { return }
         entries += page.entries.filter(filter.matches).filter(passesPictures).filter { e in !entries.contains { $0.id == e.id } }
         more = page.more
     }
 
-    var selected: SmartAlertLogEntry? { entries.first { $0.id == selection } }
+    package var selected: SmartAlertLogEntry? { entries.first { $0.id == selection } }
 
     /// The list's rows: decisions, bursts folded.
-    var rows: [SmartAlertLogRow] { SmartAlertLogGrouping.rows(entries) }
+    package var rows: [SmartAlertLogRow] { SmartAlertLogGrouping.rows(entries) }
 
-    func toggleBurst(_ id: String) {
+    package func toggleBurst(_ id: String) {
         if expandedBursts.contains(id) { expandedBursts.remove(id) } else { expandedBursts.insert(id) }
     }
 
-    func select(_ id: SmartAlertLogEntry.ID?) {
+    package func select(_ id: SmartAlertLogEntry.ID?) {
         selection = id
         note = nil
         loadSnapshot()
@@ -192,12 +192,12 @@ final class SmartAlertEventsModel {
             })
     }
 
-    func toggleMethod(_ name: String) {
+    package func toggleMethod(_ name: String) {
         if visibleMethods.contains(name) { visibleMethods.remove(name) } else { visibleMethods.insert(name) }
     }
 
     /// Keeps the opened entry's evidence for 7 days.
-    func keepEvidence() {
+    package func keepEvidence() {
         guard let e = selected else { return }
         note = app.alertsModel.pinEvidence(trigger: e.triggerID) ? "Kept for 7 days." : "The pictures are gone."
         // The list's icon follows (kept, not expiring).
@@ -205,23 +205,23 @@ final class SmartAlertEventsModel {
     }
 
     /// Opens the sensor's message log (the messages around the decision).
-    func openSensorMessages(_ e: SmartAlertLogEntry) {
+    package func openSensorMessages(_ e: SmartAlertLogEntry) {
         guard let key = e.sensor else { return }
         app.alertsModel.showSensorMessages(key)
     }
 
-    var sensors: [MQTTSensor] { app.alertsModel.settings.sensors }
+    package var sensors: [MQTTSensor] { app.alertsModel.settings.sensors }
 
-    func cameraName(_ c: AlertCamera) -> String { app.cameraRef(c).map(app.name(of:)) ?? "Camera \(c.channel + 1)" }
+    package func cameraName(_ c: AlertCamera) -> String { app.cameraRef(c).map(app.name(of:)) ?? "Camera \(c.channel + 1)" }
 
     /// The list's "where": the camera, or the sensor's name.
-    func place(_ e: SmartAlertLogEntry) -> String {
+    package func place(_ e: SmartAlertLogEntry) -> String {
         if let c = e.camera { return cameraName(c) }
         if e.sourceGroup == .sensor { return "Sensor" }
         return "—"
     }
 
-    func feedback(_ e: SmartAlertLogEntry, useful: Bool, reason: AlertFeedbackReason? = nil) {
+    package func feedback(_ e: SmartAlertLogEntry, useful: Bool, reason: AlertFeedbackReason? = nil) {
         guard let id = e.alertID else { return }
         if app.alertsModel.feedback(alertID: id, useful: useful, reason: reason) {
             note = useful ? "Marked useful." : "Marked not useful\(reason.map { ": \($0.title.lowercased())" } ?? "")."
@@ -231,24 +231,24 @@ final class SmartAlertEventsModel {
         }
     }
 
-    func mute(_ e: SmartAlertLogEntry, _ choice: AlertMuteChoice) {
+    package func mute(_ e: SmartAlertLogEntry, _ choice: AlertMuteChoice) {
         guard let c = e.camera else { return }
         let ok = app.alertsModel.mute(c, seconds: choice.seconds(now: Date()))
         note = ok ? "\(cameraName(c)) muted (\(choice.title.lowercased()))." : "The camera could not be muted."
     }
 
-    func openRecording(_ e: SmartAlertLogEntry) {
+    package func openRecording(_ e: SmartAlertLogEntry) {
         guard let c = e.camera, let ref = app.cameraRef(c) else { return }
         jump(ref, e.decidedMs)
     }
 }
 
 @MainActor
-final class SmartAlertEventsWindowController: NSWindowController, NSWindowDelegate {
-    let events: SmartAlertEventsModel
-    var onClose: (SmartAlertEventsWindowController) -> Void = { _ in }
+package final class SmartAlertEventsWindowController: NSWindowController, NSWindowDelegate {
+    package let events: SmartAlertEventsModel
+    package var onClose: (SmartAlertEventsWindowController) -> Void = { _ in }
 
-    init(app: AppModel) {
+    package init(app: any AlertsHost) {
         events = SmartAlertEventsModel(app: app)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 620),
@@ -267,18 +267,18 @@ final class SmartAlertEventsWindowController: NSWindowController, NSWindowDelega
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    func windowWillClose(_ notification: Notification) {
+    package func windowWillClose(_ notification: Notification) {
         events.close()
         onClose(self)
     }
 }
 
-struct SmartAlertEventsView: View {
-    @Bindable var events: SmartAlertEventsModel
+package struct SmartAlertEventsView: View {
+    @Bindable package var events: SmartAlertEventsModel
 
-    var body: some View {
+    package var body: some View {
         // The divider positions are remembered (UserDefaults).
         PersistentSplit(
             vertical: false, key: "eventsListFraction", defaultFraction: 0.58, minFirst: 440, minSecond: 280
@@ -357,7 +357,7 @@ struct SmartAlertEventsView: View {
             })
     }
 
-    static func decisionTitle(_ d: String) -> String {
+    package static func decisionTitle(_ d: String) -> String {
         switch d {
         case "alert": "Alerts"
         case "not_confirmed": "Not confirmed"
@@ -458,7 +458,7 @@ struct SmartAlertEventsView: View {
         .font(.callout)
     }
 
-    static func decisionLabel(_ e: SmartAlertLogEntry) -> String {
+    package static func decisionLabel(_ e: SmartAlertLogEntry) -> String {
         let base: String =
             switch e.category == "test" ? e.decision : e.category {
             case "alert": "Alert" + (e.severity.map { " (\($0))" } ?? "")
@@ -469,7 +469,7 @@ struct SmartAlertEventsView: View {
         return e.isTest ? "Test: \(base)" : base
     }
 
-    static func time(_ ms: Int64) -> String {
+    package static func time(_ ms: Int64) -> String {
         let f = DateFormatter()
         f.dateStyle = .short
         f.timeStyle = .medium
@@ -579,13 +579,13 @@ struct SmartAlertEventsView: View {
 
 /// The kept frames of a check with every method's boxes over them (colors and
 /// labels, not color alone), a switch per method, the scores, and Keep.
-struct EvidenceView: View {
-    @Bindable var events: SmartAlertEventsModel
-    let evidence: AlertEvidence
+package struct EvidenceView: View {
+    @Bindable package var events: SmartAlertEventsModel
+    package let evidence: AlertEvidence
 
-    static let colors: [Color] = [.orange, .cyan, .pink, .yellow, .mint]
+    package static let colors: [Color] = [.orange, .cyan, .pink, .yellow, .mint]
 
-    var body: some View {
+    package var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Kept pictures").font(.subheadline.bold())
@@ -628,9 +628,9 @@ struct EvidenceView: View {
         }
     }
 
-    static let symbols = ["square", "circle", "triangle", "diamond", "star"]
+    package static let symbols = ["square", "circle", "triangle", "diamond", "star"]
 
-    static func summary(_ m: EvidenceMethod, evidence: AlertEvidence) -> String {
+    package static func summary(_ m: EvidenceMethod, evidence: AlertEvidence) -> String {
         var parts: [String] = []
         if m.name == "camera_ai", let c = evidence.cameraClaim { parts.append("claimed \(c)") }
         let all = m.boxes.values.flatMap { $0 }.sorted { $0.score > $1.score }
@@ -639,7 +639,7 @@ struct EvidenceView: View {
         return parts.joined(separator: ", ")
     }
 
-    static func time(_ ms: Int64?) -> String {
+    package static func time(_ ms: Int64?) -> String {
         guard let ms else { return "soon" }
         let f = DateFormatter()
         f.timeStyle = .short
@@ -647,7 +647,7 @@ struct EvidenceView: View {
         return "at " + f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
     }
 
-    static func day(_ ms: Int64?) -> String {
+    package static func day(_ ms: Int64?) -> String {
         guard let ms else { return "7 days" }
         let f = DateFormatter()
         f.timeStyle = .none
@@ -657,13 +657,13 @@ struct EvidenceView: View {
 }
 
 /// A picture with boxes over it, placed by `EvidenceOverlay`.
-struct EvidenceOverlayView: View {
-    let image: NSImage
-    let evidence: AlertEvidence
-    let frame: Int
-    let visible: Set<String>
+package struct EvidenceOverlayView: View {
+    package let image: NSImage
+    package let evidence: AlertEvidence
+    package let frame: Int
+    package let visible: Set<String>
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
@@ -683,5 +683,12 @@ struct EvidenceOverlayView: View {
             }
         }
         .accessibilityLabel("Kept picture with detection boxes")
+    }
+
+    package init(image: NSImage, evidence: AlertEvidence, frame: Int, visible: Set<String>) {
+        self.image = image
+        self.evidence = evidence
+        self.frame = frame
+        self.visible = visible
     }
 }

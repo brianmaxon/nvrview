@@ -21,28 +21,28 @@ import AppBase
 /// when `file` is nil. Beside it, `stored` gets the document's stored form
 /// (`alerts.json`: cameras by device key, no secrets), the file a host that
 /// configures the core itself reads (docs/NOTIFICATIONS.md).
-struct SmartAlertSettingsFile {
-    let file: URL?
-    var stored: URL?
+package struct SmartAlertSettingsFile {
+    package let file: URL?
+    package var stored: URL?
 
-    init(file: URL?, stored: URL? = nil) {
+    package init(file: URL?, stored: URL? = nil) {
         self.file = file
         self.stored = stored
     }
 
     /// Writes the stored form when it changed.
-    func saveStored(_ data: Data) {
+    package func saveStored(_ data: Data) {
         guard let stored, (try? Data(contentsOf: stored)) != data else { return }
         try? FileManager.default.createDirectory(at: stored.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: stored, options: .atomic)
     }
 
-    func load() -> SmartAlertSettings {
+    package func load() -> SmartAlertSettings {
         guard let file, let data = try? Data(contentsOf: file) else { return SmartAlertSettings() }
         return SmartAlertSettings.fromFile(data)
     }
 
-    func save(_ s: SmartAlertSettings) {
+    package func save(_ s: SmartAlertSettings) {
         guard let file else { return }
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? s.fileData().write(to: file, options: .atomic)
@@ -51,58 +51,58 @@ struct SmartAlertSettingsFile {
 
 @MainActor
 @Observable
-final class SmartAlertsModel {
-    @ObservationIgnored unowned let model: AppModel
-    @ObservationIgnored let bridge: CoreBridge
+package final class SmartAlertsModel {
+    @ObservationIgnored package unowned let model: any AlertsHost
+    @ObservationIgnored package let bridge: CoreBridge
     @ObservationIgnored private let credentials: any CredentialStore
     @ObservationIgnored private let file: SmartAlertSettingsFile
 
     /// What the user chose (saved on every `update`).
-    private(set) var settings: SmartAlertSettings
+    package private(set) var settings: SmartAlertSettings
     /// The live checks (shared by every window).
-    private(set) var board = VerificationBoard()
+    package private(set) var board = VerificationBoard()
     /// The core's answer to the last settings sent (`alerts_configured`).
-    private(set) var configured: JSONValue?
+    package private(set) var configured: JSONValue?
     /// The service's status from the last log query (`inputs`, `outputs`,
     /// `muted`, ...).
-    private(set) var status: JSONValue?
+    package private(set) var status: JSONValue?
     /// Why the settings could not be sent, if they could not.
-    private(set) var sendError: String?
+    package private(set) var sendError: String?
     /// The last delivery result per output index (from `delivery` steps).
-    private(set) var lastDelivery: [Int: (ok: Bool, at: Date)] = [:]
+    package private(set) var lastDelivery: [Int: (ok: Bool, at: Date)] = [:]
     /// The last Home Assistant connection test, in words.
-    var homeAssistantTest: String?
+    package var homeAssistantTest: String?
     /// The last "Send test alert" result, in words, and as the event gave it.
-    var homeAssistantSend: String?
-    private(set) var lastOutputTest: OutputTestResult?
+    package var homeAssistantSend: String?
+    package private(set) var lastOutputTest: OutputTestResult?
     /// The last "Simulate trigger", in words.
-    var simulateNote: String?
+    package var simulateNote: String?
     /// Requests seen, by key (until done), for the detector and the boxes.
     @ObservationIgnored private var requests: [String: VerifyRequest] = [:]
     /// The latest checked picture per check and angle (window mode).
-    @ObservationIgnored private(set) var pictures: [UInt64: [AlertCamera: CGImage]] = [:]
+    @ObservationIgnored package private(set) var pictures: [UInt64: [AlertCamera: CGImage]] = [:]
     @ObservationIgnored private var listeners: [UUID: () -> Void] = [:]
     @ObservationIgnored private var eventListeners: [UUID: (SmartAlertEvent) -> Void] = [:]
     /// The settings' stored form for the host (cameras by device key, no
     /// secrets); nil until the user has saved settings here, so a
     /// hand-written `alerts.json` still counts.
-    @ObservationIgnored private(set) var storedData: Data?
+    @ObservationIgnored package private(set) var storedData: Data?
     @ObservationIgnored private var saved: Bool
     /// The device IDs the last document was built with.
     @ObservationIgnored private var sentDevices: [String: UInt64] = [:]
     @ObservationIgnored private var sentOffset: Int?
     /// Whether a camera shows on any viewer window (set by the app
     /// delegate; the window mode needs to know).
-    @ObservationIgnored var isOnScreen: (CameraRef) -> Bool = { _ in false }
+    @ObservationIgnored package var isOnScreen: (CameraRef) -> Bool = { _ in false }
     /// Shows or hides the verification window (set by the app delegate).
-    @ObservationIgnored var showPanel: (Bool) -> Void = { _ in }
+    @ObservationIgnored package var showPanel: (Bool) -> Void = { _ in }
     /// Opens a sensor's message log window (set by the app delegate).
-    @ObservationIgnored var showSensorMessages: (String) -> Void = { _ in }
+    @ObservationIgnored package var showSensorMessages: (String) -> Void = { _ in }
     /// Simulate trigger: also send the test to Home Assistant (off unless
     /// ticked, each time).
-    var simulateToHomeAssistant = false
+    package var simulateToHomeAssistant = false
 
-    init(model: AppModel, bridge: CoreBridge, credentials: any CredentialStore, file: SmartAlertSettingsFile) {
+    package init(model: any AlertsHost, bridge: CoreBridge, credentials: any CredentialStore, file: SmartAlertSettingsFile) {
         self.model = model
         self.bridge = bridge
         self.credentials = credentials
@@ -115,12 +115,12 @@ final class SmartAlertsModel {
     // MARK: Night
 
     /// The Night location's fields (kept here so they outlive the view).
-    @ObservationIgnored lazy var locationEditor = NightLocationEditor(alerts: self)
+    @ObservationIgnored package lazy var locationEditor = NightLocationEditor(alerts: self)
 
     /// Today's predicted sunrise, sunset, and night window at the stored
     /// location (the core's arithmetic, `nv_alerts_sun_times`); nil without
     /// a location or when the core cannot say.
-    func sunTimes(now: Date = Date(), zone: TimeZone = .current) -> AlertSunTimes? {
+    package func sunTimes(now: Date = Date(), zone: TimeZone = .current) -> AlertSunTimes? {
         guard let location = settings.location else { return nil }
         let request = AlertSunTimes.request(
             location: location, now: now, utcOffsetMinutes: zone.secondsFromGMT(for: now) / 60, night: settings.night)
@@ -131,7 +131,7 @@ final class SmartAlertsModel {
     // MARK: Settings
 
     /// Changes the settings: saved, then sent to the core.
-    func update(_ body: (inout SmartAlertSettings) -> Void) {
+    package func update(_ body: (inout SmartAlertSettings) -> Void) {
         var s = settings
         body(&s)
         guard s != settings else { return }
@@ -147,7 +147,7 @@ final class SmartAlertsModel {
     /// Hands the settings to the host (or, without one, sends them) when
     /// something they are built from changed (the devices' IDs, the UTC
     /// offset), or always with `force`.
-    func apply(force: Bool = false) {
+    package func apply(force: Bool = false) {
         if model.smartAlerts != nil {
             guard saved else { return }
             let data = settings.storedJSON(
@@ -191,20 +191,20 @@ final class SmartAlertsModel {
 
     // MARK: Secrets (the Keychain only)
 
-    func secret(_ s: SmartAlertSecret) -> String? { credentials.password(for: s.account) }
+    package func secret(_ s: SmartAlertSecret) -> String? { credentials.password(for: s.account) }
     /// By the `id` of the input or output entry (the host's lookup).
-    func secret(id: String) -> String? { credentials.password(for: "alerts.\(id)") }
+    package func secret(id: String) -> String? { credentials.password(for: "alerts.\(id)") }
 
     /// The host's trouble with the settings, if it has some.
-    var hostProblem: String? {
+    package var hostProblem: String? {
         if case .failed(let why)? = model.smartAlerts?.state { return why }
         return nil
     }
-    func hasSecret(_ s: SmartAlertSecret) -> Bool { credentials.hasPassword(for: s.account) }
+    package func hasSecret(_ s: SmartAlertSecret) -> Bool { credentials.hasPassword(for: s.account) }
 
     /// Saves a secret (an empty one deletes it) and sends the settings again.
     @discardableResult
-    func setSecret(_ value: String, for s: SmartAlertSecret) -> Bool {
+    package func setSecret(_ value: String, for s: SmartAlertSecret) -> Bool {
         let ok: Bool
         if value.isEmpty {
             credentials.deletePassword(for: s.account)
@@ -217,14 +217,14 @@ final class SmartAlertsModel {
     }
 
     /// Removes a sensor and its Keychain items.
-    func removeSensor(_ key: String) {
+    package func removeSensor(_ key: String) {
         update { $0.sensors.removeAll { $0.key == key } }
         credentials.deletePassword(for: SmartAlertSecret.mqttPassword(key).account)
     }
 
     // MARK: Events
 
-    func handle(_ event: SmartAlertEvent) {
+    package func handle(_ event: SmartAlertEvent) {
         let now = model.clock.now
         switch event {
         case .verifyRequest(let r):
@@ -257,16 +257,16 @@ final class SmartAlertsModel {
     }
 
     /// A request by key, while it is open.
-    func request(_ key: String) -> VerifyRequest? { requests[key] }
+    package func request(_ key: String) -> VerifyRequest? { requests[key] }
 
     /// The open requests of a check (by trigger ID), oldest first.
-    func requests(trigger: UInt64) -> [VerifyRequest] {
+    package func requests(trigger: UInt64) -> [VerifyRequest] {
         requests.values.filter { $0.triggerIDs.contains(trigger) }.sorted { $0.request < $1.request }
     }
 
     /// The detector's answer to a request (the boxes it sent the core), and
     /// the picture it checked: the live view draws them.
-    func recordDetections(request key: String, detections: [AlertDetection], picture: CGImage? = nil) {
+    package func recordDetections(request key: String, detections: [AlertDetection], picture: CGImage? = nil) {
         guard let r = requests[key] else { return }
         let sensors = settings.sensors
         board.answered(
@@ -287,7 +287,7 @@ final class SmartAlertsModel {
 
     /// From the model's one-second timer (and the self-test after advancing
     /// its clock): checks whose time is up go.
-    func tick() {
+    package func tick() {
         guard let deadline = board.deadline, model.clock.now >= deadline else { return }
         let removed = board.tick(now: model.clock.now)
         guard !removed.isEmpty else { return }
@@ -296,39 +296,39 @@ final class SmartAlertsModel {
         changed()
     }
 
-    func dismiss(_ id: UInt64) {
+    package func dismiss(_ id: UInt64) {
         board.dismiss(id)
         pictures[id] = nil
         updatePanel()
         changed()
     }
 
-    func dismissAll() {
+    package func dismissAll() {
         board.dismissAll()
         pictures = pictures.filter { board.check($0.key) != nil }
         updatePanel()
         changed()
     }
 
-    func use(_ id: UInt64) {
+    package func use(_ id: UInt64) {
         board.use(id, now: model.clock.now)
     }
 
-    func hover(_ id: UInt64, _ inside: Bool) {
+    package func hover(_ id: UInt64, _ inside: Bool) {
         board.hover(id, inside, now: model.clock.now)
         changed()
     }
 
     /// Where a check shows in a window: in its tile when the window shows the
     /// camera, else per the setting.
-    func place(_ check: VerifyCheck, onScreen: Bool) -> VerifyPlace {
+    package func place(_ check: VerifyCheck, onScreen: Bool) -> VerifyPlace {
         VerifyPlace.place(settings.view.placement, onScreen: onScreen)
     }
 
     /// The checks for the verification window: those whose place is the
     /// window (the camera on no viewer window with the window setting, or
     /// "always a window").
-    var panelChecks: [VerifyCheck] {
+    package var panelChecks: [VerifyCheck] {
         board.shown.filter { c in
             let onScreen = c.primaryCamera.flatMap { model.cameraRef($0) }.map(isOnScreen) ?? false
             return place(c, onScreen: onScreen) == .window
@@ -342,7 +342,7 @@ final class SmartAlertsModel {
     /// A still of a camera for drawing zones and regions: the latest
     /// picture of its live stream (a tile showing it, or one opened for at
     /// most 5 s), rendered to an image. Nil when no picture came.
-    func still(of camera: CameraRef) async -> CGImage? {
+    package func still(of camera: CameraRef) async -> CGImage? {
         let leased = model.leases.tile(for: camera) == nil
         if leased { _ = model.leases.acquire(camera) }
         defer { if leased { model.leases.release(camera) } }
@@ -373,7 +373,7 @@ final class SmartAlertsModel {
 
     // MARK: The event log
 
-    func log(_ filter: SmartAlertLogFilter, beforeMs: Int64? = nil) -> SmartAlertLogPage? {
+    package func log(_ filter: SmartAlertLogFilter, beforeMs: Int64? = nil) -> SmartAlertLogPage? {
         guard let text = try? bridge.smartAlertsAPI().alertsGet(query: filter.query(beforeMs: beforeMs)),
             let page = SmartAlertLogPage.parse(text)
         else { return nil }
@@ -382,7 +382,7 @@ final class SmartAlertsModel {
     }
 
     /// Reads the service's status (the settings screen's lines).
-    func refreshStatus() {
+    package func refreshStatus() {
         var f = SmartAlertLogFilter()
         f.limit = 1
         _ = log(f)
@@ -390,7 +390,7 @@ final class SmartAlertsModel {
     }
 
     @discardableResult
-    func feedback(alertID: UInt64, useful: Bool, reason: AlertFeedbackReason?) -> Bool {
+    package func feedback(alertID: UInt64, useful: Bool, reason: AlertFeedbackReason?) -> Bool {
         do throws(CoreStatus) {
             try bridge.smartAlertsAPI().alertFeedback(
                 json: AlertFeedbackReason.json(alertID: alertID, useful: useful, reason: reason))
@@ -401,7 +401,7 @@ final class SmartAlertsModel {
     }
 
     @discardableResult
-    func mute(_ camera: AlertCamera, seconds: UInt32) -> Bool {
+    package func mute(_ camera: AlertCamera, seconds: UInt32) -> Bool {
         do throws(CoreStatus) {
             try bridge.smartAlertsAPI().alertMute(cameraJSON: camera.json, seconds: seconds)
             refreshStatus()
@@ -411,7 +411,7 @@ final class SmartAlertsModel {
         }
     }
 
-    func snapshot(alertID: UInt64) -> NSImage? {
+    package func snapshot(alertID: UInt64) -> NSImage? {
         guard let data = try? bridge.smartAlertsAPI().alertSnapshotGet(alertID: alertID) else { return nil }
         return NSImage(data: data)
     }
@@ -420,7 +420,7 @@ final class SmartAlertsModel {
 
     /// The settings screen's line for a sensor (its input's result and, when
     /// the core reports it, the connection's state).
-    func sensorStatus(_ index: Int) -> String? {
+    package func sensorStatus(_ index: Int) -> String? {
         if settings.sensors.indices.contains(index),
             let live = SensorConnection.find(id: settings.sensors[index].key, in: status)
         {
@@ -435,7 +435,7 @@ final class SmartAlertsModel {
 
     /// The Home Assistant output's line: its last delivery, else whether the
     /// core took its settings.
-    var homeAssistantStatus: String? {
+    package var homeAssistantStatus: String? {
         let index = settings.homeAssistant.enabled ? 1 : nil
         if let index, let last = lastDelivery[index] {
             let f = DateFormatter()
@@ -451,7 +451,7 @@ final class SmartAlertsModel {
     /// "Test": asks Home Assistant's API root with the token (a read only
     /// call; nothing is turned on). The answer goes into
     /// `homeAssistantTest`.
-    func testHomeAssistant() {
+    package func testHomeAssistant() {
         let base = settings.homeAssistant.baseURL.trimmingCharacters(in: .whitespaces)
         if let why = AlertEndpoint.checkHomeAssistantURL(base) {
             homeAssistantTest = why.prefix(1).uppercased() + why.dropFirst()
@@ -491,7 +491,7 @@ final class SmartAlertsModel {
 
     /// Redirects are never followed (the token must not go elsewhere).
     private final class NoRedirects: NSObject, URLSessionTaskDelegate {
-        func urlSession(
+        package func urlSession(
             _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
             newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
         ) { completionHandler(nil) }
@@ -499,25 +499,25 @@ final class SmartAlertsModel {
 
     // MARK: Observing
 
-    func subscribe(_ body: @escaping () -> Void) -> UUID {
+    package func subscribe(_ body: @escaping () -> Void) -> UUID {
         let token = UUID()
         listeners[token] = body
         return token
     }
 
-    func unsubscribe(_ token: UUID) { listeners[token] = nil }
+    package func unsubscribe(_ token: UUID) { listeners[token] = nil }
 
     /// Every smart-alert event after the views took it (desktop
     /// notifications, the detector).
-    func subscribeEvents(_ body: @escaping (SmartAlertEvent) -> Void) -> UUID {
+    package func subscribeEvents(_ body: @escaping (SmartAlertEvent) -> Void) -> UUID {
         let token = UUID()
         eventListeners[token] = body
         return token
     }
 
-    func unsubscribeEvents(_ token: UUID) { eventListeners[token] = nil }
+    package func unsubscribeEvents(_ token: UUID) { eventListeners[token] = nil }
 
-    func changed() {
+    package func changed() {
         for body in listeners.values { body() }
     }
 }

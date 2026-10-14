@@ -1,5 +1,6 @@
 import AppKit
 import NVRCore
+import AppAlerts
 
 // Live smart-alert checks in a viewer window (docs/UX.md "Smart alerts",
 // "Live checks"). The checks live in `SmartAlertsModel.board`; this

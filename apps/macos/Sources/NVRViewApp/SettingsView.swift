@@ -4,6 +4,7 @@ import SwiftUI
 import AppBase
 import AppUpdates
 import AppCapture
+import AppAlerts
 
 /// The Settings window's size. The tab bar shows every tab (icon and label)
 /// in one row, so the window must stay at least as wide as that row: six tabs

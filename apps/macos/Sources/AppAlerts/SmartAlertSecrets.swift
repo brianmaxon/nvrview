@@ -11,13 +11,13 @@ import Foundation
 ///
 /// The host builds the core's document on the main actor, where this is
 /// asked.
-final class ModelAlertSecrets: AlertSecrets, @unchecked Sendable {
-    private weak var model: AppModel?
+package final class ModelAlertSecrets: AlertSecrets, @unchecked Sendable {
+    private weak var model: (any AlertsHost)?
 
     @MainActor
-    init(model: AppModel) { self.model = model }
+    package init(model: any AlertsHost) { self.model = model }
 
-    func secret(for id: String) -> String? {
+    package func secret(for id: String) -> String? {
         MainActor.assumeIsolated { model?.alertsModel.secret(id: id) }
     }
 }

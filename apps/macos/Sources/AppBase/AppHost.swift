@@ -21,6 +21,13 @@ package protocol AppHost: AnyObject {
     func name(of camera: CameraRef) -> String
     func cameraOptions(_ camera: CameraRef) -> CameraOptions
     func setAllowTalk(_ camera: CameraRef, _ on: Bool)
+    func setEntrance(_ camera: CameraRef, _ on: Bool)
+    var devices: [DeviceRuntime] { get }
+    var allCameras: [CameraRef] { get }
+    func listedChannels(_ device: DeviceRuntime) -> [ChannelInfo]
+    func cameras(device key: String, channel c: ChannelInfo) -> [CameraRef]
+    func cameraRef(_ c: AlertCamera) -> CameraRef?
+    func alertCamera(_ c: CameraRef) -> AlertCamera?
 
     // Audio.
     var audible: Set<CameraRef> { get }

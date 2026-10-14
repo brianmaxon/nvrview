@@ -5,6 +5,7 @@ import Foundation
 import NVRCore
 import Synchronization
 import AppBase
+import AppAlerts
 
 /// Self-test steps `alerts-e2e-verified`, `alerts-e2e-not-confirmed` and
 /// `alerts-ui-real-core`, and the debugging and review steps

@@ -44,6 +44,9 @@ let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     ("AppCapture", ["AppBase"]),
     // Camera motion: the pan, tilt, zoom, lens, and preset model and controls.
     ("AppPTZ", ["AppBase"]),
+    // Smart alerts on this computer: settings, the events window, evidence
+    // and verification views, and the model behind them.
+    ("AppAlerts", ["AppBase", "AppCapture", "AlertHost", "DetectorKit"]),
 ]
 
 let appDependencies: [Target.Dependency] =

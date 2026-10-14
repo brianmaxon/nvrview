@@ -10,28 +10,28 @@ import Observation
 
 @MainActor
 @Observable
-final class NightLocationEditor {
+package final class NightLocationEditor {
     private let alerts: SmartAlertsModel
     /// The fields' text.
-    var latText = ""
-    var lonText = ""
+    package var latText = ""
+    package var lonText = ""
     /// The user switched the location on (fields are shown) but may not have
     /// set one yet.
-    private(set) var wanted: Bool
+    package private(set) var wanted: Bool
     /// Why the last Set was refused, in words; nil when it was not.
-    private(set) var message: String?
+    package private(set) var message: String?
 
-    init(alerts: SmartAlertsModel) {
+    package init(alerts: SmartAlertsModel) {
         self.alerts = alerts
         wanted = alerts.settings.location != nil
         load()
     }
 
     /// Whether the fields show.
-    var isOn: Bool { wanted || alerts.settings.location != nil }
+    package var isOn: Bool { wanted || alerts.settings.location != nil }
 
     /// The toggle. Turning it on shows empty fields and keeps what is stored.
-    func setOn(_ on: Bool) {
+    package func setOn(_ on: Bool) {
         message = nil
         if on {
             wanted = true
@@ -48,13 +48,13 @@ final class NightLocationEditor {
     }
 
     /// Shows the stored location in the fields.
-    func load() {
+    package func load() {
         latText = alerts.settings.location.map { String($0.lat) } ?? latText
         lonText = alerts.settings.location.map { String($0.lon) } ?? lonText
     }
 
     /// The Set button (and Return in a field).
-    func set() {
+    package func set() {
         switch CoordinateInput.resolve(lat: latText, lon: lonText) {
         case .success(let location):
             message = nil

@@ -29,6 +29,6 @@ package protocol CaptureHost: AppHost {
     var recordFrom: RecordQuality { get set }
     var maxRecordingMinutes: Int { get set }
     var maxRecordingGB: Double { get set }
-    var devices: [DeviceRuntime] { get }
+
     func activeCall(for camera: CameraRef) -> DoorbellCall?
 }

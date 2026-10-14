@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import SwiftUI
+import AppBase
 
 // The live verification view (docs/UX.md "Smart alerts", "Live checks"):
 // over a tile (a band across its bottom) or a verification inset, the
@@ -9,22 +10,32 @@ import SwiftUI
 // words are `TraceText`'s; the event log shows the same.
 
 /// What an overlay shows of one check.
-struct VerifyOverlayContent: Equatable {
-    var checkID: UInt64
-    var headline: String
+package struct VerifyOverlayContent: Equatable {
+    package var checkID: UInt64
+    package var headline: String
     /// The latest steps, oldest first.
-    var lines: [String]
-    var boxes: [VerifyBox]
+    package var lines: [String]
+    package var boxes: [VerifyBox]
     /// Other checks on the same camera.
-    var others: Int
-    var critical: Bool
+    package var others: Int
+    package var critical: Bool
     /// Offer "Dismiss All" (more than one check is shown).
-    var canDismissAll: Bool
+    package var canDismissAll: Bool
+
+    package init(checkID: UInt64, headline: String, lines: [String], boxes: [VerifyBox], others: Int, critical: Bool, canDismissAll: Bool) {
+        self.checkID = checkID
+        self.headline = headline
+        self.lines = lines
+        self.boxes = boxes
+        self.others = others
+        self.critical = critical
+        self.canDismissAll = canDismissAll
+    }
 }
 
 extension VerifyOverlayContent {
     @MainActor
-    init(check c: VerifyCheck, camera: AlertCamera?, model: AppModel, lines count: Int, others: Int) {
+    package init(check c: VerifyCheck, camera: AlertCamera?, model: any AlertsHost, lines count: Int, others: Int) {
         let name: (AlertCamera) -> String = { [model] cam in model.cameraRef(cam).map(model.name(of:)) ?? "Camera \(cam.channel + 1)" }
         checkID = c.id
         var head = c.headline(cameraName: name)
@@ -45,26 +56,26 @@ extension VerifyOverlayContent {
 /// clicks through except on its buttons; tracks the pointer (hovering
 /// holds the check on screen).
 @MainActor
-final class VerificationOverlayView: PassThroughView {
-    private(set) var content: VerifyOverlayContent?
+package final class VerificationOverlayView: PassThroughView {
+    package private(set) var content: VerifyOverlayContent?
     /// Where the picture is drawn, in this view's coordinates (top-left
     /// origin).
-    var pictureRect: CGRect = .zero {
+    package var pictureRect: CGRect = .zero {
         didSet { if pictureRect != oldValue { needsDisplay = true } }
     }
     /// The band's height limit as a fraction of the view's height.
-    var bandFraction: CGFloat = 0.45
-    var onClose: (UInt64) -> Void = { _ in }
-    var onDismissAll: () -> Void = {}
-    var onHover: (UInt64, Bool) -> Void = { _, _ in }
+    package var bandFraction: CGFloat = 0.45
+    package var onClose: (UInt64) -> Void = { _ in }
+    package var onDismissAll: () -> Void = {}
+    package var onHover: (UInt64, Bool) -> Void = { _, _ in }
 
     private let close = NSButton()
     private let dismissAll = NSButton(title: "Dismiss All", target: nil, action: nil)
-    static let lineHeight: CGFloat = 14
+    package static let lineHeight: CGFloat = 14
 
-    override var isFlipped: Bool { true }
+    package override var isFlipped: Bool { true }
 
-    init() {
+    package init() {
         super.init(frame: .zero)
         wantsLayer = true
         close.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close Check")
@@ -85,9 +96,9 @@ final class VerificationOverlayView: PassThroughView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    func apply(_ c: VerifyOverlayContent?) {
+    package func apply(_ c: VerifyOverlayContent?) {
         guard c != content else { return }
         let hadCheck = content?.checkID
         content = c
@@ -99,14 +110,14 @@ final class VerificationOverlayView: PassThroughView {
     }
 
     /// The band across the bottom: its height for the lines shown.
-    var bandRect: CGRect {
+    package var bandRect: CGRect {
         guard let c = content else { return .zero }
         let wanted = CGFloat(c.lines.count + 1) * Self.lineHeight + 10
         let h = min(wanted, max(bounds.height * bandFraction, Self.lineHeight * 2 + 10))
         return CGRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
     }
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         let band = bandRect
         close.frame = CGRect(x: band.maxX - 22, y: band.minY + 3, width: 18, height: 18)
@@ -114,7 +125,7 @@ final class VerificationOverlayView: PassThroughView {
         dismissAll.frame.origin = CGPoint(x: close.frame.minX - dismissAll.frame.width - 6, y: band.minY + 2)
     }
 
-    override func draw(_ dirtyRect: NSRect) {
+    package override func draw(_ dirtyRect: NSRect) {
         guard let c = content else { return }
         // The boxes, labeled (not by color alone).
         for b in c.boxes {
@@ -170,29 +181,29 @@ final class VerificationOverlayView: PassThroughView {
         }
     }
 
-    override func updateTrackingAreas() {
+    package override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for t in trackingAreas { removeTrackingArea(t) }
         addTrackingArea(NSTrackingArea(rect: bandRect, options: [.mouseEnteredAndExited, .activeAlways], owner: self))
     }
 
-    override func mouseEntered(with event: NSEvent) { if let id = content?.checkID { onHover(id, true) } }
-    override func mouseExited(with event: NSEvent) { if let id = content?.checkID { onHover(id, false) } }
+    package override func mouseEntered(with event: NSEvent) { if let id = content?.checkID { onHover(id, true) } }
+    package override func mouseExited(with event: NSEvent) { if let id = content?.checkID { onHover(id, false) } }
 
     @objc private func closeClicked() { if let id = content?.checkID { onClose(id) } }
     @objc private func dismissAllClicked() { onDismissAll() }
 
     /// The self-test's click on the close button.
-    func clickCloseForTest() { closeClicked() }
+    package func clickCloseForTest() { closeClicked() }
 
     /// Self-test: how often AppKit re-parented this view (a stable stack
     /// adds it once).
-    private(set) var reparentCount = 0
-    override func viewDidMoveToSuperview() {
+    package private(set) var reparentCount = 0
+    package override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         reparentCount += 1
     }
-    var closeButtonFrameForTest: CGRect { close.frame }
+    package var closeButtonFrameForTest: CGRect { close.frame }
 }
 
 // MARK: The verification window
@@ -201,10 +212,10 @@ final class VerificationOverlayView: PassThroughView {
 /// check's camera is on no viewer window and the setting asks for a
 /// window, or always with "Always in a small window").
 @MainActor
-final class VerificationPanelController: NSWindowController {
-    private let model: AppModel
+package final class VerificationPanelController: NSWindowController {
+    private let model: any AlertsHost
 
-    init(model: AppModel) {
+    package init(model: any AlertsHost) {
         self.model = model
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 460),
@@ -225,24 +236,24 @@ final class VerificationPanelController: NSWindowController {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     /// Shows it without activating the app or taking the keyboard.
-    func present() {
+    package func present() {
         guard let window, !window.isVisible else { return }
         window.orderFrontRegardless()
     }
 
-    func hide() { window?.orderOut(nil) }
+    package func hide() { window?.orderOut(nil) }
 }
 
-struct VerificationPanelView: View {
-    let model: AppModel
+package struct VerificationPanelView: View {
+    package let model: any AlertsHost
     @State private var tick = 0
 
     private var alerts: SmartAlertsModel { model.alertsModel }
 
-    var body: some View {
+    package var body: some View {
         let checks = alerts.panelChecks
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -265,15 +276,19 @@ struct VerificationPanelView: View {
         .frame(minWidth: 320, minHeight: 240)
         .onExitCommand { if let top = checks.first { alerts.dismiss(top.id) } }
     }
+
+    package init(model: any AlertsHost) {
+        self.model = model
+    }
 }
 
 /// One check in the window: its picture with boxes (the picture the
 /// detector checked, when it handed one over) and its whole step log.
-struct VerificationCard: View {
-    let model: AppModel
-    let check: VerifyCheck
+package struct VerificationCard: View {
+    package let model: any AlertsHost
+    package let check: VerifyCheck
 
-    var body: some View {
+    package var body: some View {
         let name: (AlertCamera) -> String = { [model] cam in model.cameraRef(cam).map(model.name(of:)) ?? "Camera \(cam.channel + 1)" }
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -301,14 +316,19 @@ struct VerificationCard: View {
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
         .onHover { model.alertsModel.hover(check.id, $0) }
     }
+
+    package init(model: any AlertsHost, check: VerifyCheck) {
+        self.model = model
+        self.check = check
+    }
 }
 
 /// A picture (or a gray stand-in) with judged boxes over it.
-struct BoxedPicture: View {
-    let image: CGImage?
-    let boxes: [VerifyBox]
+package struct BoxedPicture: View {
+    package let image: CGImage?
+    package let boxes: [VerifyBox]
 
-    var body: some View {
+    package var body: some View {
         GeometryReader { geo in
             let size = image.map { CGSize(width: $0.width, height: $0.height) } ?? CGSize(width: 16, height: 9)
             let fit = ROIGeometry.fitRect(picture: size, in: geo.size)
@@ -338,14 +358,19 @@ struct BoxedPicture: View {
             }
         }
     }
+
+    package init(image: CGImage?, boxes: [VerifyBox]) {
+        self.image = image
+        self.boxes = boxes
+    }
 }
 
 /// The step log: one line per trace step, in order.
-struct TraceLogView: View {
-    let steps: [TraceStep]
-    let cameraName: (AlertCamera) -> String
+package struct TraceLogView: View {
+    package let steps: [TraceStep]
+    package let cameraName: (AlertCamera) -> String
 
-    var body: some View {
+    package var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Array(steps.enumerated()), id: \.offset) { _, s in
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -354,5 +379,10 @@ struct TraceLogView: View {
                 }
             }
         }
+    }
+
+    package init(steps: [TraceStep], cameraName: @escaping (AlertCamera) -> String) {
+        self.steps = steps
+        self.cameraName = cameraName
     }
 }

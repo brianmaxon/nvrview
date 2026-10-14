@@ -2,6 +2,7 @@ import AppKit
 import NVRCore
 import UniformTypeIdentifiers
 import AppBase
+import AppAlerts
 
 // A kept verification picture taken out of the Events window (docs/UX.md
 // "Events"): Open in Preview, Save Picture As…, Copy, Show in Finder, and a
@@ -13,36 +14,51 @@ import AppBase
 /// What is drawn: one kept frame with the boxes of the methods that are on.
 /// Immutable; the pieces are used from a drag's background thread only to
 /// read, so it is passed across without a copy.
-struct EvidenceSubject: @unchecked Sendable {
-    var image: NSImage
-    var evidence: AlertEvidence
-    var frame: Int
-    var visible: Set<String>
-    var camera: String
+package struct EvidenceSubject: @unchecked Sendable {
+    package var image: NSImage
+    package var evidence: AlertEvidence
+    package var frame: Int
+    package var visible: Set<String>
+    package var camera: String
     /// When the frame was taken (its file name's time).
-    var frameMs: Int64
+    package var frameMs: Int64
 
     /// Some shown method has a box in this frame.
-    var hasBoxes: Bool {
+    package var hasBoxes: Bool {
         evidence.methods.contains { visible.contains($0.name) && !($0.boxes[frame] ?? []).isEmpty }
+    }
+
+    package init(image: NSImage, evidence: AlertEvidence, frame: Int, visible: Set<String>, camera: String, frameMs: Int64) {
+        self.image = image
+        self.evidence = evidence
+        self.frame = frame
+        self.visible = visible
+        self.camera = camera
+        self.frameMs = frameMs
     }
 }
 
 /// Draws a subject into an encoded picture.
-enum EvidenceRendering {
-    struct Rendered {
-        var data: Data
-        var width: Int
-        var height: Int
+package enum EvidenceRendering {
+    package struct Rendered {
+        package var data: Data
+        package var width: Int
+        package var height: Int
+
+        package init(data: Data, width: Int, height: Int) {
+            self.data = data
+            self.width = width
+            self.height = height
+        }
     }
 
     /// The box colors (the same order as the pane's `EvidenceView.colors`).
-    static let colors: [NSColor] = [.systemOrange, .systemCyan, .systemPink, .systemYellow, .systemMint]
+    package static let colors: [NSColor] = [.systemOrange, .systemCyan, .systemPink, .systemYellow, .systemMint]
 
     /// The frame at its own pixel size, with the boxes when `withBoxes`.
     /// Boxes are placed by `EvidenceOverlay`, the pane's mapping, over the
     /// whole picture.
-    static func render(_ subject: EvidenceSubject, withBoxes: Bool, format: PictureFormat) -> Rendered? {
+    package static func render(_ subject: EvidenceSubject, withBoxes: Bool, format: PictureFormat) -> Rendered? {
         guard let cg = subject.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let w = cg.width, h = cg.height
         guard w > 0, h > 0,
@@ -103,7 +119,7 @@ enum EvidenceRendering {
 
 extension SmartAlertEventsModel {
     /// The shown frame as a subject, nil without a picture.
-    var subject: EvidenceSubject? {
+    package var subject: EvidenceSubject? {
         guard let evidence, let image = evidenceImages[frame] else { return nil }
         let at = evidence.frames.first { $0.index == frame }?.atMs ?? 0
         return EvidenceSubject(
@@ -112,10 +128,10 @@ extension SmartAlertEventsModel {
     }
 
     /// Boxes are drawn "as shown": when any method's boxes are on.
-    var showsBoxes: Bool { subject?.hasBoxes ?? false }
+    package var showsBoxes: Bool { subject?.hasBoxes ?? false }
 
     /// The suggested name, in `folder` or for a single-use folder.
-    func pictureFileName(_ subject: EvidenceSubject, format: PictureFormat, in folder: URL?) -> String {
+    package func pictureFileName(_ subject: EvidenceSubject, format: PictureFormat, in folder: URL?) -> String {
         EvidencePictureFiles.fileName(
             camera: subject.camera, frameMs: subject.frameMs, shareSafe: app.shareSafeNames, format: format,
             taken: { name in folder.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent(name).path) } ?? false }
@@ -123,7 +139,7 @@ extension SmartAlertEventsModel {
     }
 
     /// Where temporary files go (Open in Preview and drags).
-    nonisolated static var defaultTempFolder: URL {
+    package nonisolated static var defaultTempFolder: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("NVRView", isDirectory: true)
             .appendingPathComponent("EvidencePictures", isDirectory: true)
@@ -133,7 +149,7 @@ extension SmartAlertEventsModel {
 
     /// Writes the shown frame to exactly `url` (the format follows its extension).
     @discardableResult
-    func writePicture(to url: URL, withBoxes: Bool) -> Bool {
+    package func writePicture(to url: URL, withBoxes: Bool) -> Bool {
         guard let subject else { return false }
         let format = PictureFormat(extension: url.pathExtension) ?? app.pictureFormat
         guard let r = EvidenceRendering.render(subject, withBoxes: withBoxes, format: format) else { return false }
@@ -146,7 +162,7 @@ extension SmartAlertEventsModel {
     }
 
     /// Save Picture As… with the panel Save Picture uses.
-    func savePictureAs(withBoxes: Bool, window: NSWindow?) {
+    package func savePictureAs(withBoxes: Bool, window: NSWindow?) {
         guard let subject else { return }
         let format = app.pictureFormat, folder = app.picturesFolder
         let suggested = SavePicturePanel.suggestedName(
@@ -160,12 +176,12 @@ extension SmartAlertEventsModel {
 
     /// The shown frame as a file under `tempFolder`, in a folder of its own
     /// so the name is the clean one. Nil when nothing could be written.
-    func writeTemporaryPicture(withBoxes: Bool) -> URL? {
+    package func writeTemporaryPicture(withBoxes: Bool) -> URL? {
         guard let subject else { return nil }
         return Self.writeTemporary(subject, withBoxes: withBoxes, format: app.pictureFormat, folder: tempFolder, name: pictureFileName(subject, format: app.pictureFormat, in: nil))
     }
 
-    nonisolated static func writeTemporary(
+    package nonisolated static func writeTemporary(
         _ subject: EvidenceSubject, withBoxes: Bool, format: PictureFormat, folder: URL, name: String
     ) -> URL? {
         guard let r = EvidenceRendering.render(subject, withBoxes: withBoxes, format: format) else { return nil }
@@ -181,7 +197,7 @@ extension SmartAlertEventsModel {
     }
 
     /// Open in Preview: a temporary file (removed after 24 hours).
-    func openInPreview(withBoxes: Bool? = nil) {
+    package func openInPreview(withBoxes: Bool? = nil) {
         EvidencePictureFiles.removeOld(in: tempFolder, now: Date())
         guard let url = writeTemporaryPicture(withBoxes: withBoxes ?? showsBoxes) else {
             note = "The picture could not be opened."
@@ -192,7 +208,7 @@ extension SmartAlertEventsModel {
 
     /// Copy: the picture as shown (boxes when any are on).
     @discardableResult
-    func copyPicture(to pasteboard: NSPasteboard = .general) -> Bool {
+    package func copyPicture(to pasteboard: NSPasteboard = .general) -> Bool {
         guard let subject, let r = EvidenceRendering.render(subject, withBoxes: subject.hasBoxes, format: .png) else {
             return false
         }
@@ -201,13 +217,13 @@ extension SmartAlertEventsModel {
     }
 
     /// A pinned set's folder under the core's data directory, if it is there.
-    var pinnedFolder: URL? {
+    package var pinnedFolder: URL? {
         guard let evidence, evidence.pinned, let base = app.coreDataDirectory else { return nil }
         let folder = base.appendingPathComponent("alerts/evidence/pinned/\(evidence.triggerID)", isDirectory: true)
         return FileManager.default.fileExists(atPath: folder.path) ? folder : nil
     }
 
-    func showInFinder() {
+    package func showInFinder() {
         guard let folder = pinnedFolder else { return }
         NSWorkspace.shared.activateFileViewerSelecting([folder])
     }
@@ -216,7 +232,7 @@ extension SmartAlertEventsModel {
 
     /// A file promise for the shown frame: the file is made when the drop
     /// asks for it, named as Save Picture names it, with boxes when shown.
-    func dragProvider() -> NSItemProvider? {
+    package func dragProvider() -> NSItemProvider? {
         guard let subject else { return nil }
         let withBoxes = subject.hasBoxes
         let format = app.pictureFormat
@@ -239,7 +255,7 @@ extension SmartAlertEventsModel {
     // MARK: Menu
 
     /// The picture's context menu (the pane's and the viewer's).
-    func pictureMenu(window: @escaping () -> NSWindow?) -> NSMenu {
+    package func pictureMenu(window: @escaping () -> NSWindow?) -> NSMenu {
         let menu = NSMenu()
         let has = subject != nil
         func add(_ title: String, enabled: Bool = true, _ action: @escaping () -> Void) {
@@ -263,10 +279,10 @@ extension SmartAlertEventsModel {
 
 /// Removes temporary pictures after 24 hours: at launch, then hourly.
 @MainActor
-enum EvidenceTempSweeper {
+package enum EvidenceTempSweeper {
     private static var timer: Timer?
 
-    static func start() {
+    package static func start() {
         sweep()
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in
@@ -274,14 +290,14 @@ enum EvidenceTempSweeper {
         }
     }
 
-    static func sweep() {
+    package static func sweep() {
         EvidencePictureFiles.removeOld(in: SmartAlertEventsModel.defaultTempFolder, now: Date())
     }
 }
 
 extension SmartAlertEventsModel {
     /// Opens a file in Preview.
-    static func openInPreviewApp(_ url: URL) {
+    package static func openInPreviewApp(_ url: URL) {
         if let preview = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview") {
             NSWorkspace.shared.open([url], withApplicationAt: preview, configuration: NSWorkspace.OpenConfiguration())
         } else {

@@ -10,6 +10,7 @@ import AppUpdates
 import AppCalls
 import AppCapture
 import AppPTZ
+import AppAlerts
 
 #if NVRVIEW_REAL_CORE
 import NVRCoreC
@@ -1272,6 +1273,8 @@ final class FakeBox: @unchecked Sendable {
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
 }
+
+extension AppModel: AlertsHost {}
 
 extension AppModel: CaptureHost {
     func activeCall(for camera: CameraRef) -> DoorbellCall? { calls.call(for: camera) }

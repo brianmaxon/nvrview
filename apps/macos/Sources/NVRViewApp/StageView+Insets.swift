@@ -660,17 +660,6 @@ final class MoreChipView: NSTextField {
     override func mouseDown(with event: NSEvent) { onClick?(self) }
 }
 
-/// A transparent view whose own area lets clicks through to what is below;
-/// only its subviews take them.
-@MainActor
-class PassThroughView: NSView {
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let hit = super.hitTest(point)
-        return hit === self ? nil : hit
-    }
-}
-
 /// Over the whole stage: the swapped-in camera's header (with its close
 /// control), and the call of a doorbell that fills the stage (its Unmute
 /// control over the picture, its controls along the bottom).
