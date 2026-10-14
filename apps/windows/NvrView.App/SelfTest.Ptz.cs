@@ -1,5 +1,5 @@
 // 11e. Camera motion (docs/UX.md "Pan, tilt, and zoom"), against the mock-nvr's cameras that move (never real
-// hardware): the pad holds a move and renews it, an Alt arrow does too, the app going quiet lets the camera stop
+// hardware): the pad holds a move and renews it, an arrow key does too, the app going quiet lets the camera stop
 // by itself, presets recall by menu and Alt+digit, the lens stays within its range, and a second lens is addressed
 // as its own camera. The shell tests (NvrView.Shell.Tests PtzTests) check the same rules on a manual clock over a
 // C# model of a camera; this runs the real core.
@@ -39,6 +39,59 @@ internal sealed partial class SelfTest
             ptz.StopAll();
             v.UseClock(new SystemViewerClock());
         }
+    }
+
+    /// <summary>The stage's arrow keys as the window routes them: the camera first, then the selection.</summary>
+    private static bool ArrowKey(StageView stage, VirtualKey key, bool alt)
+    {
+        bool handled = stage.HandlePtzKey(key, 0, alt, repeat: false);
+        if (!handled)
+        {
+            handled = stage.HandleKey(key, ctrl: false, repeat: false);
+        }
+        stage.HandlePtzKeyUp(key);
+        return handled;
+    }
+
+    /// <summary>Arrows move the selection where they do not steer a camera, and deactivating the window ends a held move.</summary>
+    private void ArrowSelection(Viewer v, StageView stage, PtzModel ptz, StageTile padTile)
+    {
+        StageTile? right = stage.Neighbor(padTile, VirtualKey.Right);
+        if (right is null)
+        {
+            _problems.Add("no tile to the right of the PTZ tile for the arrow keys");
+            return;
+        }
+        int calls0 = ptz.Calls.Count;
+        // parity: ptz-option-arrow-selection
+        stage.Select(padTile.Path);
+        ArrowKey(stage, VirtualKey.Right, alt: true);
+        Say($"ptz Alt+arrow: selection {(stage.Selected == right ? "moved right" : "did not move")}, camera calls {ptz.Calls.Count - calls0}");
+        Expect(stage.Selected == right, "Alt+arrow on a PTZ tile did not move the selection");
+        Expect(ptz.Calls.Count == calls0 && ptz.Held is null, "Alt+arrow on a PTZ tile moved the camera");
+        // parity: ptz-arrow-selection
+        StageTile? plain = stage.Tiles.FirstOrDefault(t => !t.IsEmpty && t.CameraOrNone is { } c && v.ChannelOf(c)?.PtzOf(c.Lens).PanTilt != true);
+        if (plain is not null && stage.Neighbor(plain, VirtualKey.Right) is { } plainRight)
+        {
+            stage.Select(plain.Path);
+            ArrowKey(stage, VirtualKey.Right, alt: false);
+            Say($"ptz arrow on a tile that does not move: selection {(stage.Selected == plainRight ? "moved right" : "did not move")}");
+            Expect(stage.Selected == plainRight, "an arrow on a non-PTZ tile did not move the selection");
+            Expect(ptz.Calls.Count == calls0 && ptz.Held is null, "an arrow on a non-PTZ tile moved a camera");
+        }
+        else
+        {
+            _problems.Add("no camera that does not pan and tilt, with a tile to its right, for the arrow-selection check");
+        }
+        // parity: ptz-arrow-deactivate
+        stage.Select(padTile.Path);
+        Expect(stage.HandlePtzKey(VirtualKey.Left, 0, alt: false, repeat: false), "Left was not taken for the camera");
+        bool held = ptz.Held == padTile.Camera;
+        stage.WindowDeactivated();
+        Say($"ptz deactivation: held {held}, after {(ptz.Held is null ? "stopped" : "still held")}");
+        Expect(held, "an arrow did not hold a move before the window was deactivated");
+        Expect(ptz.Held is null && ptz.Calls[^1].Text == "stop", "deactivating the window did not stop the held move");
+        stage.HandlePtzKeyUp(VirtualKey.Left);
     }
 
     private async Task PtzOnCamera(Viewer v, StageView stage, PtzModel ptz, StageTile padTile, CameraRef camera, ManualViewerClock clock)
@@ -85,17 +138,19 @@ internal sealed partial class SelfTest
         stage.ClosePtzFlyout();
         bool reported = await Until(() => Sent("move") > moves0 && Sent("stop", "released") >= 1, 10);
         Expect(reported, "the core did not report the pad's move and stop");
-        // The Alt arrow holds the move; its release stops it.
-        Expect(stage.HandlePtzKey(VirtualKey.Right, 0, alt: true, repeat: false), "Alt+Right was not taken for the camera");
+        // parity: ptz-arrow-hold
+        // A plain arrow holds the move; its release stops it (a repeat is the same hold).
+        Expect(stage.HandlePtzKey(VirtualKey.Right, 0, alt: false, repeat: false), "Right was not taken for the camera");
+        Expect(stage.HandlePtzKey(VirtualKey.Right, 0, alt: false, repeat: true), "a repeat of Right was not taken for the camera");
         Advance(0.3);
         bool keyHeld = ptz.Held == camera;
         stage.HandlePtzKeyUp(VirtualKey.Right);
-        Expect(keyHeld && ptz.Held is null && ptz.Calls[^1].Text == "stop", "Alt+arrow did not move the camera while held and stop it on release");
-        Expect(stage.HandlePtzAltUp(), "the window would not keep Alt from opening the system menu after an Alt camera key");
-        Expect(!stage.HandlePtzAltUp(), "an Alt release with no camera key asked to be swallowed");
+        Expect(keyHeld && ptz.Held is null && ptz.Calls[^1].Text == "stop", "an arrow did not move the camera while held and stop it on release");
+        Expect(ptz.Calls.Count(c => c.Text.StartsWith("move right", StringComparison.Ordinal)) <= 2, "a key repeat sent another start");
+        ArrowSelection(v, stage, ptz, padTile);
 
         // parity: ptz-deadman
-        Expect(stage.HandlePtzKey(VirtualKey.Up, 0, alt: true, repeat: false), "Alt+Up was not taken for the camera");
+        Expect(stage.HandlePtzKey(VirtualKey.Up, 0, alt: false, repeat: false), "Up was not taken for the camera");
         Advance(0.3);
         ptz.FrozenForTest = true;
         int deadman0 = Sent("stop", "deadman");
@@ -104,7 +159,6 @@ internal sealed partial class SelfTest
         Expect(stopped, "the camera was not stopped by itself after the app went quiet");
         ptz.FrozenForTest = false;
         stage.HandlePtzKeyUp(VirtualKey.Up);
-        stage.HandlePtzAltUp();
 
         // parity: ptz-preset-recall
         var presets = PresetsMenu.Items(info, camera, ptz).OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().ToList();

@@ -149,9 +149,12 @@ private func path(_ tree: LayoutNode, _ channel: Int) -> NodePath {
     @Test func menuModifiersLeaveTheKeyToTheMenus() {
         for m: KeyModifiers in [.command, .control, .option, [.command, .control]] {
             #expect(key(3, "f", m) == nil)
-            #expect(key(ViewerKeys.leftArrow, nil, m) == nil)
+            #expect(key(ViewerKeys.space, " ", m) == nil)
             #expect(key(37, "l", m) == nil)
+            // Option with an arrow moves the selection, where a plain arrow may steer a camera.
+            #expect((key(ViewerKeys.leftArrow, nil, m) == nil) == (m != .option))
         }
+        #expect(key(ViewerKeys.leftArrow, nil, .option) == .move(.left))
     }
 
     @Test func nothingFiresWhileEditingText() {

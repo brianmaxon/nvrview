@@ -332,13 +332,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         }
         // Tab and Esc go to the alert insets first, when there are any.
         if event.type == .keyDown, let key = insetKey(for: event), stage.handleInsetKey(key) { return true }
-        // Option with an arrow, = or - or a digit steers the selected camera;
-        // the arrow's release (or Option's) ends the move.
+        // A plain arrow on a camera that pans and tilts, = or -, or Option
+        // with a digit steers the selected camera; the arrow's release ends the move.
         if event.type == .keyDown, let key = ptzKey(for: event), stage.handlePTZKey(key) { return true }
         if event.type == .keyUp, let direction = ViewerKeys.ptzKeyUp(keyCode: event.keyCode) {
             stage.handlePTZKeyUp(direction)
         }
-        if event.type == .flagsChanged { stage.handlePTZModifiers(optionDown: event.modifierFlags.contains(.option)) }
         guard event.type == .keyDown, let shortcut = shortcut(for: event) else { return false }
         perform(shortcut)
         return true
@@ -375,7 +374,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         if flags.contains(.control) { modifiers.insert(.control) }
         if flags.contains(.option) { modifiers.insert(.option) }
         if flags.contains(.command) { modifiers.insert(.command) }
-        return ViewerKeys.ptzKey(keyCode: event.keyCode, modifiers: modifiers, isRepeat: event.isARepeat, context: keyContext)
+        let can = stage.selectedPTZCapability
+        return ViewerKeys.ptzKey(
+            keyCode: event.keyCode, modifiers: modifiers, isRepeat: event.isARepeat, context: keyContext,
+            canMove: can.panTilt, canZoom: can.lens)
     }
 
     func insetKey(for event: NSEvent) -> InsetKey? {

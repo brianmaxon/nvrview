@@ -87,7 +87,15 @@ extension StageView {
 
     // MARK: Keys (docs/UX.md "Capture and camera keys")
 
-    /// An Option key for the selected tile's camera. False when the tile has
+    /// What the selected (or focused) tile's camera can do with the keys.
+    var selectedPTZCapability: (panTilt: Bool, lens: Bool) {
+        guard let path = selectedPath, let camera = state.tree[path]?.camera,
+            let tile = headerTile(camera, path: path)
+        else { return (false, false) }
+        return (tile.panTilt, tile.lens)
+    }
+
+    /// A camera key for the selected tile's camera. False when the tile has
     /// no such control (the key goes on).
     func handlePTZKey(_ key: PTZKey) -> Bool {
         guard let path = selectedPath, let camera = state.tree[path]?.camera,
@@ -119,9 +127,6 @@ extension StageView {
 
     /// An arrow key came up.
     func handlePTZKeyUp(_ direction: PTZDirection) { model.ptz.keyUp(direction) }
-
-    /// A modifier key changed: Option up ends a move an arrow key holds.
-    func handlePTZModifiers(optionDown: Bool) { model.ptz.modifiersChanged(optionDown: optionDown) }
 }
 
 extension StageView: NSPopoverDelegate {

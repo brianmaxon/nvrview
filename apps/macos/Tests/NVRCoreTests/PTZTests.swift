@@ -46,20 +46,37 @@ struct PTZTests {
         #expect(t.end() == nil)
     }
 
-    @Test func optionKeysReadByPosition() {
-        func key(_ code: UInt16, _ mods: KeyModifiers = [.option], rep: Bool = false, _ ctx: KeyContext = .stage) -> PTZKey? {
-            ViewerKeys.ptzKey(keyCode: code, modifiers: mods, isRepeat: rep, context: ctx)
+    @Test func cameraKeysReadByPosition() {
+        func key(
+            _ code: UInt16, _ mods: KeyModifiers = [], rep: Bool = false, _ ctx: KeyContext = .stage,
+            move: Bool = true, zoom: Bool = true
+        ) -> PTZKey? {
+            ViewerKeys.ptzKey(keyCode: code, modifiers: mods, isRepeat: rep, context: ctx, canMove: move, canZoom: zoom)
         }
+        // A plain arrow steers a camera that pans and tilts; repeats are the same held move.
         #expect(key(ViewerKeys.leftArrow) == .move(.left))
         #expect(key(ViewerKeys.downArrow, rep: true) == .move(.down))
+        #expect(key(ViewerKeys.upArrow, move: false) == nil)
+        // Option with an arrow is the selection's, even on a PTZ tile.
+        #expect(key(ViewerKeys.leftArrow, [.option]) == nil)
+        #expect(key(ViewerKeys.leftArrow, [.shift]) == nil)
+        #expect(key(ViewerKeys.leftArrow, [.command]) == nil)
+        #expect(key(ViewerKeys.leftArrow, [], .textEditing) == nil)
+        #expect(key(ViewerKeys.leftArrow, [], .sidebar) == nil)
+        #expect(key(24, [], .sidebar) == nil)
+        // = and - zoom alone on a lens tile, and with Option anywhere.
         #expect(key(24) == .zoom(1))
         #expect(key(27) == .zoom(-1))
-        #expect(key(18) == .preset(1))
-        #expect(key(25) == .preset(9))
-        #expect(key(25, rep: true) == nil)
-        #expect(key(ViewerKeys.leftArrow, []) == nil)
-        #expect(key(ViewerKeys.leftArrow, [.option, .shift]) == nil)
-        #expect(key(ViewerKeys.leftArrow, [.option], .textEditing) == nil)
+        #expect(key(24, zoom: false) == nil)
+        #expect(key(27, [.option], zoom: false) == .zoom(-1))
+        #expect(key(24, rep: true) == nil)
+        // Presets stay on Option.
+        #expect(key(18, [.option]) == .preset(1))
+        #expect(key(25, [.option]) == .preset(9))
+        #expect(key(25, [.option], rep: true) == nil)
+        #expect(key(18) == nil)
+        #expect(key(24, [.option, .shift]) == nil)
+        #expect(key(24, [.option], .textEditing) == nil)
     }
 
     @Test func eventsExplainRefusals() {
