@@ -96,6 +96,17 @@ skip() { skipped="$skipped, $1"; }
 tree_clean_at_start=0
 if [ -z "$(git status --porcelain)" ]; then tree_clean_at_start=1; fi
 
+# A VERSION-only commit after a checked tree (a version bump) needs nothing
+# run: nothing a check looks at depends on the version's value, so the Mac
+# stamp of the checked tree is carried over to this one (scripts/checked.sh).
+# Only on a clean tree that has no Mac stamp yet, and never in a full run.
+if [ "$tree_clean_at_start" = 1 ] && [ "${NVRVIEW_FULL_CHECK:-0}" != "1" ] &&
+  [ ! -f "$(git rev-parse --git-common-dir)/nvrview-checks/$(git rev-parse 'HEAD^{tree}').mac" ] &&
+  scripts/checked.sh --carry-version mac; then
+  echo "VERSION-only change from a checked tree: nothing to run."
+  exit 0
+fi
+
 # Docs-only fast path. The changes being checked are the staged, unstaged,
 # and untracked changes, plus the commits not yet on the branch's upstream
 # (when it has one). A clean tree with no upstream has no changes to judge

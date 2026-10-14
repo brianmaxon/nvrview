@@ -83,7 +83,7 @@ public partial class App : Application
         AppOptions o = Program.Options;
         string dataDir = o.ResolvedDataDir;
         AppLog.Open(Path.Combine(dataDir, "logs"));
-        AppLog.Info($"NvrView {typeof(App).Assembly.GetName().Version?.ToString(3)}");
+        AppLog.Info($"NvrView {AppVersion.Installed}");
         if (Program.WaitedForPrevious is { } waited)
         {
             AppLog.Info(waited);

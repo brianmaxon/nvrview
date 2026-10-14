@@ -35,7 +35,9 @@
 # release-notes.json; the binary is untouched, so what ships is what was
 # tested, apart from the self-test module only the test build links in; see
 # scripts/macos-real-selftest.sh), and the bundle is signed again and zipped.
-# --rebuild forces a build
+# A tree that differs from the tested one in VERSION alone (a version bump)
+# reuses it too: the version is not compiled in, it is only in Info.plist, so
+# that file is written again from VERSION before the bundle is signed. --rebuild forces a build
 # from scratch. A tree with uncommitted changes always builds.
 #
 # This signing is for local use. Distributing the app needs a Developer ID
@@ -102,12 +104,25 @@ if [ "$real" = 1 ]; then scratch="--scratch-path .build-real-core"; fi
 tree=""
 if [ -z "$(git status --porcelain)" ]; then tree=$(git rev-parse 'HEAD^{tree}'); fi
 reuse=0
+tested_tree=$(sed -n 's/^tree=//p' build/NVRView.app.tested 2>/dev/null || true)
+built_tree=$(cat build/NVRView.app.tree 2>/dev/null || true)
+# The bundle's tree is the tree it was tested for, or a tree that differs from
+# it in VERSION alone.
+same_but_version() { # TREE: whether it is the tree being packaged or differs from it in VERSION alone
+  [ "$1" = "$tree" ] ||
+    { [ -n "$1" ] && git cat-file -e "$1^{tree}" 2>/dev/null && [ "$(git diff --name-only "$1" "$tree")" = VERSION ]; }
+}
 if [ "$rebuild" = 0 ] && [ "$real" = 1 ] && [ "$bundle_detector" = 0 ] && [ -n "$tree" ] && [ -x "$app/Contents/MacOS/NVRView" ] &&
-  [ "$(sed -n 's/^tree=//p' build/NVRView.app.tested 2>/dev/null)" = "$tree" ] &&
-  [ "$(cat build/NVRView.app.tree 2>/dev/null)" = "$tree" ]; then
+  [ "$tested_tree" = "$built_tree" ] && same_but_version "$tested_tree"; then
   reuse=1
-  echo "reusing the app bundle that passed the real-core self-test for tree $tree (only the bundled files and the signature are redone)"
+  if [ "$tested_tree" = "$tree" ]; then
+    echo "reusing the app bundle that passed the real-core self-test for tree $tree (only the bundled files and the signature are redone)"
+  else
+    echo "reusing the app bundle that passed the real-core self-test for tree $tested_tree; this tree differs only in VERSION, so only Info.plist, the bundled files and the signature are redone"
+  fi
   rm -f "$app/Contents/Resources/update-defaults.json" "$app/Contents/Resources/release-notes.json"
+  sed "s/@VERSION@/$version/g" "$pack/Info.plist.in" >"$app/Contents/Info.plist"
+  plutil -lint "$app/Contents/Info.plist" >/dev/null
 fi
 if [ "$reuse" = 0 ]; then
 rm -f build/NVRView.app.tree build/NVRView.app.tested

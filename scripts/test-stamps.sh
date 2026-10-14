@@ -86,6 +86,115 @@ scripts/checked.sh --record windows 5 "fake" "test (1 of 18 crates)" >/dev/null
 expect "a later cached run keeps the full stamp" release_stamp_tree windows "$t1"
 rm -f "$(stamp_dir)/$t1.windows"
 
+# --- a VERSION-only commit after a checked tree runs nothing -------------------
+# The stamps are carried over (carry_version_stamps): checked.sh, branch-ready.sh
+# and the merge scripts see the new tree as checked and say so. A commit that
+# changes VERSION and any other file is not covered.
+r="$work/carry"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+scripts/checked.sh --record mac 5 "fake mac" none >/dev/null
+scripts/checked.sh --record windows 5 "fake; worker w1; host h1" none >/dev/null
+t0=$(tree HEAD)
+git checkout -q -b bump
+commit_file VERSION 0.2.0
+t1=$(tree HEAD)
+expect_not "before carrying, the bumped tree has no stamp" has_stamp mac "$t1"
+expect "checked.sh accepts a VERSION-only commit after a checked tree" scripts/checked.sh --mac --windows
+case "$(scripts/checked.sh --mac --windows 2>&1)" in
+  *"VERSION-only change: carried from the check of tree $t0"*) pass "the output says the stamp was carried" ;;
+  *) fail "the output says the stamp was carried" ;;
+esac
+expect "the carried stamp is full (the source was)" full_stamp windows "$t1"
+case "$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$t1.windows")" in
+  "$t0") pass "the stamp names the tree it came from" ;;
+  *) fail "the stamp names the tree it came from" ;;
+esac
+case "$(sed -n 's/^steps=//p' "$(stamp_dir)/$t1.windows")" in
+  *"worker w1; host h1") pass "the stamp keeps the worker and host (the Windows package reuses that build)" ;;
+  *) fail "the stamp keeps the worker and host" ;;
+esac
+expect "release.sh's rule accepts the carried stamp" release_stamp_tree windows "$t1"
+commit_file VERSION 0.2.1
+t2=$(tree HEAD)
+expect "a second bump carries on" scripts/checked.sh --mac --windows
+case "$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$t2.mac")" in
+  "$t0") pass "a carried stamp names the tree whose check ran, not the intermediate one" ;;
+  *) fail "a carried stamp names the tree whose check ran" ;;
+esac
+echo changed >a.txt
+echo 0.3.0 >VERSION
+git add -A
+git commit -q -m "version and a file"
+t3=$(tree HEAD)
+expect_not "VERSION plus another file is not covered" scripts/checked.sh --mac --windows
+expect_not "...and gets no stamp" has_stamp mac "$t3"
+expect_not "branch-ready does not accept it" sh scripts/branch-ready.sh bump
+git reset -q --hard HEAD~1
+# A stamp that took suites from the cache carries as a cached one.
+git checkout -q main
+git checkout -q -b cachedbump
+cp "$(stamp_dir)/$t0.mac" "$work/t0.mac"
+rm -f "$(stamp_dir)/$t0.mac" "$(stamp_dir)/$t1.mac" "$(stamp_dir)/$t2.mac"
+scripts/checked.sh --record mac 5 "fake mac" "swift-test" >/dev/null
+commit_file VERSION 0.4.0
+tc=$(tree HEAD)
+carry_version_stamps "$tc" mac >/dev/null
+expect_not "a cached source carries as a cached stamp, not a full one" full_stamp mac "$tc"
+case "$(stamp_cached mac "$tc")" in swift-test) pass "...naming the same cached suites" ;; *) fail "...naming the same cached suites" ;; esac
+rm -f "$(stamp_dir)/$tc.mac" "$(stamp_dir)/$t0.mac"
+cp "$work/t0.mac" "$(stamp_dir)/$t0.mac"
+git checkout -q bump
+case "$(sh scripts/branch-ready.sh bump 2>&1)" in
+  *"VERSION-only change from the checked tree $t0"*"(ready)"*) pass "branch-ready says VERSION-only and ready" ;;
+  *) fail "branch-ready says VERSION-only and ready" ;;
+esac
+# A merge of a VERSION-only branch runs no check.
+git checkout -q main
+log="$work/carry.log"
+: >"$log"
+export NVRVIEW_WINDOWS_HOST=fake
+export NVRVIEW_MERGE_MAC_CMD="echo mac >>$log"
+export NVRVIEW_MERGE_WINDOWS_CMD="echo windows >>$log"
+sh scripts/merge-branch.sh bump "merge the version bump" >"$work/carry-merge.out" 2>&1 || { cat "$work/carry-merge.out" >&2; fail "merging a VERSION-only branch"; }
+if [ ! -s "$log" ]; then pass "merging a VERSION-only branch runs neither check"; else fail "merging a VERSION-only branch runs neither check"; fi
+grep -q "VERSION-only change from a checked tree: no check runs" "$work/carry-merge.out" && pass "the merge output says so" || fail "the merge output says so"
+expect "main's new tree is checked" scripts/checked.sh --mac --windows
+unset NVRVIEW_MERGE_MAC_CMD NVRVIEW_MERGE_WINDOWS_CMD
+# The same merge with another file changed runs the checks.
+git checkout -q -b bump2
+echo 0.5.0 >VERSION
+echo other >b.txt
+git add -A
+git commit -q -m "version and a file"
+git checkout -q main
+export NVRVIEW_MERGE_MAC_CMD="echo mac >>$log"
+export NVRVIEW_MERGE_WINDOWS_CMD="echo windows >>$log; scripts/checked.sh --record windows 1 fake"
+sh scripts/merge-branch.sh bump2 "merge version and a file" >"$work/carry-merge2.out" 2>&1 || true
+if grep -q mac "$log"; then pass "a merge that changes VERSION and another file runs the Mac check"; else fail "a merge that changes VERSION and another file runs the Mac check"; fi
+unset NVRVIEW_MERGE_MAC_CMD NVRVIEW_MERGE_WINDOWS_CMD NVRVIEW_WINDOWS_HOST
+
+# scripts/checked.sh --carry-version KIND (what check.sh and windows-check.sh call first).
+r="$work/carry2"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+scripts/checked.sh --record mac 5 "fake mac" none >/dev/null
+scripts/checked.sh --record windows 5 "fake windows" none >/dev/null
+commit_file VERSION 0.2.0
+tv=$(tree HEAD)
+expect "--carry-version mac carries the Mac stamp" scripts/checked.sh --carry-version mac
+expect "...for the tree" has_stamp mac "$tv"
+expect_not "...and only the kind named" has_stamp windows "$tv"
+expect "--carry-version windows carries the Windows stamp" scripts/checked.sh --carry-version windows
+echo 0.3.0 >VERSION
+echo changed >a.txt
+git add -A
+git commit -q -m "version and a file"
+expect_not "--carry-version mac does nothing for VERSION plus another file" scripts/checked.sh --carry-version mac
+expect_not "...and leaves no stamp" has_stamp mac "$(tree HEAD)"
+
 # --- reuse decision ---------------------------------------------------------
 # main: init; branch X changes a.txt; main moves on with b.txt.
 r="$work/dec"

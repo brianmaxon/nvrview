@@ -14,6 +14,29 @@ public sealed record ReleaseNote(string Version, string Notes);
 /// <summary>Dotted version numbers, as in VERSION ("1.2.3"; a "-suffix" or "+build" is ignored for the order).</summary>
 public static class AppVersion
 {
+    /// <summary>The file next to the executable that holds the version (written by scripts/windows-app.sh when the app is built or packaged; a version bump changes this file only, so the compiled code is the tested code).</summary>
+    public const string FileName = "version.txt";
+
+    /// <summary>The version in <see cref="FileName"/> in the folder, or "0.0.0" when the file is missing or is not a version.</summary>
+    public static string Read(string folder)
+    {
+        try
+        {
+            string text = File.ReadAllText(Path.Combine(folder, FileName)).Trim();
+            if (Parts(text) is not null)
+            {
+                return text;
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+        }
+        return "0.0.0";
+    }
+
+    /// <summary>This app's version, read once from the folder it runs from.</summary>
+    public static string Installed { get; } = Read(AppContext.BaseDirectory);
+
     /// <summary>The numeric parts, or null when the text is not dotted numbers.</summary>
     public static int[]? Parts(string text)
     {

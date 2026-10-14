@@ -192,6 +192,16 @@ same("...and is cached after", fake_check(), "cached test=none swift=cached")
 commit_file("apps/macos/App.swift", "// app 2")
 same("a Swift change reruns the Swift suite only", fake_check(), "cached test=none swift=run")
 
+# A version bump (VERSION alone) reruns nothing: not Rust, not a whole-tree
+# suite, not an app suite. VERSION plus another input still reruns that suite.
+commit_file("VERSION", "0.2.0")
+same("a VERSION-only change reruns nothing", fake_check(), "cached test=none swift=cached")
+write("VERSION", "0.2.1\n")
+write("apps/macos/App.swift", "// app 2b\n")
+sh("git", "add", "-A")
+sh("git", "commit", "-q", "-m", "version and swift")
+same("VERSION plus a Swift change reruns the Swift suite", fake_check(), "cached test=none swift=run")
+
 # Failures are never cached.
 commit_file("apps/macos/App.swift", "// app 3")
 same("a failing suite runs", fake_check(fail_swift=True), "cached test=none swift=run")

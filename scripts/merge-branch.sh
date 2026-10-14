@@ -126,18 +126,31 @@ if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
 fi
 merged=$(git write-tree) || die "the merge left unmerged paths"
 
+# A merge whose result differs from a checked tree in VERSION alone (a version
+# bump) needs no check: the stamps are carried over (scripts/stamps-lib.sh).
+vonly=0
+if version_carry_possible "$merged" mac windows; then
+  vonly=1
+  mac_cmd=true
+fi
+
 count=0
 [ -f "$counter" ] && count=$(cat "$counter")
 case "$count" in '' | *[!0-9]*) count=0 ;; esac
 
 echo "== Windows decision"
 force=""
-if [ "$every" -gt 0 ] && [ "$((count + 1))" -ge "$every" ]; then
+if [ "$vonly" = 1 ]; then
+  :
+elif [ "$every" -gt 0 ] && [ "$((count + 1))" -ge "$every" ]; then
   force="$count merges since the last real Windows run; every $every merges one runs"
 elif due=$(python3 -I scripts/suite-cache.py full-due windows); then
   force="a full Windows run is due ($due)"
 fi
-if reason=$(windows_reuse_decision "$tip" "$pre" "$merged"); then
+if [ "$vonly" = 1 ]; then
+  reason="skip, VERSION only: the merged tree differs from a tree that passed the Mac and Windows checks in VERSION alone; no check runs"
+  skip=1
+elif reason=$(windows_reuse_decision "$tip" "$pre" "$merged"); then
   skip=1
 else
   skip=0
@@ -156,7 +169,9 @@ git commit -q -m "$message" || die "the commit failed (hook?); the merge was dro
 [ "$(git rev-parse -q --verify 'HEAD^2')" = "$tip" ] || die "the merge commit does not have $branch as its second parent"
 tree=$merged
 
-if [ "$skip" = 1 ]; then
+if [ "$vonly" = 1 ]; then
+  echo "== VERSION-only change from a checked tree: no check runs"
+elif [ "$skip" = 1 ]; then
   echo "== Mac check on the merged tree (Windows check skipped)"
 else
   echo "== Mac check and Windows check on the merged tree, at the same time"
@@ -193,8 +208,13 @@ if [ "$mac_rc" != 0 ] || [ "$win_rc" != 0 ]; then
 fi
 [ -z "$(git status --porcelain --untracked-files=all)" ] || die "a check changed files; the merge was dropped"
 
-scripts/checked.sh --record mac "$mac_secs" "check on the merge of $branch" "${mac_cached:-none}" >/dev/null
-if [ "$skip" = 1 ]; then
+if [ "$vonly" = 1 ]; then
+  carry_version_stamps "$tree" mac windows
+  echo "Mac and Windows checks: not run (VERSION-only change; stamps carried over)."
+  branch_cached=none
+elif ! scripts/checked.sh --record mac "$mac_secs" "check on the merge of $branch" "${mac_cached:-none}" >/dev/null; then
+  die "could not record the Mac stamp"
+elif [ "$skip" = 1 ]; then
   scripts/checked.sh --record windows-reused 0 "no Windows run: $reason" >/dev/null
   echo "$((count + 1))" >"$counter"
   echo "Windows check skipped ($((count + 1)) merges since the last real run)."

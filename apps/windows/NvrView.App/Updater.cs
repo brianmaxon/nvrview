@@ -35,7 +35,7 @@ internal sealed class Updater
         // from the app folder on every start, never from the user's file.
         Settings.Bundled = bundled ?? BundledUpdateDefaults.Load(AppDir);
         ReleaseNotes = releaseNotes ?? BundledReleaseNotes.Load(AppDir);
-        Current = current ?? typeof(Updater).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        Current = current ?? AppVersion.Installed;
         viewer.UpdateReceived += Handle;
         // Only where an earlier download made the folder: with updates off,
         // nothing is created next to the app folder.

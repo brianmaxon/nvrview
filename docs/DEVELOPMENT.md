@@ -254,8 +254,32 @@ re-measure before changing any of it.
 
 ## Versions
 
-The apps share one version, the `VERSION` file at the repository root. The
-macOS bundle (`scripts/package-macos.sh`) and the Windows app (its file and
-product version, and the first line of its log) both read it, so a build of
-either shows the same number. Change it there only. Tags and releases need the
-maintainer's approval.
+The apps share one version, the `VERSION` file at the repository root. Change
+it there only. Tags and releases need the maintainer's approval.
+
+**A version bump retests and rebuilds nothing.** Nothing a check looks at
+depends on the version's value, so a commit that changes `VERSION` alone (and
+no other file) after a checked tree is checked already:
+
+- The version is not compiled in. The macOS bundle gets it in `Info.plist`
+  when `scripts/package-macos.sh` packages it. The Windows build compiles a
+  fixed placeholder (`apps/windows/Directory.Build.props`); the app reads its
+  version from `version.txt` next to the executable (`AppVersion.Installed`),
+  which `scripts/windows-app.sh` writes from `VERSION` after a build and again
+  at packaging time. The fingerprint of the tested publish output leaves that
+  one file out.
+- `VERSION` is never an input of a suite in the test result cache
+  (`NEVER_INPUT` in `scripts/suite-cache.py`), so `scripts/check.sh` and
+  `scripts/windows-check.sh` report every suite cached after a bump.
+- The check stamps are carried over (`carry_version_stamps` in
+  `scripts/stamps-lib.sh`): the new tree gets a copy of the stamp of the tree
+  that differs from it in `VERSION` alone, with `carried_from=<tree>` naming the
+  tree whose check ran (and the same full or cached status). `scripts/checked.sh`,
+  `scripts/branch-ready.sh`, `scripts/merge-branch.sh`, `scripts/merge-train.sh`,
+  `scripts/full-check-bg.sh` (which starts no background check for such a
+  commit) and `scripts/release.sh` all do this and say so in their output. A
+  commit that changes `VERSION` and any other file is not covered.
+- Packaging reuses the tested build: `scripts/package-macos.sh` reuses the
+  tested bundle and rewrites `Info.plist` before signing; the Windows package
+  (`scripts/windows-check.sh --package`, `scripts/windows-app.sh package`)
+  reuses the publish output the carried stamp names and writes `version.txt`.

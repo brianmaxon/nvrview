@@ -105,6 +105,16 @@ elif [ $# -gt 0 ]; then
   echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
+# A VERSION-only commit after a checked tree (a version bump) needs nothing
+# run: the Windows stamp of the checked tree is carried over to this one
+# (scripts/checked.sh), exactly when this run would have written a stamp.
+if [ "$clean" = 0 ] && [ -z "$package_to" ] && [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] &&
+  [ -z "${NVRVIEW_APP_AREAS:-}" ] && [ "${NVRVIEW_FULL_CHECK:-0}" != 1 ] && [ -z "$(git status --porcelain)" ] &&
+  ! has_stamp windows "$(git rev-parse 'HEAD^{tree}')" && scripts/checked.sh --carry-version windows; then
+  echo "VERSION-only change from a checked tree: nothing to run."
+  exit 0
+fi
+tested_from=""
 if [ -n "$package_to" ]; then
   # Package from the worker and the host whose full check stamped HEAD's tree,
   # so its tested publish output can be reused: the stamp's steps end
@@ -115,6 +125,9 @@ if [ -n "$package_to" ]; then
   if [ -f "$stamp" ]; then
     stamp_worker=$(sed -n 's/^steps=.*worker \([A-Za-z0-9_-]*\)\(; host .*\)\{0,1\}$/\1/p' "$stamp")
     stamp_host=$(sed -n 's/^steps=.*; host \([A-Za-z0-9_.-]*\)$/\1/p' "$stamp")
+    # A stamp carried over a VERSION-only change (scripts/checked.sh --carry-version):
+    # the tested publish output is the one of the tree it was carried from.
+    tested_from=$(sed -n 's/^carried_from=//p' "$stamp")
     if [ -z "${NVRVIEW_WINDOWS_WORKER:-}" ]; then NVRVIEW_WINDOWS_WORKER=$stamp_worker; fi
     if [ "$NVRVIEW_WINDOWS_WORKER" = "$stamp_worker" ] && [ -n "$stamp_host" ]; then
       if [ "${NVRVIEW_WINDOWS_LOCK_HELD:-0}" = 1 ]; then
@@ -208,7 +221,7 @@ if [ -n "$package_to" ]; then
   zip="NvrView-$version-win-x64.zip"
   echo "building the Windows app package on $host"
   # shellcheck disable=SC2086,SC2029
-  ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src && NVRVIEW_TREE=$tree_sent scripts/windows-app.sh package\""
+  ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src && NVRVIEW_TREE=$tree_sent NVRVIEW_VERSION_ONLY_OF=$tested_from scripts/windows-app.sh package\""
   mkdir -p "$package_to"
   # scp reads the Windows path relative to the home directory.
   # shellcheck disable=SC2086

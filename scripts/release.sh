@@ -36,7 +36,9 @@
 # or both at once from scripts/release-check.sh). Without --full-check it does
 # not rerun them. Version-only rule: stamps of another tree are accepted when
 # the only file that differs between that tree and HEAD's is VERSION (a
-# version bump after a full check); the output says so. A stamp written for a
+# version bump after a full check); the output says so, and the packages reuse
+# the tested builds (the version is written into Info.plist and version.txt at
+# packaging time; see docs/DEVELOPMENT.md, "Versions"). A stamp written for a
 # merge that skipped its Windows run (scripts/merge-branch.sh) never counts
 # for Windows. The packages are always built and signed fresh, and the Windows
 # package reuses the publish output the Windows check tested when it is the
@@ -144,7 +146,13 @@ for kind in $kinds; do
   if found=$(release_stamp_tree "$kind" "$head_tree"); then
     case "$found" in
       *" version-only") echo "$kind check: accepted by the version-only rule: tree ${found% *} passed it and differs from HEAD's tree only in VERSION" ;;
-      *) echo "$kind check: passed for HEAD's tree" ;;
+      *)
+        carried=$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$head_tree.$kind" 2>/dev/null || true)
+        if [ -n "$carried" ]; then
+          echo "$kind check: passed for HEAD's tree (carried over a VERSION-only change from the full check of tree $carried)"
+        else
+          echo "$kind check: passed for HEAD's tree"
+        fi ;;
     esac
   else
     die "the $kind check has not passed for HEAD's tree (run scripts/release-check.sh, or use --full-check)"

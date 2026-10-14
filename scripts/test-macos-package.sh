@@ -142,6 +142,27 @@ run pk4 bash scripts/package-macos.sh --rebuild
 
 # A tree with changes is never reused, and a test result never carries over.
 run st4 bash scripts/macos-real-selftest.sh --bundle
+
+# A VERSION-only commit after the tested tree reuses the tested bundle: nothing
+# is built, Info.plist gets the new version, the bundle is signed and zipped.
+echo 0.2.0 >"$r/VERSION"
+(cd "$r" && git add -A && git commit -q -m "bump the version")
+: >"$log"
+run pk6 bash scripts/package-macos.sh && pass "packaging after a VERSION-only commit works" || { cat "$work/pk6.out"; fail "packaging after a VERSION-only commit works"; }
+[ "$(count '^swift build')" = 0 ] && [ "$(count 'cargo build')" = 0 ] && [ "$(count xcodebuild)" = 0 ] && pass "...without building anything" || { cat "$log"; fail "...without building anything"; }
+grep -q 'differs only in VERSION' "$work/pk6.out" && pass "...and says why the tested bundle is reused" || fail "...and says why the tested bundle is reused"
+grep -q '<string>0.2.0</string>' "$r/build/NVRView.app/Contents/Info.plist" && ! grep -q '0.1.0' "$r/build/NVRView.app/Contents/Info.plist" && pass "...with the new version in Info.plist" || fail "...with the new version in Info.plist"
+[ "$(count '^codesign --force')" = 1 ] && [ "$(count '^ditto')" = 1 ] && pass "...signing and zipping once" || fail "...signing and zipping once"
+[ -f "$r/build/NVRView-0.2.0-macos-arm64.zip" ] && pass "...into a package named for the new version" || fail "...into a package named for the new version"
+# VERSION plus another file is not covered by the rule.
+echo 0.3.0 >"$r/VERSION"
+echo "// more" >>"$r/crates/viewer-ffi/include/nvrview.h"
+(cd "$r" && git add -A && git commit -q -m "bump the version and change the header")
+: >"$log"
+run pk7 bash scripts/package-macos.sh
+[ "$(count '^swift build')" -ge 2 ] && pass "a commit that changes VERSION and another file builds" || fail "a commit that changes VERSION and another file builds"
+run st5 bash scripts/macos-real-selftest.sh --bundle
+
 echo "// edit" >>"$r/VERSION.note"
 : >"$log"
 run pk5 bash scripts/package-macos.sh

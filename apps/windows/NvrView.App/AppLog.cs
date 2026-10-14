@@ -10,6 +10,7 @@
 
 using System.Diagnostics;
 using System.Text;
+using NvrView.Shell;
 
 namespace NvrView.App;
 
@@ -31,7 +32,7 @@ internal static class AppLog
             s_file = Path.Combine(directory, "app.log");
             s_directory = directory;
         }
-        Info($"nvrview {typeof(AppLog).Assembly.GetName().Version} started");
+        Info($"nvrview {AppVersion.Installed} started");
     }
 
     public static void Info(string message) => Write("info", message);
@@ -76,7 +77,7 @@ internal static class AppLog
             Directory.CreateDirectory(directory);
             string file = Path.Combine(directory, $"crash-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Environment.ProcessId}.log");
             File.WriteAllText(file,
-                $"nvrview {typeof(AppLog).Assembly.GetName().Version} {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}{Environment.NewLine}" +
+                $"nvrview {AppVersion.Installed} {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}{Environment.NewLine}" +
                 $"{what}{Environment.NewLine}{e}{Environment.NewLine}", Encoding.UTF8);
             // Keep the newest few.
             foreach (FileInfo old in new DirectoryInfo(directory).GetFiles("crash-*.log")

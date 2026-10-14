@@ -351,6 +351,34 @@ NVRVIEW_MERGE_MAC_CMD="echo mac >>$log" \
 check "...naming the Windows check" grep -Eq '^y3 +failed \(Windows check\)' "$work/out6b"
 [ "$(git rev-parse HEAD)" = "$head6" ] && pass "...and main stays where it was" || fail "...and main stays where it was"
 
+# A train whose result differs from a checked tree in VERSION alone runs no check;
+# one that changes VERSION and another file runs them.
+r="$work/train7"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+stamp mac main
+stamp windows main
+git checkout -q -b bump main
+echo 0.2.0 >VERSION
+git add -A
+git commit -q -m "bump"
+git checkout -q main
+: >"$log"
+sh scripts/merge-train.sh bump >"$work/out7" 2>&1 && pass "a VERSION-only train exits 0" || { cat "$work/out7"; fail "a VERSION-only train exits 0"; }
+[ ! -s "$log" ] && pass "...and runs neither check" || fail "...and runs neither check"
+check "...and says so" grep -q "VERSION-only change from a checked tree: no check runs" "$work/out7"
+check "...and the new tree is checked" sh scripts/checked.sh --mac --windows
+git checkout -q -b bump2 main
+echo 0.3.0 >VERSION
+echo more >b.txt
+git add -A
+git commit -q -m "bump and change"
+git checkout -q main
+full_state "$(date +%s)"
+sh scripts/merge-train.sh bump2 >"$work/out7b" 2>&1 || true
+[ "$(grep -c mac "$log")" -ge 1 ] && pass "a train that changes VERSION and another file runs the Mac check" || fail "a train that changes VERSION and another file runs the Mac check"
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed" >&2

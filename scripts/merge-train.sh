@@ -193,6 +193,13 @@ attempt() { # BRANCH...
     for b in $built; do record "$b" "merged" "already contained in main"; done
     return 0
   fi
+  # A result that differs from a checked tree in VERSION alone needs no check.
+  if version_carry_possible "$(git rev-parse 'HEAD^{tree}')" mac windows; then
+    echo "== VERSION-only change from a checked tree: no check runs for the train:$built"
+    carry_version_stamps "$(git rev-parse 'HEAD^{tree}')" mac windows
+    for b in $built; do record "$b" "merged" "VERSION only; no check ran (stamps carried over)"; done
+    return 0
+  fi
   count=0
   [ -f "$counter" ] && count=$(cat "$counter")
   case "$count" in '' | *[!0-9]*) count=0 ;; esac
