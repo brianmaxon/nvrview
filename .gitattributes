@@ -1,0 +1,9 @@
+# Check out text with LF on every platform: tests compare generated text with
+# committed fixtures byte for byte, and Git for Windows would otherwise give CRLF.
+* text=auto eol=lf
+
+# Media fixtures are raw bytes.
+*.h264 binary
+*.h265 binary
+*.aac binary
+*.s16 binary
