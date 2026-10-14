@@ -126,12 +126,20 @@ if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
 fi
 merged=$(git write-tree) || die "the merge left unmerged paths"
 
-# A merge whose result differs from a checked tree in VERSION alone (a version
-# bump) needs no check: the stamps are carried over (scripts/stamps-lib.sh).
+# A merge whose result differs from a checked tree in VERSION and *.md files
+# alone needs no build or test: the stamps are carried over
+# (scripts/stamps-lib.sh). A markdown change first passes the checks that read
+# markdown (scripts/check-docs.sh), here in the merge's working tree.
 vonly=0
+vlabel=VERSION-only
 if version_carry_possible "$merged" mac windows; then
   vonly=1
   mac_cmd=true
+  vsrc=$(version_only_source mac "$merged" any) || vsrc=""
+  if [ -n "$vsrc" ]; then vlabel=$(nonmaterial_label "$(stamp_root mac "$vsrc")" "$merged"); fi
+  if [ "$vlabel" = docs-only ]; then
+    docs_checks_ok "$merged" || die "the markdown checks failed; the merge was dropped"
+  fi
 fi
 
 count=0
@@ -148,7 +156,7 @@ elif due=$(python3 -I scripts/suite-cache.py full-due windows); then
   force="a full Windows run is due ($due)"
 fi
 if [ "$vonly" = 1 ]; then
-  reason="skip, VERSION only: the merged tree differs from a tree that passed the Mac and Windows checks in VERSION alone; no check runs"
+  reason="skip, $vlabel: the merged tree differs from a tree that passed the Mac and Windows checks in VERSION and markdown files alone; no build or test runs"
   skip=1
 elif reason=$(windows_reuse_decision "$tip" "$pre" "$merged"); then
   skip=1
@@ -170,7 +178,7 @@ git commit -q -m "$message" || die "the commit failed (hook?); the merge was dro
 tree=$merged
 
 if [ "$vonly" = 1 ]; then
-  echo "== VERSION-only change from a checked tree: no check runs"
+  echo "== $vlabel change from a checked tree: no check runs"
 elif [ "$skip" = 1 ]; then
   echo "== Mac check on the merged tree (Windows check skipped)"
 else
@@ -210,7 +218,7 @@ fi
 
 if [ "$vonly" = 1 ]; then
   carry_version_stamps "$tree" mac windows
-  echo "Mac and Windows checks: not run (VERSION-only change; stamps carried over)."
+  echo "Mac and Windows checks: not run ($vlabel change; stamps carried over)."
   branch_cached=none
 elif ! scripts/checked.sh --record mac "$mac_secs" "check on the merge of $branch" "${mac_cached:-none}" >/dev/null; then
   die "could not record the Mac stamp"

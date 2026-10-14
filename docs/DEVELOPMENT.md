@@ -302,7 +302,47 @@ no other file) after a checked tree is checked already:
   `scripts/full-check-bg.sh` (which starts no background check for such a
   commit) and `scripts/release.sh` all do this and say so in their output. A
   commit that changes `VERSION` and any other file is not covered.
+- Markdown changes are covered too: see "Docs-only changes" below.
 - Packaging reuses the tested build: `scripts/package-macos.sh` reuses the
   tested bundle and rewrites `Info.plist` before signing; the Windows package
   (`scripts/windows-check.sh --package`, `scripts/windows-app.sh package`)
   reuses the publish output the carried stamp names and writes `version.txt`.
+
+## Docs-only changes
+
+A change that touches only `*.md` files (with or without `VERSION`) builds and
+tests nothing new, so it takes seconds instead of a full check.
+
+- **Not material.** No markdown file is compiled, bundled, or read at runtime
+  by either app, the core, or the packaging scripts. Release notes are plain
+  `.txt` files kept outside the repository and bundled at packaging time
+  (`scripts/release-notes-bundle.py`), and the update defaults come from the
+  command line. The few markdown files that look like inputs (for example
+  `apps/windows/README.md`) are already excluded from the Windows suites in
+  `scripts/suite-cache.py`, and no test cache fingerprint includes a `.md`
+  file. If a markdown file ever becomes an input of a build, a test, or a
+  package, take it out of the rule (`nonmaterial_diff` in
+  `scripts/stamps-lib.sh`) in the same change.
+- **What still runs.** Every check that reads a `.md` file, in
+  `scripts/check-docs.sh`: sanitization of the whole tree, self-test parity
+  (which reads `docs/PARITY.md`) and the self-test area tables, the
+  test-module check, and the secret scan. Add any new check that reads
+  markdown there.
+- **Uncommitted edits** (`scripts/check.sh`): when the working tree differs
+  from a tree with a Mac stamp only in `*.md` files and `VERSION` (and at
+  least one `.md` file), it takes the fast path, even when main is many
+  unpushed commits ahead. It writes no stamp.
+- **Committed trees.** A tree that differs from a stamped tree only in `*.md`
+  files and `VERSION` gets the stamps carried over (`carry_version_stamps`),
+  with `carried_from=<tree whose check ran>` and `change=docs-only`, after the
+  markdown checks passed for that tree (a `<tree>.docs` marker next to the
+  stamps remembers it). The Windows stamp is carried without them (nothing on
+  Windows reads markdown). The checks run on the working tree, so they must be
+  able to run there (clean tree at that commit): `scripts/check.sh` on a clean
+  docs-only commit, `scripts/checked.sh`, `scripts/merge-branch.sh`,
+  `scripts/merge-train.sh`, and `scripts/release.sh` do that; for
+  `scripts/branch-ready.sh` run `scripts/check.sh` in the branch's worktree
+  first. Markdown plus any other file is a normal change.
+- **Releases.** A carried docs-only stamp counts for a release: the shipped
+  binaries are the same as in the checked tree, and the markdown checks passed
+  for the release tree. `scripts/release.sh` says "docs-only" in its output.

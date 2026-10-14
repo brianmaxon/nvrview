@@ -15,9 +15,12 @@
 #       merge accepted on a branch's earlier Windows result; --windows and
 #       scripts/release.sh never count it. Rules: scripts/stamps-lib.sh.
 #
-# Version-only rule (scripts/stamps-lib.sh, carry_version_stamps): a tree that
-# differs from a stamped tree in VERSION alone counts as checked, because a
-# version bump changes nothing a check looks at. The query writes a stamp for
+# Non-material rule (scripts/stamps-lib.sh, carry_version_stamps): a tree that
+# differs from a stamped tree in VERSION and *.md files alone counts as
+# checked, because that changes nothing a build or test looks at. For the Mac
+# stamp, a markdown change first passes the checks that read markdown
+# (scripts/check-docs.sh), which must be able to run on the working tree (it
+# is that tree, clean); otherwise the tree is not carried. The query writes a stamp for
 # it (carried_from=<the tree whose check ran>, same full or cached status) and
 # says so; the commands below then find it like any other stamp.
 #   scripts/checked.sh --carry-version [mac|windows]
@@ -86,7 +89,8 @@ report() {
   if [ -f "$dir/$tree.$kind" ]; then
     cached=$(sed -n 's/^cached=//p' "$dir/$tree.$kind")
     carried=$(sed -n 's/^carried_from=//p' "$dir/$tree.$kind")
-    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind")${cached:+; cached suites: $cached}${carried:+; VERSION-only change: carried from the check of tree $carried})"
+    change=$(sed -n 's/^change=//p' "$dir/$tree.$kind")
+    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind")${cached:+; cached suites: $cached}${carried:+; ${change:-VERSION-only} change: carried from the check of tree $carried})"
   else
     echo "$kind: NOT checked for tree $tree" >&2
     missing=1

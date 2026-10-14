@@ -96,14 +96,15 @@ skip() { skipped="$skipped, $1"; }
 tree_clean_at_start=0
 if [ -z "$(git status --porcelain)" ]; then tree_clean_at_start=1; fi
 
-# A VERSION-only commit after a checked tree (a version bump) needs nothing
-# run: nothing a check looks at depends on the version's value, so the Mac
-# stamp of the checked tree is carried over to this one (scripts/checked.sh).
-# Only on a clean tree that has no Mac stamp yet, and never in a full run.
+# A commit that changes only VERSION and *.md files after a checked tree needs
+# no build or test: the Mac stamp of the checked tree is carried over to this
+# one (scripts/checked.sh). A markdown change first passes the checks that
+# read markdown (scripts/check-docs.sh). Only on a clean tree that has no Mac
+# stamp yet, and never in a full run.
 if [ "$tree_clean_at_start" = 1 ] && [ "${NVRVIEW_FULL_CHECK:-0}" != "1" ] &&
   [ ! -f "$(git rev-parse --git-common-dir)/nvrview-checks/$(git rev-parse 'HEAD^{tree}').mac" ] &&
   scripts/checked.sh --carry-version mac; then
-  echo "VERSION-only change from a checked tree: nothing to run."
+  echo "Only VERSION and markdown files differ from a checked tree: nothing more to run (stamp carried over)."
   exit 0
 fi
 
@@ -111,8 +112,11 @@ fi
 # and untracked changes, plus the commits not yet on the branch's upstream
 # (when it has one). A clean tree with no upstream has no changes to judge
 # and gets the full check. When there are changes and every one is a *.md
-# file, only sanitization, self-test parity, and the secret scan run. The fast
-# path never writes a check stamp. NVRVIEW_FULL_CHECK=1 forces the full run;
+# file, only sanitization, self-test parity, and the secret scan run. So does
+# an uncommitted change that differs from a tree with a Mac stamp only in *.md
+# files (and VERSION), however many unpushed commits main is ahead. The fast
+# path never writes a check stamp (committing the change and running this
+# again carries the stamp over). NVRVIEW_FULL_CHECK=1 forces the full run;
 # NVRVIEW_DOCS_FAST_PATH=0 turns the fast path off but keeps the cache
 # (scripts/merge-branch.sh).
 fast=0
@@ -126,6 +130,12 @@ if [ "${NVRVIEW_FULL_CHECK:-0}" != "1" ] && [ "${NVRVIEW_DOCS_FAST_PATH:-1}" != 
   } | sort -u)
   if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qv '\.md$'; then
     fast=1
+  elif stamped_changed=$(. scripts/stamps-lib.sh && docs_only_since_stamp mac); then
+    fast=1
+    changed="$stamped_changed"
+    echo "differs from a checked tree only in markdown files and VERSION:"
+  fi
+  if [ "$fast" = 1 ]; then
     echo "docs-only change ($(printf '%s\n' "$changed" | wc -l | tr -d ' ') markdown files): taking the fast path (sanitization, parity, secret scan; NVRVIEW_FULL_CHECK=1 runs everything)"
   fi
 fi

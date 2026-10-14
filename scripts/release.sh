@@ -137,19 +137,24 @@ if [ "$full_check" = 1 ]; then
   fi
 fi
 checks_done=$(date +%s)
-# Each requested stamp must exist for HEAD's tree or, by the version-only
-# rule, for a tree that differs from it in VERSION alone.
+# Each requested stamp must exist for HEAD's tree or, by the non-material
+# rule, for a tree that differs from it in VERSION and *.md files alone (the
+# shipped binaries are the same; the markdown checks still pass first).
 head_tree=$(git rev-parse 'HEAD^{tree}')
 kinds="mac"
 if [ "$skip_windows" != 1 ]; then kinds="mac windows"; fi
 for kind in $kinds; do
   if found=$(release_stamp_tree "$kind" "$head_tree"); then
     case "$found" in
-      *" version-only") echo "$kind check: accepted by the version-only rule: tree ${found% *} passed it and differs from HEAD's tree only in VERSION" ;;
+      *" VERSION-only") echo "$kind check: accepted by the non-material rule: tree ${found% *} passed it and differs from HEAD's tree only in VERSION" ;;
+      *" docs-only")
+        # The shipped binaries are the same; the markdown checks must still pass.
+        if [ "$kind" = mac ]; then docs_checks_ok "$head_tree" || die "the markdown checks failed for HEAD's tree"; fi
+        echo "$kind check: accepted by the non-material rule: tree ${found% *} passed it and differs from HEAD's tree only in VERSION and markdown files (the markdown checks passed for HEAD's tree)" ;;
       *)
         carried=$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$head_tree.$kind" 2>/dev/null || true)
         if [ -n "$carried" ]; then
-          echo "$kind check: passed for HEAD's tree (carried over a VERSION-only change from the full check of tree $carried)"
+          echo "$kind check: passed for HEAD's tree (carried over a $(sed -n 's/^change=//p' "$(stamp_dir)/$head_tree.$kind" | grep . || echo VERSION-only) change from the full check of tree $carried)"
         else
           echo "$kind check: passed for HEAD's tree"
         fi ;;

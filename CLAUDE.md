@@ -116,11 +116,16 @@ failure. Run it before every commit.
 
 Docs-only fast path: when every change being checked is a `*.md` file (staged,
 unstaged, and untracked changes, plus commits not yet on the upstream if the
-branch has one), `scripts/check.sh` runs only the sanitization check, the
-self-test parity check, and the secret scan, and says so. Any other change, or
-`NVRVIEW_FULL_CHECK=1`, runs everything. The fast path never writes a check
-stamp (stamps come only from full runs on a clean tree; `scripts/release.sh`
-needs them).
+branch has one, or any uncommitted change that differs from a checked tree only
+in `*.md` files and `VERSION`, however many unpushed commits ahead),
+`scripts/check.sh` runs only the sanitization check, the self-test parity
+check, and the secret scan (`scripts/check-docs.sh`), and says so. Any other
+change, or `NVRVIEW_FULL_CHECK=1`, runs everything. The uncommitted fast path
+never writes a check stamp. A *committed* tree that differs from a stamped tree
+only in `*.md` files and `VERSION` is checked already: the markdown checks run
+once, then the stamps are carried over (`carried_from`) and no build or test
+runs; `scripts/release.sh` counts such a stamp (the shipped binaries are the
+same). Markdown plus any other file is a normal change.
 
 **Test result cache.** Both checks skip a suite (one crate's tests, the Swift
 tests, a Windows app self-test, ...) whose inputs, as committed or staged,

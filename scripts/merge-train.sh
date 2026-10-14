@@ -193,12 +193,21 @@ attempt() { # BRANCH...
     for b in $built; do record "$b" "merged" "already contained in main"; done
     return 0
   fi
-  # A result that differs from a checked tree in VERSION alone needs no check.
+  # A result that differs from a checked tree in VERSION and *.md files alone
+  # needs no build or test; a markdown change passes the markdown checks first
+  # (scripts/check-docs.sh), here in the train's working tree.
   if version_carry_possible "$(git rev-parse 'HEAD^{tree}')" mac windows; then
-    echo "== VERSION-only change from a checked tree: no check runs for the train:$built"
-    carry_version_stamps "$(git rev-parse 'HEAD^{tree}')" mac windows
-    for b in $built; do record "$b" "merged" "VERSION only; no check ran (stamps carried over)"; done
-    return 0
+    vtree=$(git rev-parse 'HEAD^{tree}')
+    vlabel=VERSION-only
+    vsrc=$(version_only_source mac "$vtree" any) || vsrc=""
+    if [ -n "$vsrc" ]; then vlabel=$(nonmaterial_label "$(stamp_root mac "$vsrc")" "$vtree"); fi
+    if [ "$vlabel" != docs-only ] || docs_checks_ok "$vtree"; then
+      echo "== $vlabel change from a checked tree: no check runs for the train:$built"
+      carry_version_stamps "$vtree" mac windows
+      for b in $built; do record "$b" "merged" "$vlabel; no build or test ran (stamps carried over)"; done
+      return 0
+    fi
+    echo "the markdown checks failed; running the checks as usual" >&2
   fi
   count=0
   [ -f "$counter" ] && count=$(cat "$counter")

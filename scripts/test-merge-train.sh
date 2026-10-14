@@ -379,6 +379,43 @@ full_state "$(date +%s)"
 sh scripts/merge-train.sh bump2 >"$work/out7b" 2>&1 || true
 [ "$(grep -c mac "$log")" -ge 1 ] && pass "a train that changes VERSION and another file runs the Mac check" || fail "a train that changes VERSION and another file runs the Mac check"
 
+# A train whose result differs from a checked tree in markdown files alone runs
+# only the markdown checks (NVRVIEW_DOCS_CHECK here); markdown plus a code file
+# runs the checks.
+r="$work/train8"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+stamp mac main
+stamp windows main
+docs_log="$work/docs-train.log"
+printf '#!/bin/sh\necho markdown >>"%s"\n' "$docs_log" >"$work/docs-ok.sh"
+chmod +x "$work/docs-ok.sh"
+export NVRVIEW_DOCS_CHECK="$work/docs-ok.sh"
+git checkout -q -b docs1 main
+echo "# notes" >README.md
+git add -A
+git commit -q -m "docs"
+git checkout -q main
+: >"$log"
+: >"$docs_log"
+sh scripts/merge-train.sh docs1 >"$work/out8" 2>&1 && pass "a docs-only train exits 0" || { cat "$work/out8"; fail "a docs-only train exits 0"; }
+[ ! -s "$log" ] && pass "...and runs neither check" || fail "...and runs neither check"
+[ "$(cat "$docs_log")" = markdown ] && pass "...only the markdown checks" || fail "...only the markdown checks"
+check "...and says so" grep -q "docs-only change from a checked tree: no check runs" "$work/out8"
+check "...and the new tree is checked" sh scripts/checked.sh --mac --windows
+git checkout -q -b docs2 main
+echo "# more" >>README.md
+echo more >b.txt
+git add -A
+git commit -q -m "docs and a file"
+git checkout -q main
+full_state "$(date +%s)"
+: >"$log"
+sh scripts/merge-train.sh docs2 >"$work/out8b" 2>&1 || true
+[ "$(grep -c mac "$log")" -ge 1 ] && pass "a train that changes markdown and another file runs the Mac check" || fail "a train that changes markdown and another file runs the Mac check"
+unset NVRVIEW_DOCS_CHECK
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed" >&2

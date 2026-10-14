@@ -151,6 +151,32 @@ sh scripts/full-check-bg.sh start >"$work/start7.out" 2>&1
 wait_for nonempty "$FAKE_OUT" && pass "VERSION plus another file is checked" || fail "VERSION plus another file is checked"
 wait_for grep -q '^pass$' "$(stamp_dir)/fullcheck/result" || true
 
+# --- a docs-only commit after a fully checked tree starts nothing ------------------
+# The markdown checks (stood in for by NVRVIEW_DOCS_CHECK) pass, the stamps are
+# carried, and no background check starts. Markdown plus a code file is checked.
+wait_for grep -q '^pass$' "$(stamp_dir)/fullcheck/result" || true
+rm -f "$FAKE_OUT"
+commit_file a.txt eight
+scripts/checked.sh --record mac 1 fake >/dev/null
+scripts/checked.sh --record windows 1 fake >/dev/null
+t_checked=$(git rev-parse 'HEAD^{tree}')
+printf '#!/bin/sh\nexit 0\n' >"$work/docs-ok.sh"
+chmod +x "$work/docs-ok.sh"
+export NVRVIEW_DOCS_CHECK="$work/docs-ok.sh"
+commit_file NOTES.md notes
+sh scripts/full-check-bg.sh start >"$work/start8.out" 2>&1
+grep -q 'already has full Mac and Windows stamps' "$work/start8.out" && pass "a docs-only commit after a full check starts nothing" || { cat "$work/start8.out"; fail "a docs-only commit after a full check starts nothing"; }
+check "...and no check ran" test ! -e "$FAKE_OUT"
+grep -q "carried the check stamp of tree $t_checked" "$work/start8.out" && pass "...and the output says where the pass came from" || fail "...and the output says where the pass came from"
+echo nine >a.txt
+echo more >>NOTES.md
+git add -A
+git commit -q -m "docs and a file"
+sh scripts/full-check-bg.sh start >"$work/start9.out" 2>&1
+wait_for nonempty "$FAKE_OUT" && pass "markdown plus another file is checked" || fail "markdown plus another file is checked"
+wait_for grep -q '^pass$' "$(stamp_dir)/fullcheck/result" || true
+unset NVRVIEW_DOCS_CHECK
+
 # --- the background priority ---------------------------------------------------------
 lock="$here/windows-lock.sh"
 export NVRVIEW_WINDOWS_LOCK="$work/l2/windows.lock" NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"
