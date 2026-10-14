@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::model::{CameraId, Class, Severity};
 use crate::settings::TimingSettings;
-use crate::time::{Millis, SECOND_MS};
+use crate::time::Millis;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EpisodeKey {
@@ -132,10 +132,6 @@ pub enum Admission {
     },
 }
 
-/// The least time between two checks inside one cooldown for a camera and
-/// class: closer triggers are repeats of one event.
-pub const PROBE_SPACING_MS: Millis = 5 * SECOND_MS;
-
 /// The most episodes kept; the oldest settled ones go first.
 pub const MAX_EPISODES: usize = 1024;
 
@@ -215,10 +211,10 @@ impl Timeliness {
     /// check (the alert itself, or an earlier check inside the cooldown) to
     /// be looked at. Closer ones are repeats of one event, so the number of
     /// checks a busy camera causes stays bounded.
-    pub fn probe_due(&self, key: &EpisodeKey, now: Millis) -> bool {
+    pub fn probe_due(&self, key: &EpisodeKey, now: Millis, spacing_ms: Millis) -> bool {
         self.episodes.get(key).is_some_and(|e| {
             let last = e.last_probe_ms.max(e.last_alert_ms);
-            last.is_none_or(|t| now - t >= PROBE_SPACING_MS)
+            last.is_none_or(|t| now - t >= spacing_ms)
         })
     }
 

@@ -583,7 +583,9 @@ impl Engine {
                 },
             ))
         } else if let Some(left) = self.timeliness.cooldown_left(&key, now.ms)
-            && !self.timeliness.probe_due(&key, now.ms)
+            && !self
+                .timeliness
+                .probe_due(&key, now.ms, self.settings.timing.check_spacing_ms())
         {
             // Inside the cooldown, and a check for this camera and class
             // started moments ago: a repeat of the same event. (Later ones

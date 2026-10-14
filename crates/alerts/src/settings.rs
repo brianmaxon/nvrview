@@ -240,6 +240,10 @@ pub struct TimingSettings {
     pub recheck_limit_s: u32,
     /// Consecutive re-check misses that settle an episode.
     pub settle_misses: u8,
+    /// The least time between two checks inside one cooldown for a camera
+    /// and class: triggers closer than this are repeats of one event. A
+    /// detection further apart is checked and logged (but does not notify).
+    pub check_spacing_s: u32,
 }
 
 impl Default for TimingSettings {
@@ -253,6 +257,7 @@ impl Default for TimingSettings {
             recheck_period_s: 10,
             recheck_limit_s: 600,
             settle_misses: 2,
+            check_spacing_s: 5,
         }
     }
 }
@@ -269,6 +274,9 @@ impl TimingSettings {
     }
     pub fn settle_ms(&self) -> Millis {
         Millis::from(self.settle_after_s) * SECOND_MS
+    }
+    pub fn check_spacing_ms(&self) -> Millis {
+        Millis::from(self.check_spacing_s) * SECOND_MS
     }
     pub fn pending_timeout_ms(&self) -> Millis {
         Millis::from(self.pending_timeout_s) * SECOND_MS
@@ -750,6 +758,7 @@ impl AlertSettings {
             "re-check limit",
             &mut issues,
         );
+        clamp_u32(&mut t.check_spacing_s, 0, 60, "check spacing", &mut issues);
         if !(1..=10).contains(&t.settle_misses) {
             t.settle_misses = t.settle_misses.clamp(1, 10);
             issues.push(Issue::ValueClamped("settle misses"));

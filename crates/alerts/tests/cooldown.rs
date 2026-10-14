@@ -120,3 +120,20 @@ fn an_always_alert_case_inside_the_cooldown_still_alerts() {
     assert_eq!(quieted, None);
     assert!(always.is_some());
 }
+
+#[test]
+fn the_check_spacing_is_a_setting() {
+    let mut s = AlertSettings::default();
+    s.timing.check_spacing_s = 0;
+    let mut e = Engine::new(s).0;
+    let c = cam(0);
+    run(
+        &mut e,
+        device(1, c, "vehicle", at(12, 0)),
+        car(c),
+        DecideInputs::default(),
+    );
+    let t = at(12, 0) + 2 * SECOND_MS;
+    let next = e.intake(device(2, c, "vehicle", t), now(t));
+    assert!(matches!(next.next, Next::Sample { .. }), "{:?}", next.next);
+}
