@@ -266,15 +266,6 @@ public sealed class PtzModel
         }
     }
 
-    /// <summary>Alt came up while an arrow key still holds a move.</summary>
-    public void ModifiersChanged(bool altDown)
-    {
-        if (!altDown && KeyHeld is not null)
-        {
-            Release();
-        }
-    }
-
     /// <summary>The tile of a camera closed: its move, readings and positions go.</summary>
     public void CameraClosed(CameraRef camera)
     {

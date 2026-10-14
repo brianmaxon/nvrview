@@ -227,7 +227,7 @@ public sealed class TileHeaderLayout
         m.Add(new(TileHeaderItem.Conversation, tile.Conversation ? "End Conversation" : "Start Conversation", "T", "T"));
         if (tile.PanTilt)
         {
-            m.Add(new(TileHeaderItem.PanTilt, "Pan and Tilt…", "⌥ arrows", "Alt+arrows"));
+            m.Add(new(TileHeaderItem.PanTilt, "Pan and Tilt…", "arrows", "arrows"));
         }
         if (tile.Presets)
         {
