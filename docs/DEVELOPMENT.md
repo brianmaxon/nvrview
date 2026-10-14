@@ -230,6 +230,28 @@ at the end shows each suite as ran or cached, with its time.
   background full check tests at the same time, printing
   each file's output in order.
 
+### Build speed
+
+Measured with `cargo build --timings` and Swift's `-warn-long-function-bodies`;
+re-measure before changing any of it.
+
+- **Release profile.** The root `Cargo.toml` turns LTO off (Cargo's default
+  "thin local" LTO was about half of a cold release build) and keeps the hot
+  decode crates on one code generation unit each. The comment there has the
+  numbers, including the small CPU cost in the soak.
+- **Swift release builds are one serial compile per module.** Whole-module
+  optimization runs on one core, so a module's size is its build time: the
+  app's code (`NVRViewApp`, about 22,000 lines) is most of the optimized Swift
+  build, and the self-test (`NVRViewSelfTest`, about 7,700 lines) builds apart
+  from it and not at all in the shipped app. No expression or function body
+  takes long to type-check (one `body` at 376 ms with a 300 ms limit), so
+  there is nothing to fix there. A further split of `NVRViewApp` needs the
+  `AppModel` hub broken up first (the recordings and smart-alert screens and
+  their models depend on it and it on them).
+- **Not worth it, measured:** `-num-threads` for the Swift module (100 s
+  against 105 s), and, for the Rust dependencies, trimming features (the
+  heavy ones already use only the features they need).
+
 ## Versions
 
 The apps share one version, the `VERSION` file at the repository root. The
