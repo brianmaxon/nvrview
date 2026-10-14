@@ -62,7 +62,7 @@
 //    system voice renders a sentence, the desktop recognizer (where Windows has one) hears it,
 //    and with --mic-test the microphone opens for a moment (its audio is measured and dropped);
 // 11e. camera motion (docs/UX.md "Pan, tilt, and zoom"), against the mock's cameras that move (SelfTest.Ptz.cs):
-//    a held pad button renews its move at least every 500 ms and stops on release, an Alt arrow does the same, the
+//    a held pad button renews its move at least every 500 ms and stops on release, an arrow key does the same, the
 //    app going quiet lets the camera stop by itself (the core's dead-man event), presets recall from the menu and
 //    with Alt+2, the lens stays in its range (the core clamps what is sent past it) and a drag sends the first and
 //    the last position, and a multi-lens camera's second lens is moved as its own camera;

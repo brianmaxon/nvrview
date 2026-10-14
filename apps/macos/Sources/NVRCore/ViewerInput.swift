@@ -152,18 +152,20 @@ public enum ViewerKeys {
     public static func shortcut(
         keyCode: UInt16, characters: String?, modifiers: KeyModifiers, isRepeat: Bool, context: KeyContext
     ) -> ViewerShortcut? {
-        guard context != .textEditing, modifiers.isDisjoint(with: [.command, .control, .option]) else { return nil }
+        guard context != .textEditing, modifiers.isDisjoint(with: [.command, .control]) else { return nil }
         let stage = context == .stage
+        // Option with an arrow still moves the selection (on a tile that
+        // pans and tilts, a plain arrow moves the camera instead).
         switch keyCode {
         case leftArrow: return stage ? .move(.left) : nil
         case rightArrow: return stage ? .move(.right) : nil
         case upArrow: return stage ? .move(.up) : nil
         case downArrow: return stage ? .move(.down) : nil
-        case space: return stage && !isRepeat ? .toggleFocus : nil
-        case returnKey, enter: return stage && !isRepeat ? .confirm : nil
+        case space: return stage && !isRepeat && !modifiers.contains(.option) ? .toggleFocus : nil
+        case returnKey, enter: return stage && !isRepeat && !modifiers.contains(.option) ? .confirm : nil
         default: break
         }
-        guard !isRepeat else { return nil }
+        guard !isRepeat, !modifiers.contains(.option) else { return nil }
         switch characters?.lowercased() {
         case "f": return .toggleFullScreen
         case "s": return .toggleSidebar

@@ -237,7 +237,7 @@ in either case.
 | --- | --- |
 | F | Toggle full screen for the window (the system's own transition). |
 | S | Show or hide the sidebar. |
-| Arrow keys | Move the selection to the neighboring tile in that direction, by position in the layout (nearest tile whose center lies in that direction), not by list order. In focus, switch the focused camera to the neighbor in that direction. |
+| Arrow keys | Move the selection to the neighboring tile in that direction, by position in the layout (nearest tile whose center lies in that direction), not by list order. In focus, switch the focused camera to the neighbor in that direction. On a tile that shows a camera or lens that pans and tilts, plain arrows steer the camera instead (see "Capture and camera keys"); Option+arrows (macOS) or Alt+arrows (Windows) move the selection there, as they do everywhere. |
 | Space | Toggle the selected tile between focus (it fills the stage) and the grid it came from, as a continuous animation (see "Full screen and focus"). Combined with F, Space gives full-screen video of one camera and back. |
 | 0 | Reset digital zoom on the selected tile, and bring a filled picture's crop back to the middle. |
 | M | Listen to the selected tile, or mute it if it is the one playing (⌘L / Ctrl+L does the same). |
@@ -266,14 +266,17 @@ overlay (Windows) so they can be discovered.
 | Shift+P | Save Picture As… (choose the place and format). |
 | R | Start or stop recording the selected tile's camera (from the "Record from" setting). |
 | T | Start or End Conversation. |
-| Option+arrows (macOS), Alt+arrows (Windows) | Move a PTZ camera while held; it stops when the key is released. |
-| Option or Alt with = and - | Lens zoom in and out. |
+| Arrows, on a selected (or focused, or full-screen) tile whose camera or lens pans and tilts | Move the camera while held; it stops when the key is released (and when the window loses the keyboard, the tile or window closes, or the app is deactivated). A key's auto-repeat is the same held move. Two arrows held at once: the core has no diagonal move, so the last one pressed wins. On any other tile the arrows move the selection, as above. |
+| Option+arrows (macOS), Alt+arrows (Windows) | Move the selection (so it stays reachable on a PTZ tile). |
+| = and - (also with Option or Alt) | Lens zoom in and out, on a tile whose camera has a zoom lens; with Option or Alt on any tile. |
 | Option or Alt with 1 to 9 | Recall preset 1 to 9 (the order of the camera's list). |
 | ⇧⌘P / Ctrl+Shift+P | Save picture in a call window, where P may be typed into the reply (also accepted in viewer windows). |
 | ⇧⌘R / Ctrl+Shift+R | Start or stop the call recording in a call window (also accepted in viewer windows, for the selected tile). |
 
-The keys are read by key position, not by the character typed, so Option
-with = or a digit works on every keyboard layout that has those keys.
+The plain camera keys act only while the stage has the keyboard: never
+while a text field or a menu has the focus, and the sidebar keeps its own
+arrows. The keys are read by key position, not by the character typed, so
+Option with = or a digit works on every keyboard layout that has those keys.
 
 - **macOS:** a new **Camera** menu lists them: Save Picture, Save Picture
   As…, Start Recording (Stop Recording while recording), Start

@@ -270,12 +270,12 @@ public struct PTZLensThrottle: Sendable, Equatable {
 
 // MARK: Keys
 
-/// What an Option key does to the selected tile's camera (docs/UX.md
+/// What a camera key does to the selected tile's camera (docs/UX.md
 /// "Capture and camera keys").
 public enum PTZKey: Sendable, Equatable {
-    /// Option with an arrow: moves while held.
+    /// A plain arrow on a tile that pans and tilts: moves while held.
     case move(PTZDirection)
-    /// Option with `=` or `-`: lens zoom in (+1) or out (-1).
+    /// `=` or `-` (alone or with Option): lens zoom in (+1) or out (-1).
     case zoom(Int)
     /// Option with 1 to 9: recalls preset 1 to 9 (the order of the camera's list).
     case preset(Int)
@@ -287,28 +287,41 @@ extension ViewerKeys {
     static let minusKey: UInt16 = 27
     static let digitKeys: [UInt16: Int] = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9]
 
-    /// The camera key for a key press: Option alone (no Command, Control or
-    /// Shift), read by key position so it works on every layout, never
-    /// while text is edited. Arrows repeat (the hold is renewed by the
-    /// timer, so a repeat changes nothing); the others ignore repeats.
-    public static func ptzKey(keyCode: UInt16, modifiers: KeyModifiers, isRepeat: Bool, context: KeyContext) -> PTZKey? {
-        guard context != .textEditing, modifiers == [.option] else { return nil }
-        switch keyCode {
-        case leftArrow: return .move(.left)
-        case rightArrow: return .move(.right)
-        case upArrow: return .move(.up)
-        case downArrow: return .move(.down)
-        default: break
+    /// The camera key for a key press, read by key position so it works on
+    /// every layout, never while text is edited.
+    ///
+    /// - A plain arrow (no modifier) is a move when the tile pans and tilts
+    ///   (`canMove`); otherwise, and with Option, it is the selection's
+    ///   (`shortcut`). Arrows repeat (the hold is renewed by the timer, so a
+    ///   repeat changes nothing).
+    /// - `=` and `-` zoom, alone when the tile has a zoom lens (`canZoom`)
+    ///   and with Option always; digits recall presets with Option only.
+    ///   These ignore repeats.
+    public static func ptzKey(
+        keyCode: UInt16, modifiers: KeyModifiers, isRepeat: Bool, context: KeyContext,
+        canMove: Bool, canZoom: Bool
+    ) -> PTZKey? {
+        guard context != .textEditing, modifiers.isSubset(of: [.option]) else { return nil }
+        let option = modifiers == [.option]
+        // A plain key is the stage's only; the sidebar keeps its own arrows.
+        if !option, context != .stage { return nil }
+        if !option, canMove {
+            switch keyCode {
+            case leftArrow: return .move(.left)
+            case rightArrow: return .move(.right)
+            case upArrow: return .move(.up)
+            case downArrow: return .move(.down)
+            default: break
+            }
         }
         guard !isRepeat else { return nil }
-        if keyCode == equalKey { return .zoom(1) }
-        if keyCode == minusKey { return .zoom(-1) }
-        if let n = digitKeys[keyCode] { return .preset(n) }
+        if keyCode == equalKey, option || canZoom { return .zoom(1) }
+        if keyCode == minusKey, option || canZoom { return .zoom(-1) }
+        if option, let n = digitKeys[keyCode] { return .preset(n) }
         return nil
     }
 
-    /// The direction an arrow key's release ends, with or without Option
-    /// still down.
+    /// The direction an arrow key's release ends, whatever modifiers are down.
     public static func ptzKeyUp(keyCode: UInt16) -> PTZDirection? {
         switch keyCode {
         case leftArrow: return .left

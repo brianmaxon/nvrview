@@ -218,8 +218,8 @@ internal sealed class ViewerWindow
             }
             else
             {
-                // Losing the focus stops a held camera move (a pad button, an Alt arrow).
-                _viewer.Ptz.StopAll();
+                // Losing the focus stops a held camera move (a pad button, an arrow).
+                Stage.WindowDeactivated();
             }
         };
 
@@ -763,12 +763,20 @@ internal sealed class ViewerWindow
         }
         bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
         bool repeat = e.KeyStatus.WasKeyDown;
-        // Alt with an arrow, = or -, or 1 to 9 drives the selected tile's camera (docs/UX.md "Capture and camera keys").
-        // Handling the key keeps Alt from opening the window's system menu when it comes up.
-        if (e.KeyStatus.IsMenuKeyDown && Stage.HandlePtzKey(e.Key, e.KeyStatus.ScanCode, alt: true, repeat))
+        // Alt with = or -, or 1 to 9 drives the selected tile's camera (docs/UX.md "Capture and camera keys").
+        // Alt with an arrow moves the selection (below). Using an Alt key keeps Alt from opening the window's
+        // system menu when it comes up.
+        if (e.KeyStatus.IsMenuKeyDown)
         {
-            e.Handled = true;
-            return;
+            if (Stage.HandlePtzKey(e.Key, e.KeyStatus.ScanCode, alt: true, repeat))
+            {
+                e.Handled = true;
+                return;
+            }
+            if (e.Key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down)
+            {
+                Stage.PtzAltUsed = true;
+            }
         }
         switch (e.Key)
         {
@@ -798,6 +806,13 @@ internal sealed class ViewerWindow
         if (e.Key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down or VirtualKey.Space or VirtualKey.Enter
             && FocusManager.GetFocusedElement(Window.Content.XamlRoot) is DependencyObject d && Within(d, _sidebarHost, _overlay))
         {
+            return;
+        }
+        // A plain arrow on a camera that pans and tilts, or = and - on one with a zoom lens, drives the camera; the
+        // key's release ends the move (OnKeyUp). Anywhere else the arrow moves the selection.
+        if (!e.KeyStatus.IsMenuKeyDown && Stage.HandlePtzKey(e.Key, e.KeyStatus.ScanCode, alt: false, repeat))
+        {
+            e.Handled = true;
             return;
         }
         e.Handled = Stage.HandleKey(e.Key, ctrl, repeat);

@@ -169,7 +169,7 @@ final class PTZModel {
     /// Stops whatever is held, for any reason that is not a release.
     func stopAll() { release() }
 
-    /// A key holds the move (Option with an arrow). Key repeats change nothing.
+    /// A key holds the move (an arrow key; the last one pressed wins, as the core has no diagonals). Key repeats change nothing.
     func keyDown(_ direction: PTZDirection, camera: CameraRef) {
         if keyHeld == direction, held == camera { return }
         keyHeld = direction
@@ -181,11 +181,6 @@ final class PTZModel {
     func keyUp(_ direction: PTZDirection) {
         guard keyHeld == direction else { return }
         release()
-    }
-
-    /// Option came up while an arrow key still holds a move.
-    func modifiersChanged(optionDown: Bool) {
-        if !optionDown, keyHeld != nil { release() }
     }
 
     /// The tile of a camera closed: its move, readings and positions go.
