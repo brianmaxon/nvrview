@@ -227,7 +227,15 @@ private final class GatedDetector: CropDetecting, @unchecked Sendable {
 }
 
 private func until(_ condition: () async -> Bool) async {
-    while !(await condition()) { await Task.yield() }
+    // A hang guard, not a pace: the condition is polled by yielding.
+    let deadline = Date().addingTimeInterval(120)
+    while !(await condition()) {
+        if Date() >= deadline {
+            Issue.record("the condition did not hold within 120 s")
+            return
+        }
+        await Task.yield()
+    }
 }
 
 @Suite struct DetectorServiceTests {

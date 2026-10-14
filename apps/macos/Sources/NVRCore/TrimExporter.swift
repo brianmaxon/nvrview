@@ -88,20 +88,21 @@ public enum TrimExporter {
                 }
                 SampleCopier(output: o, input: i, control: control, queue: queue, onSample: sampleSeen).run { group.leave() }
             }
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in group.notify(queue: .global()) { c.resume() } }
+            let drained = await WriterWait.drain(group, writer: writer, ceiling: WriterWait.exportCeiling)
             if control.isCanceled {
                 reader.cancelReading()
                 writer.cancelWriting()
                 ExportFile.discard(partial)
                 return ExportOutcome(result: .canceled, url: url)
             }
-            if reader.status == .failed || writer.status == .failed {
+            if reader.status == .failed || writer.status == .failed || drained != .drained {
+                reader.cancelReading()
                 let why = (reader.error ?? writer.error)?.localizedDescription ?? "unknown"
                 writer.cancelWriting()
                 return fail("The cut failed: \(why)")
             }
             writer.endSession(atSourceTime: end)
-            await writer.finishWriting()
+            _ = await WriterWait.finish(writer, ceiling: WriterWait.exportCeiling)
             guard writer.status == .completed else { return fail("The file could not be finished: \(writer.error?.localizedDescription ?? "?")") }
             control.fraction = 1
             let bytes = try ExportFile.commit(partial, to: url, shareSafe: shareSafe)

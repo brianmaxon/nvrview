@@ -98,20 +98,20 @@ public enum EditExporter {
                     queue: DispatchQueue(label: "nvrview.export.audio", qos: .userInitiated)
                 ).run { group.leave() }
             }
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in group.notify(queue: .global()) { c.resume() } }
+            let drained = await WriterWait.drain(group, writer: writer, ceiling: WriterWait.exportCeiling)
             if control.isCanceled {
                 audio?.reader.cancelReading()
                 writer.cancelWriting()
                 ExportFile.discard(partial)
                 return ExportOutcome(result: .canceled, url: url)
             }
-            if let why = feeder.failure ?? writer.error?.localizedDescription {
+            if let why = feeder.failure ?? writer.error?.localizedDescription ?? (drained == .drained ? nil : "The writer stopped taking frames") {
                 audio?.reader.cancelReading()
                 writer.cancelWriting()
                 return fail(why)
             }
             writer.endSession(atSourceTime: CMTime(value: Int64(frames), timescale: Int32(fps)))
-            await writer.finishWriting()
+            _ = await WriterWait.finish(writer, ceiling: WriterWait.exportCeiling)
             guard writer.status == .completed else { return fail("The file could not be finished: \(writer.error?.localizedDescription ?? "?")") }
             control.fraction = 1
             let bytes = try ExportFile.commit(partial, to: url, shareSafe: settings.shareSafe)
