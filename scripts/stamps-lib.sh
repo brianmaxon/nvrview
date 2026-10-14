@@ -78,7 +78,7 @@ docs_checks_ok() { # TREE
   stamp_dir >/dev/null
   [ -f "$(stamp_dir)/$1.docs" ] && return 0
   docs_here "$1" || return 1
-  if ${NVRVIEW_DOCS_CHECK:-scripts/check-docs.sh} >&2; then
+  if ${NVRVIEW_DOCS_CHECK:-sh scripts/check-docs.sh} >&2; then
     mkdir -p "$(stamp_dir)"
     echo "markdown checks passed" >"$(stamp_dir)/$1.docs"
     return 0
