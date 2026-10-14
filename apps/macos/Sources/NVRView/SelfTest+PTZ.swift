@@ -14,10 +14,13 @@ private func print(_ line: String) { selfTestPrint(line) }
 
 extension SelfTest {
     /// An Option key as AppKit delivers it to the window.
-    func pressOption(_ keyCode: UInt16, up: Bool = false) {
+    func pressOption(_ keyCode: UInt16, up: Bool = false) { pressKey(keyCode, [.option], up: up) }
+
+    /// A key, with modifiers while it is down, as AppKit delivers it to the window.
+    func pressKey(_ keyCode: UInt16, _ flags: NSEvent.ModifierFlags = [], up: Bool = false) {
         guard let nsWindow = window?.window,
             let e = NSEvent.keyEvent(
-                with: up ? .keyUp : .keyDown, location: .zero, modifierFlags: up ? [] : [.option],
+                with: up ? .keyUp : .keyDown, location: .zero, modifierFlags: up ? [] : flags,
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: nsWindow.windowNumber, context: nil,
                 characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode)
         else { return }
@@ -89,16 +92,18 @@ extension SelfTest {
                     if sent("move") <= moves0 || sent("stop", "released") < 1 {
                         problems.append("the core did not report the pad's move and stop")
                     }
-                    // The Option arrow holds the move; its release stops it.
-                    pressOption(ViewerKeys.rightArrow)
+                    // parity: ptz-arrow-hold
+                    // A plain arrow holds the move; its release stops it.
+                    pressKey(ViewerKeys.rightArrow)
                     advance(0.3)
                     let keyHeld = ptz.held == camera
-                    pressOption(ViewerKeys.rightArrow, up: true)
+                    pressKey(ViewerKeys.rightArrow, up: true)
                     if !keyHeld || ptz.held != nil || ptz.calls.last?.text != "stop" {
-                        problems.append("Option+arrow did not move the camera while held and stop it on release")
+                        problems.append("an arrow did not move the camera while held and stop it on release")
                     }
+                    ptzArrowSelection()
                     // parity: ptz-deadman
-                    pressOption(ViewerKeys.upArrow)
+                    pressKey(ViewerKeys.upArrow)
                     advance(0.3)
                     ptz.frozenForTest = true
                     let deadman0 = sent("stop", "deadman")
@@ -111,12 +116,52 @@ extension SelfTest {
                         print("ptz dead-man: camera stopped by itself \(stopped)")
                         if !stopped { problems.append("the camera was not stopped by itself after the app went quiet") }
                         ptz.frozenForTest = false
-                        pressOption(ViewerKeys.upArrow, up: true)
+                        pressKey(ViewerKeys.upArrow, up: true)
                         ptzPresets(finishPTZ)
                     }
                 }
                 _ = info
             }
+        }
+
+        /// Arrows move the selection where they do not steer a camera, and window deactivation ends a held move.
+        func ptzArrowSelection() {
+            let frames = window.state.tree.frames(in: stage.bounds)
+            guard let right = frames.neighbor(of: leaf.path, .right) else {
+                problems.append("no tile to the right of the PTZ tile for the arrow keys")
+                return
+            }
+            let moves0 = ptz.calls.count
+            // parity: ptz-option-arrow-selection
+            window.state.selected = leaf.path
+            pressKey(ViewerKeys.rightArrow, [.option])
+            pressKey(ViewerKeys.rightArrow, up: true)
+            print("ptz Option+arrow: selection \(window.state.selected == right ? "moved right" : "did not move"), camera calls \(ptz.calls.count - moves0)")
+            if window.state.selected != right { problems.append("Option+arrow on a PTZ tile did not move the selection") }
+            if ptz.calls.count != moves0 || ptz.held != nil { problems.append("Option+arrow on a PTZ tile moved the camera") }
+            // parity: ptz-arrow-selection
+            if let plain = model.allCameras.first(where: { model.channelInfo($0)?.ptz(lens: $0.lens).panTilt != true }) {
+                stage.assign(plain, at: leaf.path)
+                window.state.selected = leaf.path
+                pressKey(ViewerKeys.rightArrow)
+                pressKey(ViewerKeys.rightArrow, up: true)
+                print("ptz arrow on a tile that does not move: selection \(window.state.selected == right ? "moved right" : "did not move")")
+                if window.state.selected != right { problems.append("an arrow on a non-PTZ tile did not move the selection") }
+                if ptz.calls.count != moves0 || ptz.held != nil { problems.append("an arrow on a non-PTZ tile moved a camera") }
+                stage.assign(camera, at: leaf.path)
+            } else {
+                problems.append("no camera that does not pan and tilt for the arrow-selection check")
+            }
+            // parity: ptz-arrow-deactivate
+            window.state.selected = leaf.path
+            window.window?.makeFirstResponder(stage)
+            pressKey(ViewerKeys.leftArrow)
+            let held = ptz.held == camera
+            window.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+            print("ptz deactivation: held \(held), after \(ptz.held == nil ? "stopped" : "still held")")
+            if !held { problems.append("an arrow did not hold a move before the window lost the keyboard") }
+            if ptz.held != nil || ptz.calls.last?.text != "stop" { problems.append("losing the keyboard did not stop the held move") }
+            pressKey(ViewerKeys.leftArrow, up: true)
         }
 
         func ptzPresets(_ next: @escaping () -> Void) {
