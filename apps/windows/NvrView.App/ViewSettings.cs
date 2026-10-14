@@ -29,6 +29,15 @@ internal sealed class ViewSettingsFile
     /// <summary>The corner call cards stack from (a corner name); absent: opposite the indicators.</summary>
     public string? InsetCorner { get; set; }
 
+    /// <summary>Cameras marked as entrances ("deviceKey:channel"): a person on them opens an alert inset; off unless listed.</summary>
+    public List<string>? EntranceCameras { get; set; }
+
+    /// <summary>The Settings default for how many alert insets a window draws: rows per column; absent: 3.</summary>
+    public int? InsetRows { get; set; }
+
+    /// <summary>The Settings default for how many alert insets a window draws: columns; absent: 1.</summary>
+    public int? InsetColumns { get; set; }
+
     /// <summary>Fisheye mounts other than ceiling, by camera ("deviceKey:channel"): "wall" or "desk".</summary>
     public Dictionary<string, string>? FisheyeMounts { get; set; }
 
@@ -119,6 +128,8 @@ internal sealed class ViewSettings(string? file)
     private Dictionary<string, HashSet<string>> _motionGrants = [];
     private int _ptzSpeed;
     private HashSet<string> _unmuteOnRing = [];
+    private HashSet<string> _entrance = [];
+    private InsetGridSetting _insetGrid = InsetGridSetting.Standard;
     private bool _callsInWindow;
     private Dictionary<string, string> _callPresentations = [];
     private CallWindowPlacement.Mode _placement = CallWindowPlacement.Mode.Remembered;
@@ -271,6 +282,46 @@ internal sealed class ViewSettings(string? file)
         }
         Save();
         Changed?.Invoke();
+    }
+
+    /// <summary>The camera (a channel's, whatever the lens) is marked as an entrance: a person detected on it opens an alert inset when the camera is not on screen.</summary>
+    public bool Entrance(CameraRef camera)
+    {
+        Load();
+        return _entrance.Contains(MountKey(camera));
+    }
+
+    /// <summary>Marks or unmarks a camera as an entrance (saved).</summary>
+    public void SetEntrance(CameraRef camera, bool on)
+    {
+        Load();
+        if (on ? !_entrance.Add(MountKey(camera)) : !_entrance.Remove(MountKey(camera)))
+        {
+            return;
+        }
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>How many alert insets a window draws (rows x columns) unless the window has its own grid.</summary>
+    public InsetGridSetting InsetGrid
+    {
+        get
+        {
+            Load();
+            return _insetGrid;
+        }
+        set
+        {
+            Load();
+            if (_insetGrid == value)
+            {
+                return;
+            }
+            _insetGrid = value;
+            Save();
+            Changed?.Invoke();
+        }
     }
 
     /// <summary>"Open calls in their own window": a ring or Start Conversation opens the call in a call window (a doorbell's own choice wins).</summary>
@@ -711,6 +762,8 @@ internal sealed class ViewSettings(string? file)
             _mounts = read?.FisheyeMounts is { } m ? new Dictionary<string, string>(m) : [];
             _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
             _unmuteOnRing = read?.UnmuteOnRing is { } u ? [.. u] : [];
+            _entrance = read?.EntranceCameras is { } en ? [.. en] : [];
+            _insetGrid = new InsetGridSetting(read?.InsetRows ?? InsetGridSetting.Standard.Rows, read?.InsetColumns ?? InsetGridSetting.Standard.Columns);
             _motionGrants = read?.MotionGrants is { } mg ? mg.Where(kv => kv.Value.Length > 0).ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value)) : [];
             _ptzSpeed = read?.PtzSpeed is { } ps ? Math.Clamp(ps, 1, 64) : 0;
             _saveTranscripts = read?.SaveCallTranscripts ?? false;
@@ -760,6 +813,9 @@ internal sealed class ViewSettings(string? file)
                     MotionGrants = _motionGrants.Count > 0 ? _motionGrants.ToDictionary(kv => kv.Key, kv => kv.Value.Order(StringComparer.Ordinal).ToArray()) : null,
                     PtzSpeed = _ptzSpeed > 0 && _ptzSpeed != 20 ? _ptzSpeed : null,
                     UnmuteOnRing = _unmuteOnRing.Count > 0 ? [.. _unmuteOnRing.Order(StringComparer.Ordinal)] : null,
+                    EntranceCameras = _entrance.Count > 0 ? [.. _entrance.Order(StringComparer.Ordinal)] : null,
+                    InsetRows = _insetGrid.Rows == InsetGridSetting.Standard.Rows ? null : _insetGrid.Rows,
+                    InsetColumns = _insetGrid.Columns == InsetGridSetting.Standard.Columns ? null : _insetGrid.Columns,
                     SaveCallTranscripts = _saveTranscripts,
                     PicturesFolder = _picturesFolder,
                     PictureFormat = _pictureFormat == PictureFormat.Png ? null : _pictureFormat.Key(),

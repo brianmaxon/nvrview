@@ -74,7 +74,7 @@ Non-goals:
 | Session limit | protocol.md, status 409 | **observed**: "too many users online". |
 | Sound alarms (`smoke_alarm`, `co_alarm`, source `local_audio`) | `crates/sound-events`, `viewer-core` | built |
 | Incidents (stable keys, gaps, camera groups) | `recordings::incident` | built |
-| Tile alerts and alert insets | UX.md "Alerts", "Alert insets" | built on macOS; Windows has call cards only (PARITY.md) |
+| Tile alerts and alert insets | UX.md "Alerts", "Alert insets" | built on both apps (PARITY.md) |
 | Detector (RT-DETR with tiles), optional multimodal model | VISION.md | measured on stills; event-level recall on video not yet measured |
 | The rules engine | `crates/alerts` | **built** (this page, "The rules engine") |
 

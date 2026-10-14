@@ -1,8 +1,7 @@
 // Tests of calls in their own window and movable insets (NvrView.Tiles/Insets.cs, CallWindow.cs,
 // Calls.cs). The vectors are the macOS CallPresentationTests' (apps/macos NVRCoreTests), the same
-// numbers in the same order; keep the two copies in step. Not ported: the three InsetBoard
-// detached-item scenarios (the Windows app has no InsetBoard; its call cards are driven by Call
-// and CallInsets).
+// numbers in the same order; keep the two copies in step. The three InsetBoard detached-item
+// scenarios are ported too (NvrView.Tiles/AlertInsets.cs).
 
 using NvrView.Tiles;
 
@@ -11,6 +10,7 @@ namespace NvrView.Tiles.Tests;
 internal static class PresentationTests
 {
     private static readonly CameraRef Door = new("d-1", 3);
+    private static readonly CameraRef Yard = new("d-1", 1);
     private static readonly DateTime T0 = new(2023, 11, 14, 22, 13, 20, DateTimeKind.Utc);
 
     public static IEnumerable<(string, Action)> All() =>
@@ -22,12 +22,75 @@ internal static class PresentationTests
         ("presentation: the corner rule is the anchor rule at the corners", CornerIsAnchor),
         ("presentation: the doorbell's choice wins over the global default", ResolveVectors),
         ("presentation: a call keeps its presentation, latch and draft", CallKeepsState),
+        ("presentation: a call in its own window keeps a detached item", ACallInItsOwnWindowKeepsADetachedItem),
+        ("presentation: popping out the swapped-in call swaps back", PoppingOutTheSwappedInCallSwapsBack),
+        ("presentation: detached items do not count toward more", DetachedItemsDoNotCountTowardMore),
         ("presentation: call windows open where left or top right of the active screen", PlacementVectors),
         ("presentation: rectangles flip between top-left and bottom-left origins", RectFlip),
         ("presentation: call windows ask for the main stream when wider than the sub-stream", QualityVectors),
     ];
 
     private static bool Near(double a, double b) => Math.Abs(a - b) < 1e-9;
+
+    private static void ACallInItsOwnWindowKeepsADetachedItem()
+    {
+        var board = new InsetBoard();
+        // Recorded even though the doorbell is visible.
+        board.Started(InsetKind.Doorbell, Door, true, 0, T0, detached: true);
+        Check.True(board.Shown.Count == 0 && board.More == 0 && board.IsEmpty, "not drawn, not counted");
+        Check.Equal(string.Join(",", new[] { Door }), string.Join(",", board.DetachedCameras), "kept");
+        Check.True(board.ItemFor(Door)?.Detached == true, "detached");
+        // Not closed by the clock: it lives as long as the call.
+        board.Stopped(InsetKind.Doorbell, Door, 1);
+        Check.True(board.Deadline is null, "no deadline");
+        Check.Equal(0, board.Tick(100_000).Count, "nothing closes");
+        // Another press keeps it detached.
+        board.Started(InsetKind.Doorbell, Door, false, 5, T0.AddSeconds(5));
+        Check.True(board.ItemFor(Door)?.Detached == true && board.ItemFor(Door)?.Count == 2, "still detached, counted");
+        board.Stopped(InsetKind.Doorbell, Door, 6);
+        // Swap, Tab and Esc pass it by.
+        board.SwapIn(Door, Yard, 6);
+        Check.True(board.Swap is null, "no swap");
+        board.SwapTop(Yard, 6);
+        Check.True(board.Swap is null, "Tab does not swap it");
+        Check.True(board.DismissTop() is null && board.DetachedCameras.Count == 1 && board.DetachedCameras[0] == Door, "Esc passes it by");
+        // Pop In: drawn again on top, its minute starting now.
+        Check.True(board.SetDetached(Door, false, 50), "popped in");
+        Check.True(board.Shown.Count == 1 && board.Shown[0].Camera == Door && board.ItemFor(Door)?.UsedAt == 50, "drawn, used now");
+        Check.Equal<double?>(50 + InsetBoard.AutoCloseDelay, board.Deadline, "a minute from the pop in");
+        Check.True(!board.SetDetached(Door, false, 51), "popping in again changes nothing");
+        // The call's end removes it either way.
+        Check.True(board.SetDetached(Door, true, 60), "popped out");
+        Check.True(board.Dismiss(Door)?.Camera == Door && board.Items.Count == 0, "dismissed");
+    }
+
+    private static void PoppingOutTheSwappedInCallSwapsBack()
+    {
+        var board = new InsetBoard();
+        board.Started(InsetKind.Doorbell, Door, false, 0, T0);
+        board.SwapIn(Door, Yard, 1);
+        Check.True(board.Swap?.Shown == Door && board.Items[0].IsReturn, "swapped in");
+        Check.True(board.SetDetached(Door, true, 2), "popped out");
+        Check.True(board.Swap is null && !board.Items.Any(i => i.IsReturn), "swapped back, no return inset");
+        Check.True(board.IsEmpty && board.DetachedCameras.Count == 1 && board.DetachedCameras[0] == Door, "detached, not drawn");
+    }
+
+    private static void DetachedItemsDoNotCountTowardMore()
+    {
+        var board = new InsetBoard();
+        CameraRef[] others = [.. Enumerable.Range(0, 4).Select(c => new CameraRef("d-2", c))];
+        for (int i = 0; i < others.Length; i++)
+        {
+            board.Started(InsetKind.Detection("person"), others[i], false, i, T0);
+        }
+        board.Started(InsetKind.Doorbell, Door, false, 9, T0, detached: true);
+        // The fourth waits: the three drawn have not been up 10 s.
+        Check.Equal(string.Join(",", new[] { others[2], others[1], others[0] }), string.Join(",", board.Shown.Select(i => i.Camera)), "the three drawn");
+        Check.Equal(1, board.More, "one more");
+        // Esc takes the top drawn inset, not the call.
+        Check.Equal<CameraRef?>(others[2], board.DismissTop()?.Camera, "Esc takes the top drawn inset");
+        Check.True(board.DetachedCameras.Count == 1 && board.DetachedCameras[0] == Door, "the call stays");
+    }
 
     private static void AxisSnaps()
     {

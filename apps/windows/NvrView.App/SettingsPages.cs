@@ -351,9 +351,9 @@ internal sealed class SettingsPages
             }
         };
 
-        // Where doorbell call cards stack over the stage (docs/UX.md "Alert insets"): the user's
-        // corner, else opposite the detection symbols; kept in view-settings.json.
-        var insetCorner = new ComboBox { Header = "Doorbell call cards", MinWidth = 200 };
+        // Where the alert insets (doorbell call cards, smoke and CO alarms, entrance people) stack over the stage
+        // (docs/UX.md "Alert insets"): the user's corner, else opposite the detection symbols; kept in view-settings.json.
+        var insetCorner = new ComboBox { Header = "Alert insets", MinWidth = 200 };
         insetCorner.Items.Add(new ComboBoxItem { Content = "Opposite the detection symbols" });
         foreach (ChromeCorner c in Enum.GetValues<ChromeCorner>())
         {
@@ -370,6 +370,45 @@ internal sealed class SettingsPages
         var corners = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
         corners.Children.Add(corner);
         corners.Children.Add(insetCorner);
+
+        // How many alert insets a window draws at once (docs/UX.md "Alert insets", "Inset grid"): rows (1 to 4) in each of up
+        // to columns (1 to 6); the rest wait in "+N more". A window can have its own grid (right-click an inset).
+        var insetRows = new ComboBox { Header = "Inset rows", MinWidth = 100 };
+        for (int r = InsetGridSetting.MinRows; r <= InsetGridSetting.MaxRows; r++)
+        {
+            insetRows.Items.Add(new ComboBoxItem { Content = r.ToString(System.Globalization.CultureInfo.InvariantCulture), Tag = r });
+        }
+        var insetColumns = new ComboBox { Header = "Inset columns", MinWidth = 100 };
+        for (int c = InsetGridSetting.MinColumns; c <= InsetGridSetting.MaxColumns; c++)
+        {
+            insetColumns.Items.Add(new ComboBoxItem { Content = c.ToString(System.Globalization.CultureInfo.InvariantCulture), Tag = c });
+        }
+        insetRows.SelectedIndex = viewer.Settings.InsetGrid.Rows - InsetGridSetting.MinRows;
+        insetColumns.SelectedIndex = viewer.Settings.InsetGrid.Columns - InsetGridSetting.MinColumns;
+        insetRows.SelectionChanged += (_, _) =>
+        {
+            if (insetRows.SelectedItem is ComboBoxItem { Tag: int rows })
+            {
+                viewer.Settings.InsetGrid = new InsetGridSetting(rows, viewer.Settings.InsetGrid.Columns);
+            }
+        };
+        insetColumns.SelectionChanged += (_, _) =>
+        {
+            if (insetColumns.SelectedItem is ComboBoxItem { Tag: int columns })
+            {
+                viewer.Settings.InsetGrid = new InsetGridSetting(viewer.Settings.InsetGrid.Rows, columns);
+            }
+        };
+        var insetGrid = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
+        insetGrid.Children.Add(insetRows);
+        insetGrid.Children.Add(insetColumns);
+        var insetNote = new TextBlock
+        {
+            Text = "When a doorbell rings, a smoke or CO alarm is heard, or a person is detected on a camera marked as an entrance, and that camera is not on screen, its live video appears in an inset. Click it (or press Tab) to swap it with the stage; Esc closes it. A window can have its own grid: right-click an inset.",
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 560,
+            Opacity = 0.7,
+        };
 
         // Saved call transcripts (docs/UX.md "Doorbell calls"): off by default; kept in view-settings.json.
         var saveTranscripts = new CheckBox { Content = "Save call transcripts", IsChecked = viewer.Settings.SaveCallTranscripts };
@@ -407,6 +446,9 @@ internal sealed class SettingsPages
         // "Unmute on ring even when not listening", per doorbell (docs/UX.md "Doorbell calls").
         var unmuteRows = new StackPanel { Spacing = 6 };
         StackPanel unmuteSection = Section("Unmute on ring even when not listening", unmuteRows);
+        // "Entrance", per camera: a person detected on it opens an alert inset when it is not on screen (docs/UX.md "Alert insets").
+        var entranceRows = new StackPanel { Spacing = 6 };
+        StackPanel entranceSection = Section("Entrance: a person opens an alert inset", entranceRows);
         // "Allow talk-back", per camera (camera motion control, off until allowed; every use is logged).
         var talkRows = new StackPanel { Spacing = 6 };
         StackPanel talkSection = Section("Allow talk-back", talkRows);
@@ -426,6 +468,7 @@ internal sealed class SettingsPages
         var talkBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
         var noCameras = new TextBlock { Text = "No cameras yet. Connect a device first.", Opacity = 0.7 };
         var unmuteBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
+        var entranceBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
         var callPickers = new List<(CameraRef Camera, string Label, ComboBox Picker)>();
         bool buildingCalls = false;
         bool lastCallsGlobal = viewer.Settings.CallsOpenInWindow;
@@ -484,6 +527,27 @@ internal sealed class SettingsPages
                     box.IsChecked = on;
                 }
             }
+            if (entranceBoxes.Count != cameras.Count || !entranceBoxes.Select(r => (r.Camera, r.Label)).SequenceEqual(cameras))
+            {
+                entranceBoxes.Clear();
+                entranceRows.Children.Clear();
+                foreach ((CameraRef camera, string label) in cameras)
+                {
+                    var box = new CheckBox { Content = label };
+                    CameraRef cam = camera;
+                    box.Click += (_, _) => viewer.Settings.SetEntrance(cam, box.IsChecked == true);
+                    entranceBoxes.Add((camera, label, box));
+                    entranceRows.Children.Add(box);
+                }
+            }
+            foreach ((CameraRef camera, _, CheckBox box) in entranceBoxes)
+            {
+                bool on = viewer.Settings.Entrance(camera);
+                if (box.IsChecked != on)
+                {
+                    box.IsChecked = on;
+                }
+            }
             if (talkBoxes.Count != cameras.Count || !talkBoxes.Select(r => (r.Camera, r.Label)).SequenceEqual(cameras))
             {
                 talkBoxes.Clear();
@@ -531,6 +595,7 @@ internal sealed class SettingsPages
             talkSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             noCameras.Visibility = cameras.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
             unmuteSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            entranceSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             bool rebuild = firstCallBuild || global != lastCallsGlobal;
             firstCallBuild = false;
             lastCallsGlobal = global;
@@ -569,6 +634,8 @@ internal sealed class SettingsPages
 
         var alertsPage = new StackPanel { Spacing = 12 };
         alertsPage.Children.Add(corners);
+        alertsPage.Children.Add(insetGrid);
+        alertsPage.Children.Add(insetNote);
         alertsPage.Children.Add(windowRow);
         alertsPage.Children.Add(transcriptRow);
         alertsPage.Children.Add(transcriptNote);
@@ -647,6 +714,7 @@ internal sealed class SettingsPages
         var camerasPage = new StackPanel { Spacing = 16 };
         camerasPage.Children.Add(noCameras);
         camerasPage.Children.Add(callSection);
+        camerasPage.Children.Add(entranceSection);
         camerasPage.Children.Add(unmuteSection);
         camerasPage.Children.Add(talkSection);
         camerasPage.Children.Add(motionSection);

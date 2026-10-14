@@ -277,9 +277,10 @@ internal sealed partial class StageView
                 }
             case TileHeaderItem.Entrance:
                 {
-                    // Windows has no entrance insets yet (docs/PARITY.md): the item is in its place, unavailable.
-                    var entrance = new ToggleMenuFlyoutItem { Text = entry.Label, IsEnabled = false };
-                    ToolTipService.SetToolTip(entrance, "Entrance insets are not on Windows yet");
+                    // Marks the camera as an entrance: a person detected on it opens an alert inset (docs/UX.md "Alert insets").
+                    var entrance = new ToggleMenuFlyoutItem { Text = entry.Label, IsChecked = _viewer.Settings.Entrance(camera) };
+                    entrance.Click += (_, _) => _viewer.Settings.SetEntrance(camera, !_viewer.Settings.Entrance(camera));
+                    ToolTipService.SetToolTip(entrance, "A person detected on this camera opens an inset when the camera is not on screen");
                     return entrance;
                 }
             default:

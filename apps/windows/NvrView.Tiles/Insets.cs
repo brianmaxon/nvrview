@@ -1,10 +1,9 @@
-// Where a window's call cards sit over its stage (docs/UX.md "Alert insets",
-// "Doorbell calls"): the rules of the macOS insets (apps/macos NVRCore
-// AlertInsets.swift, InsetGeometry), with the same test vectors. A card is a
-// header, the doorbell's live picture (one more tile of the window's own
-// grid, drawn last) and the call's controls; when the doorbell fills the
-// stage its controls show over the stage instead. Pure: the app measures the
-// cards and draws the pictures.
+// Where a window's insets sit over its stage (docs/UX.md "Alert insets", "Doorbell calls"): the
+// rules of the macOS insets (apps/macos NVRCore AlertInsets.swift, InsetGeometry), with the same
+// test vectors. An inset is a header, a camera's live picture (one more tile of the window's own
+// grid, drawn last) and, for a call, the call's controls; when the doorbell fills the stage its
+// controls show over the stage instead. The order and the swap are AlertInsets.cs. Pure: the app
+// measures the cards and draws the pictures.
 
 using System.Text.Json.Nodes;
 
@@ -141,7 +140,27 @@ public static class InsetGeometry
     public static ChromeCorner Corner(ChromeCorner? choice, ChromeCorner indicators) => choice ?? indicators.Opposite();
 
     /// <summary>The inset width for a stage width.</summary>
-    public static double Width(double stage) => Math.Min(Math.Max(stage * WidthFraction, MinWidth), Math.Max(stage - 2 * Margin, 0));
+    public static double Width(double stage) => Width(stage, 1);
+
+    /// <summary>How many columns of insets fit side by side (at least one, at most <paramref name="columns"/>), each at least <paramref name="minWidth"/> wide (a card with call controls needs more than a plain inset).</summary>
+    public static int FittingColumns(double stage, int columns, double minWidth = MinWidth)
+    {
+        int fit = (int)Math.Floor((stage - 2 * Margin + Gap) / (minWidth + Gap));
+        return Math.Max(1, Math.Min(columns, fit));
+    }
+
+    /// <summary>
+    /// The inset width for a grid of up to <paramref name="columns"/> columns: about 30% of the
+    /// stage's width, narrower when the columns need the room, never under <see cref="MinWidth"/>
+    /// (columns that do not fit are dropped instead; see <see cref="FittingColumns"/>). One column
+    /// is the original single stack.
+    /// </summary>
+    public static double Width(double stage, int columns, double minWidth = MinWidth)
+    {
+        int used = FittingColumns(stage, columns, minWidth);
+        double available = Math.Max((stage - 2 * Margin - Gap * (used - 1)) / used, 0);
+        return Math.Min(Math.Max(Math.Min(stage * WidthFraction, available), minWidth), available);
+    }
 
     /// <summary>The height of a picture shown <paramref name="width"/> wide: its own aspect, kept between 0.3 and 1.2, 16:9 while unknown.</summary>
     public static double PictureHeight(double width, int pictureWidth, int pictureHeight)
@@ -166,33 +185,64 @@ public static class InsetGeometry
     /// newest is at its top. Insets that do not fit the stage's height (inside the margins) are
     /// left out; the newest is always drawn, even when it alone is taller.
     /// </summary>
-    public static IReadOnlyList<InsetFrame> Frames(int count, double width, IReadOnlyList<double> heights, InsetAnchor anchor, double stageWidth, double stageHeight)
+    public static IReadOnlyList<InsetFrame> Frames(int count, double width, IReadOnlyList<double> heights, InsetAnchor anchor, double stageWidth, double stageHeight) =>
+        Grid([.. heights.Take(count)], width, Math.Max(count, 1), 1, anchor, stageWidth, stageHeight);
+
+    /// <summary>
+    /// The frames of insets of the given heights in a grid of up to <paramref name="rows"/> insets
+    /// per column and <paramref name="columns"/> columns: column by column, the first column at the
+    /// anchor's horizontal edge (the right edge when the anchor is right of the middle, so the grid
+    /// grows leftward). In each column the order is as in <see cref="Frames(int, double, IReadOnlyList{double}, InsetAnchor, double, double)"/>.
+    /// Returns the frames of the insets that fit, a prefix of <paramref name="heights"/>: an inset
+    /// that does not fit the stage's height starts the next column, and one that finds no column
+    /// left ends the grid (the caller counts the rest in "+N more"). The first inset is always
+    /// drawn, even when it alone is taller than the stage.
+    /// </summary>
+    public static IReadOnlyList<InsetFrame> Grid(IReadOnlyList<double> heights, double width, int rows, int columns, InsetAnchor anchor, double stageWidth, double stageHeight)
     {
-        var fitting = new List<double>();
+        int maxColumns = FittingColumns(stageWidth, columns);
+        var perColumn = new List<List<double>>();
         double used = Margin;
-        foreach (double h in heights.Take(count))
+        foreach (double h in heights)
         {
-            if (used + h + Margin > stageHeight && fitting.Count > 0)
+            if (perColumn.Count > 0 && perColumn[^1].Count < Math.Max(rows, 1) && used + h + Margin <= stageHeight)
+            {
+                perColumn[^1].Add(h);
+                used += h + Gap;
+            }
+            else if (perColumn.Count < maxColumns)
+            {
+                perColumn.Add([h]);
+                used = Margin + h + Gap;
+            }
+            else
             {
                 break;
             }
-            fitting.Add(h);
-            used += h + Gap;
         }
         var frames = new List<InsetFrame>();
-        if (fitting.Count == 0)
+        if (perColumn.Count == 0)
         {
             return frames;
         }
-        double column = fitting.Sum() + Gap * (fitting.Count - 1);
-        double x = Margin + anchor.X * (stageWidth - 2 * Margin - width);
-        double top = Margin + anchor.Y * (stageHeight - 2 * Margin - column);
-        double offset = 0;
-        foreach (double h in fitting)
+        static double Height(List<double> column) => column.Sum() + Gap * (column.Count - 1);
+        double tallest = perColumn.Max(Height);
+        double gridWidth = perColumn.Count * width + Gap * (perColumn.Count - 1);
+        double left = Margin + anchor.X * (stageWidth - 2 * Margin - gridWidth);
+        double top = Margin + anchor.Y * (stageHeight - 2 * Margin - tallest);
+        bool upward = anchor.GrowsUpward;
+        bool fromRight = anchor.X > 0.5;
+        for (int j = 0; j < perColumn.Count; j++)
         {
-            double y = anchor.GrowsUpward ? top + column - offset - h : top + offset;
-            frames.Add(new InsetFrame(x, y, width, h));
-            offset += h + Gap;
+            double step = j * (width + Gap);
+            double x = fromRight ? left + gridWidth - width - step : left + step;
+            double offset = 0;
+            foreach (double h in perColumn[j])
+            {
+                double y = upward ? top + tallest - offset - h : top + offset;
+                frames.Add(new InsetFrame(x, y, width, h));
+                offset += h + Gap;
+            }
         }
         return frames;
     }

@@ -239,7 +239,7 @@ public sealed class LegacyTileViews(IReadOnlyList<(CameraRef Camera, TileView Vi
 }
 
 /// <summary>One window as it is remembered between launches.</summary>
-public sealed record SavedWindow(WindowContent Content, Rect Frame, bool FullScreen = false, bool SidebarCollapsed = false, double SidebarWidth = 0, double? InsetX = null, double? InsetY = null, bool Fill = false, SavedTileViews? Views = null, LegacyTileViews? Legacy = null)
+public sealed record SavedWindow(WindowContent Content, Rect Frame, bool FullScreen = false, bool SidebarCollapsed = false, double SidebarWidth = 0, double? InsetX = null, double? InsetY = null, bool Fill = false, SavedTileViews? Views = null, LegacyTileViews? Legacy = null, InsetGridSetting? InsetGrid = null)
 {
     /// <summary>The window's picture settings (Fill Tiles, and per tile the zoom, crop and Fill choice), clamped and bounded.</summary>
     public TileViews<TileViewKey> PictureViews => SavedTileViews.Restore(Fill, Views);
@@ -301,6 +301,11 @@ public sealed class WindowStore(string? path)
                 // left out while they sit in the default corner. The macOS app's key.
                 o["insetAnchor"] = new JsonObject { ["x"] = ix, ["y"] = iy };
             }
+            if (w.InsetGrid is { } grid)
+            {
+                // This window's own inset grid (rows x columns); left out while it follows the Settings default. The macOS app's key.
+                o["insetGrid"] = new JsonObject { ["rows"] = grid.Rows, ["columns"] = grid.Columns };
+            }
             if (w.Fill)
             {
                 o["fill"] = true;
@@ -357,6 +362,7 @@ public sealed class WindowStore(string? path)
                 insetX = Math.Clamp(D(a["x"]), 0, 1);
                 insetY = Math.Clamp(D(a["y"]), 0, 1);
             }
+            InsetGridSetting? insetGrid = o["insetGrid"] is JsonObject ig ? InsetGridSetting.FromJson(ig.ToJsonString()) : null;
             bool fill = B(o["fill"]);
             TileViews<TileViewKey> views = new(fill, ReadTiles(o["tiles"]));
             LegacyTileViews? legacy = null;
@@ -367,7 +373,7 @@ public sealed class WindowStore(string? path)
                 legacy = old.Count == 0 ? null : new LegacyTileViews([.. old.Saved]);
             }
             list.Add(new SavedWindow(content, frame, B(o["fullScreen"]), B(o["sidebarCollapsed"]), double.IsFinite(width) ? width : 0, insetX, insetY,
-                fill, SavedTileViews.Of(views), legacy));
+                fill, SavedTileViews.Of(views), legacy, insetGrid));
         }
         return list;
     }

@@ -422,6 +422,12 @@ internal sealed partial class Viewer : ITileBackend<CameraTile>
 
     internal void RaiseCallsChanged() => CallsChanged?.Invoke();
 
+    /// <summary>
+    /// A detection event after the viewer folded it in (the detection tracker, a doorbell's call, the alerts), with when it
+    /// was first heard: the windows' alert insets open and close from it (docs/UX.md "Alert insets").
+    /// </summary>
+    public event Action<DetectionEvent, DateTime>? DetectionReceived;
+
     /// <summary>Allows or forbids talk-back to a camera (camera motion control; off by default): saved, and passed to the core at once.</summary>
     public void SetTalkAllowed(CameraRef camera, bool allowed)
     {
@@ -1074,6 +1080,7 @@ internal sealed partial class Viewer : ITileBackend<CameraTile>
             LogAlerts();
         }
         UpdateBoard();
+        DetectionReceived?.Invoke(detection, HeardAt(e.AtNs));
     }
 
     /// <summary>When a detection was first heard, in local time (a sound's start arrives seconds after it).</summary>
