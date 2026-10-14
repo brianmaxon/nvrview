@@ -6,17 +6,17 @@ import NVRCore
 /// indented bullets, shown inside `NotesDialog`, a resizable sheet whose notes
 /// area grows with the window. Self-test step `updates-notes-scroll`.
 @MainActor
-enum UpdateNotesView {
+package enum UpdateNotesView {
     /// The notes view's size when the window opens: about 22 lines at a
     /// readable width.
-    static let width: CGFloat = 480
-    static let maxHeight: CGFloat = 340
-    static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    package static let width: CGFloat = 480
+    package static let maxHeight: CGFloat = 340
+    package static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
 
     /// The notes as styled text: headings bold and set apart, bullets with a
     /// hanging indent. Plain text in; the characters are the notes, except
     /// that a bullet's space becomes a tab.
-    static func attributed(_ notes: String) -> NSAttributedString {
+    package static func attributed(_ notes: String) -> NSAttributedString {
         let out = NSMutableAttributedString()
         let lines = notes.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let kinds = ReleaseNotesText.lineKinds(notes)
@@ -46,7 +46,7 @@ enum UpdateNotesView {
     }
 
     /// A scroll view of the notes that follows its container's size.
-    static func make(notes: String, width: CGFloat = width, height: CGFloat = maxHeight) -> NSScrollView {
+    package static func make(notes: String, width: CGFloat = width, height: CGFloat = maxHeight) -> NSScrollView {
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -69,7 +69,7 @@ enum UpdateNotesView {
 
     /// The height the text needs at `width` (the view's full width), measured
     /// on the styled string so it does not depend on the view's layout state.
-    static func contentHeight(_ text: NSTextView, width: CGFloat = width) -> CGFloat {
+    package static func contentHeight(_ text: NSTextView, width: CGFloat = width) -> CGFloat {
         guard let storage = text.textStorage else { return maxHeight }
         let inner = width - 2 * text.textContainerInset.width - 4
         let box = storage.boundingRect(with: NSSize(width: inner, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading])
@@ -77,7 +77,7 @@ enum UpdateNotesView {
     }
 
     /// How many lines of plain text the view shows at its current height.
-    static func visibleLines(_ scroll: NSScrollView) -> Int {
+    package static func visibleLines(_ scroll: NSScrollView) -> Int {
         Int(scroll.contentSize.height / font.boundingRectForFont.height)
     }
 }
@@ -87,14 +87,14 @@ enum UpdateNotesView {
 /// window, and a button row that stays at the bottom at every size. The size
 /// is remembered between runs.
 @MainActor
-final class NotesDialog: NSObject {
-    static let sizeKey = "NotesDialogSize"
-    static let minSize = NSSize(width: 360, height: 260)
+package final class NotesDialog: NSObject {
+    package static let sizeKey = "NotesDialogSize"
+    package static let minSize = NSSize(width: 360, height: 260)
 
-    let window: NSWindow
-    let scroll: NSScrollView?
-    let buttonRow = NSStackView()
-    private(set) var buttons: [NSButton] = []
+    package let window: NSWindow
+    package let scroll: NSScrollView?
+    package let buttonRow = NSStackView()
+    package private(set) var buttons: [NSButton] = []
     private let defaults: UserDefaults
     private var completion: ((Int) -> Void)?
     private var parent: NSWindow?
@@ -103,7 +103,7 @@ final class NotesDialog: NSObject {
     /// `notes` nil makes a dialog with just the title and line. The first
     /// button is the default; a later one named "Not Now", "Later", or
     /// "Close" answers Escape.
-    init(title: String, line: String?, notes: String?, buttonTitles: [String], defaults: UserDefaults = .standard) {
+    package init(title: String, line: String?, notes: String?, buttonTitles: [String], defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let hasNotes = notes != nil
         window = NSWindow(
@@ -181,14 +181,14 @@ final class NotesDialog: NSObject {
     }
 
     /// The saved size, if there is one, raised to the minimum.
-    func savedSize() -> NSSize? {
+    package func savedSize() -> NSSize? {
         guard let a = defaults.array(forKey: Self.sizeKey) as? [Double], a.count == 2 else { return nil }
         return NSSize(width: max(a[0], Self.minSize.width), height: max(a[1], Self.minSize.height))
     }
 
     /// Wide enough to read, tall enough for about 22 lines; short notes get a
     /// shorter window.
-    static func defaultSize(line: String?, scroll: NSScrollView?) -> NSSize {
+    package static func defaultSize(line: String?, scroll: NSScrollView?) -> NSSize {
         let chrome: CGFloat = 20 + 24 + (line == nil ? 0 : 50) + 12 + 14 + 32 + 20
         var notes = UpdateNotesView.maxHeight
         if let text = scroll?.documentView as? NSTextView {
@@ -200,7 +200,7 @@ final class NotesDialog: NSObject {
     @objc private func pressed(_ sender: NSButton) { finish(sender.tag) }
 
     /// Presses button `index` (used by the buttons and the self-test).
-    func finish(_ index: Int) {
+    package func finish(_ index: Int) {
         remember()
         let done = completion
         completion = nil
@@ -215,14 +215,14 @@ final class NotesDialog: NSObject {
     }
 
     /// Stores the content size when the notes area can be resized.
-    func remember() {
+    package func remember() {
         guard scroll != nil, let size = window.contentView?.frame.size else { return }
         defaults.set([Double(size.width), Double(size.height)], forKey: Self.sizeKey)
     }
 
     /// Shows the dialog as a sheet on `parent`, or modally when there is
     /// none. `completion` gets the index of the pressed button.
-    func present(on parent: NSWindow?, completion: @escaping (Int) -> Void) {
+    package func present(on parent: NSWindow?, completion: @escaping (Int) -> Void) {
         self.completion = completion
         self.parent = parent
         keepAlive = self

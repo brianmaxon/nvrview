@@ -2,6 +2,7 @@
 import AppKit
 import Foundation
 import NVRCore
+import AppUpdates
 
 /// Self-test step `updates-notes-scroll`: the release notes dialog, given the
 /// longest allowed synthetic notes (2000 characters of headings and bullets),

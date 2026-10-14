@@ -36,6 +36,8 @@ let selfTest = ProcessInfo.processInfo.environment["NVRVIEW_SELFTEST"] != nil
 // They share one access rule: `package` for what another module uses.
 let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     ("AppBase", ["NVRCore", "VideoKit"]),
+    // Updates: checking, downloading, release notes, and their settings page.
+    ("AppUpdates", ["AppBase"]),
 ]
 
 let appDependencies: [Target.Dependency] =

@@ -2,6 +2,7 @@ import AppKit
 import NVRCore
 import SwiftUI
 import AppBase
+import AppUpdates
 
 /// The Settings window's size. The tab bar shows every tab (icon and label)
 /// in one row, so the window must stay at least as wide as that row: six tabs

@@ -6,14 +6,14 @@ import UniformTypeIdentifiers
 /// Settings, Updates (docs/UPDATES.md, "Settings and checks in the apps"):
 /// the source, the trusted keys, automatic checks, Check Now, and one line
 /// of status.
-struct UpdateSettingsView: View {
-    let updater: Updater
+package struct UpdateSettingsView: View {
+    package let updater: Updater
     @State private var sourceText = ""
     @State private var sourceProblem: String?
     @State private var keyText = ""
     @State private var keyProblem: String?
 
-    var body: some View {
+    package var body: some View {
         Form {
             Section {
                 HStack {
@@ -116,5 +116,9 @@ struct UpdateSettingsView: View {
 
     private static func time(_ date: Date) -> String {
         date.formatted(date: Calendar.current.isDateInToday(date) ? .omitted : .abbreviated, time: .shortened)
+    }
+
+    package init(updater: Updater) {
+        self.updater = updater
     }
 }

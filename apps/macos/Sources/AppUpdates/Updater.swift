@@ -12,9 +12,9 @@ import AppBase
 /// check the user asked for answers with an alert.
 @MainActor
 @Observable
-final class Updater {
+package final class Updater {
     /// A question or answer for the user (shown by the app delegate).
-    enum Prompt: Equatable {
+    package enum Prompt: Equatable {
         case available(version: String, notes: String)
         case ready(version: String)
         case upToDate(version: String)
@@ -27,7 +27,7 @@ final class Updater {
     @ObservationIgnored private let launchedAt: Date
     @ObservationIgnored private let schedule = UpdateSchedule()
     /// Off in self-tests and with `--fake`: no automatic checks.
-    @ObservationIgnored let automaticAllowed: Bool
+    @ObservationIgnored package let automaticAllowed: Bool
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var userAsked = false
     @ObservationIgnored private var pendingVersion: String?
@@ -35,23 +35,23 @@ final class Updater {
 
     /// Who may code sign an update of this copy, for Settings (read once:
     /// it runs `codesign`).
-    var signerSummary: String {
+    package var signerSummary: String {
         if cachedSignerRule == nil { cachedSignerRule = CodeSign.rule(forInstalled: bundleURL) }
         return cachedSignerRule?.summary ?? ""
     }
     /// Shows a prompt (set by the app delegate).
-    @ObservationIgnored var present: (Prompt) -> Void = { _ in }
+    @ObservationIgnored package var present: (Prompt) -> Void = { _ in }
     /// Quits the app (Restart Now).
-    @ObservationIgnored var quit: () -> Void = { NSApp.terminate(nil) }
+    @ObservationIgnored package var quit: () -> Void = { NSApp.terminate(nil) }
 
-    let current: String
-    let bundleURL: URL
-    private(set) var settings: UpdateSettings
-    private(set) var status: UpdateStatus = .idle
+    package let current: String
+    package let bundleURL: URL
+    package private(set) var settings: UpdateSettings
+    package private(set) var status: UpdateStatus = .idle
     /// Install this staged update when the app quits; relaunch if asked.
-    private(set) var installOnQuit: (version: String, path: String, relaunch: Bool)?
+    package private(set) var installOnQuit: (version: String, path: String, relaunch: Bool)?
 
-    init(
+    package init(
         bridge: CoreBridge, store: JSONFileStore<UpdateSettings>, automaticAllowed: Bool,
         bundleURL: URL = Bundle.main.bundleURL, current: String? = nil, now: @escaping () -> Date = Date.init,
         bundled: BundledUpdateDefaults? = nil, releaseNotes: BundledReleaseNotes? = nil
@@ -74,11 +74,11 @@ final class Updater {
 
     /// The notes of the versions in this build (docs/UPDATES.md, "Bundled
     /// release notes"), newest first; empty in a development build.
-    let releaseNotes: BundledReleaseNotes
+    package let releaseNotes: BundledReleaseNotes
 
     /// The notes to show once on the first launch of a new version, or nil;
     /// records this version as the one that ran.
-    func takeWhatsNew() -> ReleaseNote? {
+    package func takeWhatsNew() -> ReleaseNote? {
         let decision = WhatsNew.decide(current: current, lastRun: settings.lastRunVersion, bundled: releaseNotes)
         if let remember = decision.remember {
             settings.lastRunVersion = remember
@@ -90,7 +90,7 @@ final class Updater {
     /// Cleans staging leftovers, reports what the last install did, and
     /// starts the schedule (polled every few minutes; the first check comes
     /// a minute after launch).
-    func start() {
+    package func start() {
         if case .success(let folder) = BundleInstaller.updateFolder(for: bundleURL) {
             BundleInstaller.removeLeftovers(in: folder)
             let result = folder.appendingPathComponent("result.txt")
@@ -108,14 +108,14 @@ final class Updater {
         }
     }
 
-    func stop() {
+    package func stop() {
         timer?.invalidate()
         timer = nil
     }
 
     /// Checks if the schedule says so (the timer, and tests with their own
     /// clock).
-    func poll() {
+    package func poll() {
         guard schedule.isDue(settings, now: now(), launchedAt: launchedAt) else { return }
         switch status {
         case .checking, .downloading, .ready: return
@@ -127,7 +127,7 @@ final class Updater {
 
     /// Sets the source; returns a message when the core refuses it.
     @discardableResult
-    func setSource(_ text: String) -> String? {
+    package func setSource(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty, let problem = sourceProblem(trimmed) { return problem }
         settings.source = trimmed
@@ -135,7 +135,7 @@ final class Updater {
         return nil
     }
 
-    func sourceProblem(_ text: String) -> String? {
+    package func sourceProblem(_ text: String) -> String? {
         guard let json = bridge.updateParseSource(text), let o = Self.object(json) else {
             return "This build cannot update itself."
         }
@@ -145,7 +145,7 @@ final class Updater {
     /// Adds a pasted key or a key file's text; returns a message when it is
     /// not a key.
     @discardableResult
-    func addKey(_ text: String) -> String? {
+    package func addKey(_ text: String) -> String? {
         guard let json = bridge.updateParseKey(text), let o = Self.object(json), let key = o["key"] as? String else {
             return "That is not an NVRView update public key."
         }
@@ -162,22 +162,22 @@ final class Updater {
 
     /// Removes a key the user added. A bundled key cannot be deleted, only
     /// turned off (`setBundledKey`).
-    func removeKey(_ key: String) {
+    package func removeKey(_ key: String) {
         settings.keys.removeAll { $0 == key }
         save()
     }
 
-    func setBundledKey(_ key: String, on: Bool) {
+    package func setBundledKey(_ key: String, on: Bool) {
         settings.setBundledKey(key, on: on)
         save()
     }
 
     /// The short ID shown for a stored key.
-    func keyID(_ key: String) -> String {
+    package func keyID(_ key: String) -> String {
         bridge.updateParseKey(key).flatMap(Self.object).flatMap { $0["id"] as? String } ?? "?"
     }
 
-    func setAutomatic(_ on: Bool) {
+    package func setAutomatic(_ on: Bool) {
         settings.automatic = on
         save()
     }
@@ -187,7 +187,7 @@ final class Updater {
     // MARK: Checking and downloading
 
     /// The menu item's title.
-    var menuTitle: String {
+    package var menuTitle: String {
         switch status {
         case .available(let v, _): return "Update to \(v)…"
         case .ready(let v, _): return "Install \(v) and Restart…"
@@ -196,7 +196,7 @@ final class Updater {
     }
 
     /// The menu item: offer what is known, or check now.
-    func menuAction() {
+    package func menuAction() {
         switch status {
         case .available(let v, let notes): present(.available(version: v, notes: notes))
         case .ready(let v, _): present(.ready(version: v))
@@ -205,7 +205,7 @@ final class Updater {
         }
     }
 
-    func check(userAsked: Bool) {
+    package func check(userAsked: Bool) {
         guard settings.canCheck else {
             if userAsked { present(.failed("Set an update source and add a trusted key in Settings, Updates.")) }
             return
@@ -223,7 +223,7 @@ final class Updater {
     }
 
     /// The user said yes to `version`: download and stage it next to the app.
-    func download(_ version: String) {
+    package func download(_ version: String) {
         let folder: URL
         switch BundleInstaller.updateFolder(for: bundleURL) {
         case .failure(let blocker):
@@ -253,7 +253,7 @@ final class Updater {
     }
 
     /// An `update` event from the core.
-    func handle(_ e: UpdateEvent) {
+    package func handle(_ e: UpdateEvent) {
         guard let next = UpdateStatus.after(e, now: now(), pendingVersion: pendingVersion) else { return }
         status = next
         let final = !["started", "downloading"].contains(e.state)
@@ -277,21 +277,21 @@ final class Updater {
     }
 
     /// Restart Now: install when the app has quit, then reopen it.
-    func restartNow() {
+    package func restartNow() {
         guard case .ready(let v, let path) = status else { return }
         installOnQuit = (v, path, true)
         quit()
     }
 
     /// Later: install when the user next quits, without reopening.
-    func later() {
+    package func later() {
         guard case .ready(let v, let path) = status else { return }
         installOnQuit = (v, path, false)
     }
 
     /// The app is quitting: start the helper if an update waits. It waits
     /// for this process to exit before touching anything.
-    func appWillTerminate() {
+    package func appWillTerminate() {
         stop()
         bridge.updateCancel()
         guard let pending = installOnQuit, let exe = Bundle.main.executableURL,

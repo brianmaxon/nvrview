@@ -13,8 +13,8 @@ import NVRCore
 ///
 /// It writes what it did to `<update folder>/update.log` and the outcome to
 /// `<update folder>/result.txt`, which the app reads at its next start.
-enum UpdateHelper {
-    static func run(_ args: [String]) -> Int32 {
+package enum UpdateHelper {
+    package static func run(_ args: [String]) -> Int32 {
         var values: [String: String] = [:]
         var relaunch = false
         var it = args.makeIterator()
@@ -73,7 +73,7 @@ enum UpdateHelper {
     }
 
     /// Polls until `pid` has exited, for at most `seconds`.
-    static func waitForExit(_ pid: pid_t, seconds: Double) -> Bool {
+    package static func waitForExit(_ pid: pid_t, seconds: Double) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if kill(pid, 0) != 0 && errno == ESRCH { return true }
