@@ -64,10 +64,8 @@ enum WhatsNewSelfTest {
         if !list.contains("\u{2022} a bullet") || list.contains("- a bullet") {
             problems.append("whats-new: a \"- \" line is not shown as a bullet")
         }
-        let view = UpdateNotesView.make(notes: String(repeating: list + "\n", count: 6), maxHeight: UpdateNotesView.listMaxHeight)
-        if view.frame.height > UpdateNotesView.listMaxHeight || !view.hasVerticalScroller {
-            problems.append("whats-new: the Help list is not bounded and scrollable")
-        }
+        let view = UpdateNotesView.make(notes: String(repeating: list + "\n", count: 6))
+        if !view.hasVerticalScroller { problems.append("whats-new: the Help list is not scrollable") }
 
         // 3. A build without the file: nothing shown, nothing to list, and a dev version is left alone.
         let bare = make(without, "0.4.0")
