@@ -60,3 +60,34 @@ opt-level = 2
 
 [profile.dev.package.inout]
 opt-level = 2
+
+# The shipped library and every check build the release profile. Cargo's
+# default ("thin local" LTO across a crate's 16 code generation units)
+# is most of the optimizer's time: measured on a Windows laptop (8 cores),
+# the cold release build of the library and the mock took 216 s by default and
+# 98 to 118 s with LTO off (19.6 s instead of 23.4 s on an Apple silicon Mac).
+# The cost is cross-unit inlining: the synthetic soak (4 tiles, audio, 1
+# simulated hour; tools/soak) used 16.2 s of CPU by default, 18.5 s with LTO
+# off and 17.2 s with the hot decode crates below on one unit, which is
+# about 0.1% of one core at real time either way. One unit per hot crate keeps
+# their inlining where the work is.
+[profile.release]
+lto = "off"
+
+[profile.release.package.audio-pipeline]
+codegen-units = 1
+
+[profile.release.package.sound-events]
+codegen-units = 1
+
+[profile.release.package.symphonia-core]
+codegen-units = 1
+
+[profile.release.package.symphonia-codec-aac]
+codegen-units = 1
+
+[profile.release.package.mp4-remux]
+codegen-units = 1
+
+[profile.release.package.bc-protocol]
+codegen-units = 1

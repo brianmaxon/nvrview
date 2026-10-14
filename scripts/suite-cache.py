@@ -254,15 +254,15 @@ SUITES["windows"]["app-publish"] = (
 MAC_AREAS = ["startup", "viewer", "tiles", "layouts", "header", "settings",
              "calls", "recordings", "capture", "ptz", "alerts"]
 MAC_NOT_APP = ["apps/macos/Sources/NVRViewDemo/", "apps/macos/Tests/", "apps/macos/Packaging/"]
-_N, _C, _F = "apps/macos/Sources/NVRView/", "apps/macos/Sources/NVRCore/", "apps/macos/Sources/FakeCore/"
+_N, _S, _C, _F = "apps/macos/Sources/NVRViewApp/", "apps/macos/Sources/NVRViewSelfTest/", "apps/macos/Sources/NVRCore/", "apps/macos/Sources/FakeCore/"
 MAC_OWNED = {
-    "tiles": [_N + "SelfTest+Fisheye.swift", _C + "Fisheye.swift"],
-    "settings": [_N + "SelfTest+Settings.swift", _N + "UpdateDefaultsSelfTest.swift", _N + "UpdateNotesSelfTest.swift", _N + "WhatsNewSelfTest.swift",
+    "tiles": [_S + "SelfTest+Fisheye.swift", _C + "Fisheye.swift"],
+    "settings": [_S + "SelfTest+Settings.swift", _S + "UpdateDefaultsSelfTest.swift", _S + "UpdateNotesSelfTest.swift", _S + "WhatsNewSelfTest.swift",
                  _N + "UpdateNotesView.swift", _C + "Discovery.swift", _F + "FakeDiscovery.swift"],
-    "calls": [_N + "SelfTest+Calls.swift", _N + "CallServices.swift", _N + "CallWindow.swift", _N + "DoorbellCalls.swift",
+    "calls": [_S + "SelfTest+Calls.swift", _N + "CallServices.swift", _N + "CallWindow.swift", _N + "DoorbellCalls.swift",
               _N + "TranscriptStore.swift", _C + "CaptionEcho.swift", _C + "CallTranscriptFile.swift",
               _C + "EchoCancellation.swift", _C + "TalkAudioConverter.swift"],
-    "recordings": [_N + "SelfTest+Recordings.swift", _N + "SelfTest+PlayerZoom.swift", _N + "SelfTest+PlayerQuality.swift", _C + "PlayerQuality.swift", _N + "EditPlayer.swift", _N + "EditStage.swift",
+    "recordings": [_S + "SelfTest+Recordings.swift", _S + "SelfTest+PlayerZoom.swift", _S + "SelfTest+PlayerQuality.swift", _C + "PlayerQuality.swift", _N + "EditPlayer.swift", _N + "EditStage.swift",
                    _N + "PlayerStage.swift", _N + "RecordingsBrowser.swift", _N + "RecordingsExport.swift",
                    _N + "RecordingsModel.swift", _N + "RecordingsPlayer.swift", _N + "RecordingsPlayer+Pictures.swift",
                    _N + "RecordingsPlayerView.swift", _C + "PlayerTileViews.swift",
@@ -271,11 +271,11 @@ MAC_OWNED = {
                    _C + "Playback.swift", _C + "PlayerRules.swift", _C + "Recordings.swift", _C + "RecordingsBrowse.swift",
                    _C + "RecordingsSound.swift", _C + "SoundAnalysis.swift", _C + "TrimExporter.swift",
                    _F + "FakePlayback.swift", _F + "FakeRecordings.swift", _F + "SyntheticRecording.swift"],
-    "capture": [_N + "SelfTest+Capture.swift"],
-    "ptz": [_N + "SelfTest+PTZ.swift", _N + "PTZControls.swift", _N + "PTZModel.swift", _N + "StageView+PTZ.swift",
+    "capture": [_S + "SelfTest+Capture.swift"],
+    "ptz": [_S + "SelfTest+PTZ.swift", _N + "PTZControls.swift", _N + "PTZModel.swift", _N + "StageView+PTZ.swift",
             _C + "PTZ.swift"],
-    "alerts": [_N + "SelfTest+Alerts.swift", _N + "AlertsSelfTest.swift", _N + "DetectorSelfTest.swift",
-               _N + "MockHomeAssistant.swift", _N + "SmartAlertEventsWindow.swift", _N + "SmartAlertsModel.swift",
+    "alerts": [_S + "SelfTest+Alerts.swift", _S + "AlertsSelfTest.swift", _S + "DetectorSelfTest.swift",
+               _S + "MockHomeAssistant.swift", _N + "SmartAlertEventsWindow.swift", _N + "SmartAlertsModel.swift",
                _N + "SmartAlertsSettingsView.swift", _N + "StageView+Verify.swift", _N + "VerificationViews.swift",
                _C + "SmartAlerts.swift", _C + "SmartAlertSettings.swift", _C + "VerificationBoard.swift",
                _F + "FakeAlerts.swift", "apps/macos/Sources/AlertHost/", "apps/macos/Sources/DetectorKit/"],

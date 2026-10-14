@@ -521,9 +521,9 @@ same("Docker C#: the Docker script reruns all three", dsuites(),
 # (mac-app.AREA): the area files and the screens only one area exercises
 # rerun that area and startup; shared code, the main self-test file, and the
 # area table rerun every area; the demo and the unit tests rerun none.
-for f in ("apps/macos/Sources/NVRView/SelfTest.swift", "apps/macos/Sources/NVRView/SelfTest+Recordings.swift",
-          "apps/macos/Sources/NVRView/SelfTest+PTZ.swift", "apps/macos/Sources/NVRView/RecordingsWindow.swift",
-          "apps/macos/Sources/NVRView/StageView.swift", "apps/macos/Sources/NVRCore/PTZ.swift",
+for f in ("apps/macos/Sources/NVRViewSelfTest/SelfTest.swift", "apps/macos/Sources/NVRViewSelfTest/SelfTest+Recordings.swift",
+          "apps/macos/Sources/NVRViewSelfTest/SelfTest+PTZ.swift", "apps/macos/Sources/NVRViewApp/RecordingsWindow.swift",
+          "apps/macos/Sources/NVRViewApp/StageView.swift", "apps/macos/Sources/NVRCore/PTZ.swift",
           "apps/macos/Sources/AlertHost/AlertNotifier.swift", "apps/macos/Sources/NVRViewDemo/main.swift",
           "apps/macos/Tests/NVRCoreTests/PacingStatsTests.swift", "scripts/macos-selftest-areas.txt"):
     write(f, "// %s\n" % f)
@@ -546,9 +546,9 @@ def mcheck():
 
 same("mac areas: the first run runs every area", mcheck(), all_mac)
 same("mac areas: unchanged, all cached", mcheck(), "-")
-commit_file("apps/macos/Sources/NVRView/SelfTest+Recordings.swift", "// recordings steps 2")
+commit_file("apps/macos/Sources/NVRViewSelfTest/SelfTest+Recordings.swift", "// recordings steps 2")
 same("mac areas: the recordings steps rerun recordings and startup", mcheck(), "startup,recordings")
-commit_file("apps/macos/Sources/NVRView/RecordingsWindow.swift", "// recordings window 2")
+commit_file("apps/macos/Sources/NVRViewApp/RecordingsWindow.swift", "// recordings window 2")
 same("mac areas: so does the recordings window", mcheck(), "startup,recordings")
 commit_file("apps/macos/Sources/NVRCore/PTZ.swift", "// ptz 2")
 same("mac areas: a PTZ file reruns ptz and startup", mcheck(), "startup,ptz")
@@ -557,9 +557,9 @@ same("mac areas: a file of an owned directory reruns its area", mcheck(), "start
 commit_file("apps/macos/Sources/NVRViewDemo/main.swift", "// demo 2")
 commit_file("apps/macos/Tests/NVRCoreTests/PacingStatsTests.swift", "// tests 2")
 same("mac areas: the demo and the unit tests rerun no area", mcheck(), "-")
-commit_file("apps/macos/Sources/NVRView/StageView.swift", "// shared stage 2")
+commit_file("apps/macos/Sources/NVRViewApp/StageView.swift", "// shared stage 2")
 same("mac areas: a shared app file reruns every area", mcheck(), all_mac)
-commit_file("apps/macos/Sources/NVRView/SelfTest.swift", "// shared self-test 2")
+commit_file("apps/macos/Sources/NVRViewSelfTest/SelfTest.swift", "// shared self-test 2")
 same("mac areas: the main self-test file reruns every area", mcheck(), all_mac)
 commit_file("scripts/macos-selftest-areas.txt", "# table 2")
 same("mac areas: the area table reruns every area", mcheck(), all_mac)

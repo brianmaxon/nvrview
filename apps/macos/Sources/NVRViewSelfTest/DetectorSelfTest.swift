@@ -1,3 +1,4 @@
+@testable import NVRViewApp
 import CoreML
 import DetectorKit
 import Foundation

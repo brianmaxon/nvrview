@@ -24,8 +24,16 @@ let cInterface: Target =
     ? .binaryTarget(name: "NVRViewCore", path: "NVRViewCore.xcframework")
     : .target(name: "NVRViewCore")
 
+// The app is the library NVRViewApp plus a tiny executable. The self-test
+// (NVRViewSelfTest) is a separate module, linked only when
+// NVRVIEW_SELFTEST=1: the shipped app has none, and the self-test build
+// shares NVRViewApp's compiled module with it (same scratch path), so only
+// the self-test module and the executable's link differ.
+let selfTest = ProcessInfo.processInfo.environment["NVRVIEW_SELFTEST"] != nil
+
 let appDependencies: [Target.Dependency] =
     ["VideoKit", "NVRCore", "FakeCore", "DetectorKit", "AlertHost"] + (realCore ? ["NVRCoreC"] : [])
+let coreDefine: [SwiftSetting] = realCore ? [.define("NVRVIEW_REAL_CORE")] : []
 
 let package = Package(
     name: "NVRView",
@@ -56,9 +64,20 @@ let package = Package(
         // pipeline it uses. Never a dependency of the shipping app path; the
         // app links it only for `--fake`.
         .target(name: "FakeCore", dependencies: ["NVRCore", "VideoKit"]),
+        // All of the app's code. `-enable-testing` in release lets the
+        // self-test module use its internals (`@testable import`) without
+        // every declaration being public.
+        .target(
+            name: "NVRViewApp", dependencies: appDependencies,
+            swiftSettings: coreDefine + [.unsafeFlags(["-enable-testing"], .when(configuration: .release))]),
+        // The app's self-test (`--selftest`) and its mocks.
+        .target(
+            name: "NVRViewSelfTest", dependencies: appDependencies + ["NVRViewApp"],
+            swiftSettings: coreDefine),
         .executableTarget(
-            name: "NVRView", dependencies: appDependencies,
-            swiftSettings: realCore ? [.define("NVRVIEW_REAL_CORE")] : []),
+            name: "NVRView",
+            dependencies: ["NVRViewApp"] + (selfTest ? ["NVRViewSelfTest"] : []),
+            swiftSettings: selfTest ? [.define("NVRVIEW_SELFTEST")] : []),
         .executableTarget(name: "NVRViewDemo", dependencies: ["VideoKit", "NVRCore", "FakeCore"]),
         .testTarget(name: "DetectorKitTests", dependencies: ["DetectorKit"]),
         .testTarget(name: "AlertHostTests", dependencies: ["AlertHost", "NVRCore", "DetectorKit", "VideoKit"]),

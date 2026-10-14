@@ -1,3 +1,4 @@
+@testable import NVRViewApp
 import AlertHost
 import DetectorKit
 import Foundation

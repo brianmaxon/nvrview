@@ -1,3 +1,4 @@
+@testable import NVRViewApp
 import AppKit
 
 /// Self-test step `updates-notes-scroll`: the update prompt's notes view,

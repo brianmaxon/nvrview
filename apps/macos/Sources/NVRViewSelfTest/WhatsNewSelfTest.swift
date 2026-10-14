@@ -1,3 +1,4 @@
+@testable import NVRViewApp
 import AppKit
 import Foundation
 import NVRCore

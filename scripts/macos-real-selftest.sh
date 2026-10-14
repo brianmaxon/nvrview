@@ -15,8 +15,9 @@
 # build/NVRView.app the way scripts/package-macos.sh does, with its bundled
 # files (the update defaults and the release notes, when given through
 # NVRVIEW_BUNDLE_KEY_FILE, NVRVIEW_BUNDLE_UPDATE_SOURCE, NVRVIEW_BUNDLE_NOTES and
-# NVRVIEW_BUNDLE_NOTES_HISTORY), and runs the self-test on that bundle's own
-# executable. After a pass on a clean tree it leaves build/NVRView.app.tested
+# NVRVIEW_BUNDLE_NOTES_HISTORY), and runs the self-test on a copy of that
+# bundle whose executable also links the self-test module (the shipped app
+# does not; docs/DEVELOPMENT.md, "The self-test is a module of its own"). After a pass on a clean tree it leaves build/NVRView.app.tested
 # (the tree hash and a hash of the bundled files); a later
 # scripts/package-macos.sh for the same tree zips this very bundle instead of
 # building another one, and a second run for the same tree and files skips the
@@ -73,10 +74,20 @@ if [ "$bundle" = 1 ]; then
     exit 0
   fi
   rm -f build/NVRView.app.tested
-  exe="$root/$app/Contents/MacOS/NVRView"
+  # The shipped bundle has no self-test (the app code is the module
+  # NVRViewApp; the self-test is the module NVRViewSelfTest, which only
+  # NVRVIEW_SELFTEST=1 links). Build the self-test variant of the executable
+  # in the same build folder, so NVRViewApp, the core and every other module
+  # are the very objects the bundle was linked from, and run it from a copy of
+  # the bundle: same Info.plist, resources and layout.
+  (cd apps/macos && NVRVIEW_REAL_CORE=1 NVRVIEW_SELFTEST=1 swift build --quiet -c release --arch arm64 --product NVRView --scratch-path .build-real-core)
+  st_bin=$(cd apps/macos && NVRVIEW_REAL_CORE=1 NVRVIEW_SELFTEST=1 swift build -c release --arch arm64 --product NVRView --scratch-path .build-real-core --show-bin-path)/NVRView
+  ditto "$app" "$work/NVRView.app"
+  cp "$st_bin" "$work/NVRView.app/Contents/MacOS/NVRView"
+  exe="$work/NVRView.app/Contents/MacOS/NVRView"
 else
   scripts/build-xcframework.sh --install >/dev/null
-  (cd apps/macos && NVRVIEW_REAL_CORE=1 swift build --scratch-path .build-real-core)
+  (cd apps/macos && NVRVIEW_REAL_CORE=1 NVRVIEW_SELFTEST=1 swift build --scratch-path .build-real-core)
   exe="$root/apps/macos/.build-real-core/debug/NVRView"
 fi
 cargo build --quiet -p mock-nvr
