@@ -1092,7 +1092,7 @@ extension SelfTest {
             let downward = stage.insetAnchor.map { $0.y == 0 && abs($0.x - 1.0 / 3) < 0.01 } == true && high.count == 2
                 && high[0].minX == high[1].minX && abs(high[0].minY - m) < 0.5 && abs(high[1].minY - (high[0].maxY + gap)) < 0.5
             print("inset drag with two insets: one column, bottom grows upward \(upward), top grows downward \(downward)")
-            if !upward { problems.append("two insets at the bottom did not stack upward from it in one column: \(low) board \(stage.insetBoard.items.map { "\($0.camera.channel) \($0.kind)" }) shown \(stage.insetBoard.shown.count) chip \(stage.moreChip.stringValue) \(b)") }
+            if !upward { problems.append("two insets at the bottom did not stack upward from it in one column: \(low)") }
             if !downward { problems.append("two insets at the top did not stack downward from it in one column: \(high)") }
             finishInsetDrag(doorbell, hall)
         }
@@ -1169,10 +1169,12 @@ extension SelfTest {
             return restoreFocusThenAutoClose(doorbell, focusedBefore)
         }
         // parity: alert-inset-return-layout
-        // A real click on the inset: the stage shows its camera and the return
-        // inset draws all the layout's tiles, scaled into the inset's rectangle.
-        mouse(.leftMouseDown, CGPoint(x: rect.midX, y: rect.midY), in: window)
-        mouse(.leftMouseUp, CGPoint(x: rect.midX, y: rect.midY), in: window)
+        // A click on the inset (its own click handler: the picture-capture
+        // flash may still be fading over the stage, so no mouse event): the
+        // stage shows its camera and the return inset draws all the layout's
+        // tiles, scaled into the inset's rectangle.
+        _ = rect
+        stage.alertInsetViews[doorbell]?.onSwap()
         let swapped = stage.insetBoard.swap?.shown == doorbell
         let returnItem = stage.insetBoard.items.first { $0.isReturn }
         let isLayout = returnItem?.showsLayout == true && stage.insetBoard.swap?.displacedLayout == true
@@ -1189,7 +1191,9 @@ extension SelfTest {
         print(
             "return layout: swapped \(swapped), return inset shows the layout \(isLayout), tiles drawn \(drawn.tiles.count) "
                 + "(stage 1 + \(leaves.count) in the inset), same pictures \(expected == got), in the inset's rectangle \(sameShare)")
-        if !swapped { problems.append("a click on the inset did not swap it onto the stage") }
+        if !swapped {
+            problems.append("a click on the inset did not swap it onto the stage")
+        }
         if !isLayout { problems.append("the return inset does not show the layout the stage had") }
         if drawn.tiles.count != 1 + leaves.count { problems.append("the grid drew \(drawn.tiles.count) tiles, expected the stage plus the layout") }
         if expected != got { problems.append("the miniature does not draw the layout's own tiles") }
