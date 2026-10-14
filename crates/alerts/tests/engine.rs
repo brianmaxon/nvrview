@@ -241,7 +241,8 @@ fn cooldown_then_update() {
         DecideInputs::default(),
     );
     assert_eq!(alert(&d).2, 1);
-    let t = at(12, 0) + 30 * SECOND_MS;
+    // A repeat 2 s later is the same event: stopped at the gate.
+    let t = at(12, 0) + 2 * SECOND_MS;
     let intake = e.intake(device(2, cam(0), "people", t), now(t));
     let Next::Done(d) = intake.next else { panic!() };
     assert!(matches!(
@@ -250,10 +251,9 @@ fn cooldown_then_update() {
             reason: SuppressReason::Cooldown { .. }
         }
     ));
-    // The first alert was decided at 12:00:01.3, after its two pictures.
     assert!(
         d.explanation
-            .ends_with("Not alerted: already alerted 28 s ago."),
+            .ends_with("Not alerted: already alerted 0 s ago."),
         "{}",
         d.explanation
     );

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::model::{CameraId, Class, Severity};
 use crate::settings::TimingSettings;
-use crate::time::Millis;
+use crate::time::{Millis, SECOND_MS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EpisodeKey {
@@ -53,6 +53,8 @@ pub struct Episode {
     pub always: bool,
     pub misses: u8,
     pub device_active: bool,
+    /// When a check last started inside a cooldown (spacing for them).
+    pub last_probe_ms: Option<Millis>,
 }
 
 impl Episode {
@@ -72,6 +74,7 @@ impl Episode {
             always: false,
             misses: 0,
             device_active: true,
+            last_probe_ms: None,
         }
     }
 
@@ -123,10 +126,15 @@ pub enum Admission {
     },
     Cooldown {
         alert_id: u64,
+        rev: u32,
         left_ms: Millis,
         since_ms: Millis,
     },
 }
+
+/// The least time between two checks inside one cooldown for a camera and
+/// class: closer triggers are repeats of one event.
+pub const PROBE_SPACING_MS: Millis = 5 * SECOND_MS;
 
 /// The most episodes kept; the oldest settled ones go first.
 pub const MAX_EPISODES: usize = 1024;
@@ -201,6 +209,25 @@ impl Timeliness {
     /// The cooldown left for a camera and class.
     pub fn cooldown_left(&self, key: &EpisodeKey, now: Millis) -> Option<Millis> {
         self.episodes.get(key)?.cooldown_left(now)
+    }
+
+    /// Whether a trigger inside a cooldown is far enough from the last
+    /// check (the alert itself, or an earlier check inside the cooldown) to
+    /// be looked at. Closer ones are repeats of one event, so the number of
+    /// checks a busy camera causes stays bounded.
+    pub fn probe_due(&self, key: &EpisodeKey, now: Millis) -> bool {
+        self.episodes.get(key).is_some_and(|e| {
+            let last = e.last_probe_ms.max(e.last_alert_ms);
+            last.is_none_or(|t| now - t >= PROBE_SPACING_MS)
+        })
+    }
+
+    /// Records that a check started inside a cooldown.
+    pub fn note_probe(&mut self, key: &EpisodeKey, now: Millis) {
+        if let Some(ep) = self.episodes.get_mut(key) {
+            ep.last_probe_ms = Some(now);
+            ep.last_activity_ms = ep.last_activity_ms.max(now);
+        }
     }
 
     /// A pending episode that did not alert settles.
@@ -288,6 +315,7 @@ impl Timeliness {
                 let since = ep.last_alert_ms.map_or(0, |t| now - t);
                 Admission::Cooldown {
                     alert_id,
+                    rev: ep.rev,
                     left_ms: ep.cooldown_left(now).unwrap_or(0),
                     since_ms: since,
                 }
@@ -398,6 +426,7 @@ mod tests {
             tl.admit(k, Severity::Normal, false, None, 30 * SECOND_MS, &t),
             Admission::Cooldown {
                 alert_id: 1,
+                rev: 1,
                 left_ms: 30_000,
                 since_ms: 30_000
             }

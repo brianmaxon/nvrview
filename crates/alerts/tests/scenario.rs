@@ -54,11 +54,13 @@ fn label(d: &Decision) -> String {
             severity,
             rev,
             late,
+            quieted,
             ..
         } => format!(
-            "alert {severity}{}{}",
+            "alert {severity}{}{}{}",
             if *rev > 1 { " update" } else { "" },
-            if *late { " late" } else { "" }
+            if *late { " late" } else { "" },
+            if quieted.is_some() { " quieted" } else { "" }
         ),
         Outcome::Quiet { reason } => format!("quiet {reason:?}"),
         Outcome::Suppress { reason } => format!("suppress {reason:?}"),
@@ -207,10 +209,7 @@ fn a_day_of_triggers() {
         .collect();
     let expected = [
         ("08:30", "alert normal"),
-        (
-            "08:30",
-            "suppress Cooldown { left_ms: 41300, since_ms: 18700 }",
-        ),
+        ("08:30", "quiet LowSeverity { severity: Low }"),
         ("10:00", "quiet LowSeverity { severity: Low }"),
         ("13:00", "alert high"),
         ("14:00", "quiet NothingSeen { hits: 0, n: 3 }"),

@@ -21,6 +21,11 @@ pub enum Outcome {
         unverified: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         always: Option<AlwaysRule>,
+        /// A real, verified detection that must not interrupt the user
+        /// (no sound, notification, or Home Assistant message). It is
+        /// logged with its evidence like any alert.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quieted: Option<Quieted>,
     },
     Quiet {
         #[serde(flatten)]
@@ -44,6 +49,14 @@ impl Outcome {
             Outcome::Suppress { .. } => "suppress",
         }
     }
+}
+
+/// Why an alert is logged but does not interrupt the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum Quieted {
+    /// Inside the cooldown of an alert for the same camera and class.
+    Cooldown { left_ms: Millis, since_ms: Millis },
 }
 
 /// Why something went to the quiet log.

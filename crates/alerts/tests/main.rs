@@ -3,6 +3,8 @@
 
 mod common;
 
+#[path = "cooldown.rs"]
+mod cooldown;
 #[path = "engine.rs"]
 mod engine;
 #[path = "props.rs"]
