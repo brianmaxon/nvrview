@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import NVRCore
+import AppBase
 
 /// Self-update from the user's own source (docs/UPDATES.md): the settings,
 /// the schedule, the core's check and download, the prompts, and handing the

@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import SwiftUI
+import AppBase
 
 /// A window's sidebar: layouts, groups, and devices with their cameras
 /// (docs/UX.md, the approved mockups). Clicking a layout or group shows it in

@@ -6,10 +6,10 @@ import SwiftUI
 /// rectangle, a gap between them. A template image, so the system tints it
 /// for dark mode, selection, and menus. The geometry is
 /// `LayoutNode.iconRects` (tested); this only draws it.
-enum LayoutIcon {
-    static let size = NSSize(width: 18, height: 12)
+package enum LayoutIcon {
+    package static let size = NSSize(width: 18, height: 12)
 
-    static func image(for tree: LayoutNode) -> NSImage {
+    package static func image(for tree: LayoutNode) -> NSImage {
         let rects = tree.iconRects(size: size, gap: tree.leafCount > 16 ? 0.75 : 1.5)
         let image = NSImage(size: size, flipped: true) { _ in
             NSColor.black.setFill()
@@ -24,19 +24,23 @@ enum LayoutIcon {
     }
 
     /// The icon for `count` cameras in an even grid (groups, All Cameras).
-    static func image(gridOf count: Int) -> NSImage {
+    package static func image(gridOf count: Int) -> NSImage {
         image(for: LayoutNode.balanced(Array(repeating: nil, count: max(count, 1))))
     }
 }
 
 /// The icon in a sidebar row, in the row's secondary tint.
-struct LayoutIconView: View {
-    let image: NSImage
+package struct LayoutIconView: View {
+    package let image: NSImage
 
-    var body: some View {
+    package var body: some View {
         Image(nsImage: image)
             .renderingMode(.template)
             .foregroundStyle(.secondary)
             .accessibilityHidden(true)
+    }
+
+    package init(image: NSImage) {
+        self.image = image
     }
 }

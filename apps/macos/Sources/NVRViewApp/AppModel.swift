@@ -5,6 +5,7 @@ import Foundation
 import NVRCore
 import Observation
 import VideoKit
+import AppBase
 
 #if NVRVIEW_REAL_CORE
 import NVRCoreC

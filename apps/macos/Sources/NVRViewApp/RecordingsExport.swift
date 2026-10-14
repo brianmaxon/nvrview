@@ -3,6 +3,7 @@ import NVRCore
 import Observation
 import UniformTypeIdentifiers
 import VideoKit
+import AppBase
 
 // Export from the Recordings window (docs/UX.md "Recordings", "Export"): in
 // and out points, trims, a follow cut or grid as an MP4, range downloads,

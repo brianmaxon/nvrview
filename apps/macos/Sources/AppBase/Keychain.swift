@@ -3,9 +3,9 @@ import Security
 
 /// A generic-password Keychain item. Service and account are chosen by the
 /// caller (command-line options), never the password.
-struct KeychainPassword {
-    var service: String
-    var account: String
+package struct KeychainPassword {
+    package var service: String
+    package var account: String
 
     private var query: [CFString: Any] {
         [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account]
@@ -13,7 +13,7 @@ struct KeychainPassword {
 
     /// Whether the item exists, from its attributes only: the secret is not
     /// read, so this never shows a Keychain permission prompt.
-    func exists() -> Bool {
+    package func exists() -> Bool {
         var q = query
         q[kSecReturnAttributes] = true
         q[kSecMatchLimit] = kSecMatchLimitOne
@@ -22,7 +22,7 @@ struct KeychainPassword {
     }
 
     /// The stored password, or nil when there is none (or it cannot be read).
-    func read() -> String? {
+    package func read() -> String? {
         var q = query
         q[kSecReturnData] = true
         q[kSecMatchLimit] = kSecMatchLimitOne
@@ -39,7 +39,7 @@ struct KeychainPassword {
     /// created by this app, and the Keychain trusts its creator (and later
     /// builds with the same signing identity) without asking.
     @discardableResult
-    func save(_ password: String) -> OSStatus {
+    package func save(_ password: String) -> OSStatus {
         let removed = SecItemDelete(query as CFDictionary)
         if removed != errSecSuccess && removed != errSecItemNotFound { return removed }
         var add = query
@@ -48,5 +48,10 @@ struct KeychainPassword {
     }
 
     @discardableResult
-    func delete() -> OSStatus { SecItemDelete(query as CFDictionary) }
+    package func delete() -> OSStatus { SecItemDelete(query as CFDictionary) }
+
+    package init(service: String, account: String) {
+        self.service = service
+        self.account = account
+    }
 }

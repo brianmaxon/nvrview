@@ -7,7 +7,7 @@ import VideoKit
 /// holds against a CPU conversion of the decoded buffer it was made from
 /// (the same matrix, the sampler's bilinear chroma), so the Metal path and
 /// the encoder are what is being checked.
-enum PictureCheck {
+package enum PictureCheck {
     /// Runs `body` with the buffer's pixels converted to RGB (0...255) as
     /// the shader does: luma at the pixel, chroma interpolated between its
     /// texels; nil outside the picture. The buffer stays locked meanwhile.
@@ -49,7 +49,7 @@ enum PictureCheck {
     }
 
     /// A pixel of the buffer converted to RGB (0...255) as the shader does.
-    static func rgb(
+    package static func rgb(
         of buffer: CVPixelBuffer, color m: YCbCrToRGB, x: Int, y: Int
     ) -> SIMD3<Int>? {
         converting(buffer, color: m) { pixel in pixel(x, y) } ?? nil
@@ -57,7 +57,7 @@ enum PictureCheck {
 
     /// The buffer from `region`'s top left, `width` by `height` pixels,
     /// converted on the CPU (black outside the picture).
-    static func image(
+    package static func image(
         of buffer: CVPixelBuffer, color m: YCbCrToRGB, region: CGRect, width: Int, height: Int
     ) -> RenderedImage? {
         converting(buffer, color: m) { pixel in
@@ -82,7 +82,7 @@ enum PictureCheck {
     /// The codec's own losses move with the picture's content (a sample on a
     /// sharp edge of one frame is far off, of the next close), so comparing
     /// encoded with encoded cancels them and checks the drawing alone.
-    static func compareEncoded(
+    package static func compareEncoded(
         _ image: RenderedImage, buffer: CVPixelBuffer, color: YCbCrToRGB, region: CGRect, encoding: PictureEncoding,
         tolerance: Int
     ) -> (checked: Int, matched: Int)? {
@@ -111,7 +111,7 @@ enum PictureCheck {
     /// How many of a grid of sample points of the saved `image` match the
     /// buffer at `region` (its top left in buffer pixels) within `tolerance`
     /// codes per channel.
-    static func compare(
+    package static func compare(
         _ image: RenderedImage, buffer: CVPixelBuffer, color: YCbCrToRGB, region: CGRect, tolerance: Int
     ) -> (checked: Int, matched: Int) {
         var checked = 0, matched = 0

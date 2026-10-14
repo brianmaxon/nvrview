@@ -9,14 +9,14 @@ import NVRCore
 /// `CallTranscriptFile.maxFiles` files and `maxBytes` bytes, oldest first.
 /// Only used while "Save call transcripts" is on.
 @MainActor
-final class TranscriptStore {
-    var folder: URL
+package final class TranscriptStore {
+    package var folder: URL
 
-    init(folder: URL) { self.folder = folder }
+    package init(folder: URL) { self.folder = folder }
 
     /// Writes one transcript under a name not yet taken, then trims the
     /// folder. Returns the file, or nil when it could not be written.
-    func save(name: String, text: String) -> URL? {
+    package func save(name: String, text: String) -> URL? {
         let fm = FileManager.default
         do {
             try fm.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -33,7 +33,7 @@ final class TranscriptStore {
 
     /// Deletes the oldest transcripts beyond the bounds (only `.txt` files;
     /// anything else in the folder is left alone).
-    func prune() {
+    package func prune() {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
         guard let urls = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys) else { return }
@@ -51,7 +51,7 @@ final class TranscriptStore {
     /// Deletes the oldest call recordings (`.mp4`, not the `.partial.mp4`
     /// files being written) beyond `CallTranscriptFile.maxRecordings` files
     /// and `maxRecordingBytes` bytes.
-    func pruneRecordings() {
+    package func pruneRecordings() {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
         guard let urls = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys) else { return }
@@ -70,12 +70,12 @@ final class TranscriptStore {
     }
 
     /// The saved transcripts, by name (self-test).
-    func names() -> [String] {
+    package func names() -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".txt") }.sorted()
     }
 
     /// "Open Transcripts Folder": creates it if needed and shows it in the Finder.
-    func openFolder() {
+    package func openFolder() {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(folder)
     }

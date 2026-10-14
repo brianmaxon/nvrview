@@ -2,6 +2,7 @@
 import AppKit
 import Foundation
 import NVRCore
+import AppBase
 
 /// Self-test step `updates-whats-new` (docs/UX.md, "Release notes"): a
 /// synthetic `release-notes.json` in a throwaway app folder is read by the

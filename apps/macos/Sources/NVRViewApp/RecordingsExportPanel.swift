@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import SwiftUI
+import AppBase
 
 // The Export tab in the Recordings window's right pane (docs/UX.md
 // "Recordings", "Export tab"): what to export (the incident or the in and out

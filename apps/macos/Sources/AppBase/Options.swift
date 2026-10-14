@@ -10,22 +10,24 @@ import NVRCore
 ///     NVRView --fake file.h264|file.h265 ...         (two made-up NVRs playing the files)
 ///     any form: [--selftest SECONDS [--areas a,b]]   (window opens behind all others, no focus;
 ///                                                    --areas runs only those self-test areas and startup)
-struct Options {
-    var host: String?
-    var port: UInt16 = 9000
-    var user: String?
-    var keychainService = "nvrview"
-    var fake = false
-    var files: [URL] = []
-    var selfTestSeconds: Double?
+package struct Options {
+    package var host: String?
+    package var port: UInt16 = 9000
+    package var user: String?
+    package var keychainService = "nvrview"
+    package var fake = false
+    package var files: [URL] = []
+    package var selfTestSeconds: Double?
     /// The self-test areas to run (scripts/macos-selftest-areas.txt; startup
     /// always runs); nil runs them all.
-    var areas: Set<String>?
+    package var areas: Set<String>?
     /// Where devices, groups and the core's store live (default: the app's
     /// Application Support folder); for development and self-tests.
-    var dataDirectory: URL?
+    package var dataDirectory: URL?
 
-    static let usage = """
+    package init() {}
+
+    package static let usage = """
         usage: NVRView [--keychain-service NAME] [--data-dir DIR] [--selftest SECONDS [--areas A,B]]
                NVRView --host HOST [--port N] --user USER [--data-dir DIR] [--selftest SECONDS]
                NVRView --fake [--selftest SECONDS] file.h264|file.h265 ...
@@ -35,7 +37,7 @@ struct Options {
 
         """
 
-    static func parse(_ args: [String]) -> Options? {
+    package static func parse(_ args: [String]) -> Options? {
         var o = Options()
         var it = args.dropFirst().makeIterator()
         while let a = it.next() {

@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import VideoKit
+import AppBase
 
 // The recording player's picture features (docs/UX.md "Recordings"): the
 // same header model, menus, keys and saves as a live tile, for the pictures

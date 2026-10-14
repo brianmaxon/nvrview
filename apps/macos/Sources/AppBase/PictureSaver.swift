@@ -5,16 +5,23 @@ import VideoKit
 /// Writes a rendered picture to a file (docs/CAPTURE.md "Save picture"):
 /// renders it off the main thread, encodes it, and writes it without
 /// replacing a file that is already there.
-enum PictureSaver {
+package enum PictureSaver {
     /// A picture written.
-    struct Saved: Sendable, Equatable {
-        var url: URL
-        var width: Int
-        var height: Int
-        var bytes: Int
+    package struct Saved: Sendable, Equatable {
+        package var url: URL
+        package var width: Int
+        package var height: Int
+        package var bytes: Int
+
+        package init(url: URL, width: Int, height: Int, bytes: Int) {
+            self.url = url
+            self.width = width
+            self.height = height
+            self.bytes = bytes
+        }
     }
 
-    enum Failure: Error, Sendable, Equatable {
+    package enum Failure: Error, Sendable, Equatable {
         /// Rendering or encoding failed.
         case encode
         /// No free name in the folder.
@@ -25,7 +32,7 @@ enum PictureSaver {
 
     /// Saves under the next free name in `folder`: the shared naming rule.
     @concurrent
-    static func save(
+    package static func save(
         _ job: PictureRender, camera: String, date: Date, folder: URL, format: PictureFormat, shareSafe: Bool,
         renderer: PictureRenderer
     ) async -> Result<Saved, Failure> {
@@ -55,7 +62,7 @@ enum PictureSaver {
     /// Saves to exactly `url` (a name the user chose in a save panel, which
     /// has already asked about replacing); the format follows the extension.
     @concurrent
-    static func save(
+    package static func save(
         _ job: PictureRender, to url: URL, defaultFormat: PictureFormat, renderer: PictureRenderer
     ) async -> Result<Saved, Failure> {
         let format = PictureFormat(extension: url.pathExtension) ?? defaultFormat
@@ -71,7 +78,7 @@ enum PictureSaver {
 
 extension PictureFormat {
     /// The encoder setting for this format.
-    var encoding: PictureEncoding {
+    package var encoding: PictureEncoding {
         switch self {
         case .png: .png
         case .jpeg: .jpeg(quality: Self.jpegQuality)

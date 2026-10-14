@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import SwiftUI
+import AppBase
 
 // Settings > Smart Alerts (docs/UX.md "Smart alerts"): turning them on,
 // night, the always-alert rules, each camera's exposure, classes, schedule

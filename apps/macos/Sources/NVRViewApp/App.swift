@@ -4,6 +4,7 @@ import FakeCore
 import Foundation
 import NVRCore
 import VideoKit
+import AppBase
 
 // An unbundled executable gets no window from a SwiftUI `WindowGroup`, so
 // this uses the AppKit lifecycle (like NVRViewDemo); SwiftUI draws the

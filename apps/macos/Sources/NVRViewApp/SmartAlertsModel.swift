@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import NVRCore
 import VideoKit
+import AppBase
 
 // Smart alerts on the app's side (docs/UX.md "Smart alerts",
 // docs/NOTIFICATIONS.md): the settings (a file of their own; secrets in the

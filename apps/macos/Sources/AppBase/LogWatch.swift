@@ -5,8 +5,8 @@ import Foundation
 /// error through unchanged and counts lines that contain one of `patterns`
 /// (AppKit's warnings, such as a table view's reentrancy warning, arrive
 /// there through NSLog and are otherwise invisible to the app).
-final class LogWatch: @unchecked Sendable {
-    let patterns: [String]
+package final class LogWatch: @unchecked Sendable {
+    package let patterns: [String]
     private let lock = NSLock()
     private var counts: [String: Int] = [:]
     private var tail = Data()
@@ -14,7 +14,7 @@ final class LogWatch: @unchecked Sendable {
     private let readEnd: Int32
 
     /// Starts watching; nil if the pipe could not be set up.
-    init?(patterns: [String]) {
+    package init?(patterns: [String]) {
         var fds: [Int32] = [0, 0]
         guard pipe(&fds) == 0 else { return nil }
         let saved = dup(STDERR_FILENO)
@@ -32,7 +32,7 @@ final class LogWatch: @unchecked Sendable {
     }
 
     /// How many lines so far contained `pattern`.
-    func count(_ pattern: String) -> Int {
+    package func count(_ pattern: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
         return counts[pattern, default: 0]

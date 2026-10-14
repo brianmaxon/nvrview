@@ -2,6 +2,7 @@ import AppKit
 import NVRCore
 import QuartzCore
 import VideoKit
+import AppBase
 
 /// One window's arrangement and what the user is doing with it.
 @MainActor

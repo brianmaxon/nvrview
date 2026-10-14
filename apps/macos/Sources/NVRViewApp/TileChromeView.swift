@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import QuartzCore
+import AppBase
 
 /// What one tile's chrome shows; rebuilt from the model, applied cheaply.
 struct TileChromeContent: Equatable {

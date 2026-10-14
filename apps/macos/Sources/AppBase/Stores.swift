@@ -8,34 +8,49 @@ import NVRCore
 
 /// A configured device. No secret in here: the password lives in the
 /// credential store under `key`.
-struct DeviceConfig: Codable, Equatable, Identifiable, Sendable {
+package struct DeviceConfig: Codable, Equatable, Identifiable, Sendable {
     /// The stable device key layouts name cameras by (`CameraRef.device`).
-    var key: String
-    var name: String
-    var host: String
-    var port: UInt16
-    var user: String
+    package var key: String
+    package var name: String
+    package var host: String
+    package var port: UInt16
+    package var user: String
     /// The core's stable key for this device (ABI 3 `nv_device_key`), once
     /// known; layouts and groups name its cameras by it.
-    var coreKey: String?
+    package var coreKey: String?
 
-    var id: String { key }
+    package var id: String { key }
 
-    static func newKey() -> String { "dev-" + UUID().uuidString.lowercased().prefix(12) }
+    package static func newKey() -> String { "dev-" + UUID().uuidString.lowercased().prefix(12) }
+
+    package init(key: String, name: String, host: String, port: UInt16, user: String, coreKey: String? = nil) {
+        self.key = key
+        self.name = name
+        self.host = host
+        self.port = port
+        self.user = user
+        self.coreKey = coreKey
+    }
 }
 
 /// A named set of cameras; showing a group lays them out as an even grid.
-struct CameraGroup: Codable, Equatable, Identifiable, Sendable {
-    var id: String
-    var name: String
-    var cameras: [CameraRef]
+package struct CameraGroup: Codable, Equatable, Identifiable, Sendable {
+    package var id: String
+    package var name: String
+    package var cameras: [CameraRef]
 
-    static func newID() -> String { "group-" + UUID().uuidString.lowercased().prefix(8) }
+    package static func newID() -> String { "group-" + UUID().uuidString.lowercased().prefix(8) }
+
+    package init(id: String, name: String, cameras: [CameraRef]) {
+        self.id = id
+        self.name = name
+        self.cameras = cameras
+    }
 }
 
 /// Where passwords are kept.
 @MainActor
-protocol CredentialStore {
+package protocol CredentialStore {
     func password(for key: String) -> String?
     /// Whether a password is saved, without reading it (no Keychain prompt).
     func hasPassword(for key: String) -> Bool
@@ -48,13 +63,13 @@ protocol CredentialStore {
 /// (never on disk), so reconnects do not ask the Keychain again: every read
 /// can show a permission prompt when the app's signature is not trusted yet.
 @MainActor
-final class KeychainCredentials: CredentialStore {
-    let service: String
+package final class KeychainCredentials: CredentialStore {
+    package let service: String
     private var cache: [String: String] = [:]
 
-    init(service: String) { self.service = service }
+    package init(service: String) { self.service = service }
 
-    func password(for key: String) -> String? {
+    package func password(for key: String) -> String? {
         if let cached = cache[key] { return cached }
         let item = KeychainPassword(service: service, account: key)
         guard let read = item.read() else { return nil }
@@ -70,11 +85,11 @@ final class KeychainCredentials: CredentialStore {
         return read
     }
 
-    func hasPassword(for key: String) -> Bool {
+    package func hasPassword(for key: String) -> Bool {
         cache[key] != nil || KeychainPassword(service: service, account: key).exists()
     }
 
-    func setPassword(_ password: String, for key: String) -> Bool {
+    package func setPassword(_ password: String, for key: String) -> Bool {
         let ok = KeychainPassword(service: service, account: key).save(password) == errSecSuccess
         if ok {
             cache[key] = password
@@ -83,7 +98,7 @@ final class KeychainCredentials: CredentialStore {
         return ok
     }
 
-    func deletePassword(for key: String) {
+    package func deletePassword(for key: String) {
         cache[key] = nil
         UserDefaults.standard.removeObject(forKey: "keychain-owned.\(service).\(key)")
         KeychainPassword(service: service, account: key).delete()
@@ -93,28 +108,29 @@ final class KeychainCredentials: CredentialStore {
 /// For `--fake`: kept in memory only, so development never writes made-up
 /// passwords into the user's Keychain.
 @MainActor
-final class MemoryCredentials: CredentialStore {
+package final class MemoryCredentials: CredentialStore {
     private var passwords: [String: String] = [:]
-    func password(for key: String) -> String? { passwords[key] }
-    func hasPassword(for key: String) -> Bool { passwords[key] != nil }
-    func setPassword(_ password: String, for key: String) -> Bool {
+    package init() {}
+    package func password(for key: String) -> String? { passwords[key] }
+    package func hasPassword(for key: String) -> Bool { passwords[key] != nil }
+    package func setPassword(_ password: String, for key: String) -> Bool {
         passwords[key] = password
         return true
     }
-    func deletePassword(for key: String) { passwords[key] = nil }
+    package func deletePassword(for key: String) { passwords[key] = nil }
 }
 
 /// A list of values in one JSON file, written atomically; or in memory only
 /// when `file` is nil.
-struct JSONFileStore<Value: Codable> {
-    let file: URL?
+package struct JSONFileStore<Value: Codable> {
+    package let file: URL?
 
-    func load() -> [Value] {
+    package func load() -> [Value] {
         guard let file, let data = try? Data(contentsOf: file) else { return [] }
         return (try? JSONDecoder().decode([Value].self, from: data)) ?? []
     }
 
-    func save(_ values: [Value]) {
+    package func save(_ values: [Value]) {
         guard let file else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -125,9 +141,13 @@ struct JSONFileStore<Value: Codable> {
     }
 
     /// `~/Library/Application Support/NVRView/<name>`.
-    static func appSupport(_ name: String) -> URL {
+    package static func appSupport(_ name: String) -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("NVRView", isDirectory: true)
             .appendingPathComponent(name)
+    }
+
+    package init(file: URL?) {
+        self.file = file
     }
 }

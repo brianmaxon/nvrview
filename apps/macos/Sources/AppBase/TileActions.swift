@@ -8,15 +8,15 @@ import NVRCore
 // in a short message over the tile instead of doing something.
 
 /// The header items whose action lands later.
-enum TileActionStub {
+package enum TileActionStub {
     /// Every item is built now (Save picture, recording, camera motion); the
     /// hook stays for an item that lands later.
-    static func isPending(_ item: TileHeaderItem) -> Bool {
+    package static func isPending(_ item: TileHeaderItem) -> Bool {
         false
     }
 
     /// "Save Picture is coming soon".
-    static func message(_ label: String) -> String {
+    package static func message(_ label: String) -> String {
         let name = label.hasSuffix("…") ? String(label.dropLast()) : label
         return "\(name) is coming soon"
     }
@@ -25,8 +25,8 @@ enum TileActionStub {
 /// The macOS key hint of a header menu entry as a menu key equivalent, for
 /// the hints that are one key (the others, such as Option with the arrows,
 /// are listed in the Camera menu only once they work).
-enum MenuKeyHint {
-    static func keyEquivalent(_ hint: String) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
+package enum MenuKeyHint {
+    package static func keyEquivalent(_ hint: String) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
         var mods: NSEvent.ModifierFlags = []
         var rest = Substring(hint)
         while let first = rest.first, "⇧⌘⌥⌃".contains(first) {
@@ -44,7 +44,7 @@ enum MenuKeyHint {
         return (String(c).lowercased(), mods)
     }
 
-    static func apply(_ hint: String, to item: NSMenuItem) {
+    package static func apply(_ hint: String, to item: NSMenuItem) {
         guard let (key, mods) = keyEquivalent(hint) else { return }
         item.keyEquivalent = key
         item.keyEquivalentModifierMask = mods
@@ -54,17 +54,17 @@ enum MenuKeyHint {
 /// A short message over a stage ("Picture saved"), gone after a few seconds
 /// on the stage's clock, with an optional button ("Show in Finder").
 @MainActor
-final class ToastView: NSView {
-    static let duration: Double = 2.5
+package final class ToastView: NSView {
+    package static let duration: Double = 2.5
     /// A toast with a button stays longer, to be reached.
-    static let actionDuration: Double = 6
+    package static let actionDuration: Double = 6
     private let label = NSTextField(labelWithString: "")
     private let button = NSButton(title: "", target: nil, action: nil)
     private var handler: (() -> Void)?
 
-    override var isFlipped: Bool { true }
+    package override var isFlipped: Bool { true }
 
-    init() {
+    package init() {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(calibratedWhite: 0.1, alpha: 0.85).cgColor
@@ -83,13 +83,13 @@ final class ToastView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    var text: String? { isHidden ? nil : label.stringValue }
+    package var text: String? { isHidden ? nil : label.stringValue }
     /// The button's title while one shows (self-test).
-    var actionTitle: String? { isHidden || button.isHidden ? nil : button.title }
+    package var actionTitle: String? { isHidden || button.isHidden ? nil : button.title }
 
-    func show(_ text: String, action: (title: String, handler: () -> Void)? = nil) {
+    package func show(_ text: String, action: (title: String, handler: () -> Void)? = nil) {
         label.stringValue = text
         handler = action?.handler
         button.isHidden = action == nil
@@ -108,7 +108,7 @@ final class ToastView: NSView {
 
     /// Where it goes in a superview `bounds` big (bottom-left origin):
     /// centered near the bottom.
-    func place(in bounds: CGRect) {
+    package func place(in bounds: CGRect) {
         let buttonWidth = button.isHidden ? 0 : ceil(button.attributedTitle.size().width) + 14
         let width = min(
             max(ceil(label.intrinsicContentSize.width) + 28 + buttonWidth, 120), max(bounds.width - 24, 60))
@@ -118,7 +118,7 @@ final class ToastView: NSView {
     }
 
     /// Presses the button (self-test).
-    func pressAction() { actionPressed() }
+    package func pressAction() { actionPressed() }
 
     @objc private func actionPressed() {
         let run = handler
@@ -128,7 +128,7 @@ final class ToastView: NSView {
     }
 
     // Clicks go through to the stage, except on the button.
-    override func hitTest(_ point: NSPoint) -> NSView? {
+    package override func hitTest(_ point: NSPoint) -> NSView? {
         guard !isHidden, !button.isHidden else { return nil }
         let local = convert(point, from: superview)
         return button.frame.contains(local) ? button : nil

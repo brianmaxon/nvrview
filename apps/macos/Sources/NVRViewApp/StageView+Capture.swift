@@ -2,6 +2,7 @@ import AppKit
 import NVRCore
 import UniformTypeIdentifiers
 import VideoKit
+import AppBase
 
 // Save picture (docs/CAPTURE.md "Save picture", docs/UX.md "Save picture"):
 // the tile's current decoded picture, at the full size of the stream it

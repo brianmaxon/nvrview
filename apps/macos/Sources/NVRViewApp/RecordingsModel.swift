@@ -3,6 +3,7 @@ import Foundation
 import NVRCore
 import Observation
 import VideoKit
+import AppBase
 
 /// Which cameras of a device the user lets the recordings screens search
 /// (`nv_recordings_enable`), saved between launches. The core does not keep

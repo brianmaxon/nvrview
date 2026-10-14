@@ -1,5 +1,6 @@
 import AppKit
 import NVRCore
+import AppBase
 
 // The tile header's actions (docs/UX.md "Tile header", docs/CAPTURE.md "The
 // header model"): one place that turns a `TileHeaderItem` into what it

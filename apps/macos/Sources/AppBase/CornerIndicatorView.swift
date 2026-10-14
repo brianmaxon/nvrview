@@ -9,39 +9,39 @@ import NVRCore
 /// Plain layers that change only when a detection does: nothing here runs per
 /// frame. It never takes clicks.
 @MainActor
-final class CornerIndicatorView: NSView, NSViewToolTipOwner {
-    static let fadeSeconds: TimeInterval = 0.25
-    static let gap: Double = 5
-    static let inset: Double = 8
+package final class CornerIndicatorView: NSView, NSViewToolTipOwner {
+    package static let fadeSeconds: TimeInterval = 0.25
+    package static let gap: Double = 5
+    package static let inset: Double = 8
     /// Room left at a top-right corner for the header's speaker button.
-    static let speakerReserve: Double = 30
+    package static let speakerReserve: Double = 30
 
-    var corner: ChromeCorner = .fallback {
+    package var corner: ChromeCorner = .fallback {
         didSet { if corner != oldValue { needsLayout = true } }
     }
 
     private var hold = IndicatorHold()
     private var icons: [IndicatorKind: CALayer] = [:]
     /// Kinds shown now, in order (fading-out icons are not in it).
-    private(set) var shown: [IndicatorItem] = []
+    package private(set) var shown: [IndicatorItem] = []
     private var timer: Timer?
 
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    package override var isFlipped: Bool { true }
+    package override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    override init(frame: NSRect) {
+    package override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Detections")
     }
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     private static func now() -> Double { ProcessInfo.processInfo.systemUptime }
 
     /// What is detected now for this tile's camera.
-    func set(active: [IndicatorItem]) {
+    package func set(active: [IndicatorItem]) {
         hold.update(active, now: Self.now())
         refresh()
     }
@@ -133,24 +133,30 @@ final class CornerIndicatorView: NSView, NSViewToolTipOwner {
     }
 
     /// The symbol size for a tile of this size.
-    static func symbolSize(for size: CGSize) -> Double { min(max(min(size.width, size.height) * 0.07, 12), 20) }
+    package static func symbolSize(for size: CGSize) -> Double { min(max(min(size.width, size.height) * 0.07, 12), 20) }
 
     /// How much of the corner's edge the row takes, with its padding (zero
     /// when nothing shows), so the header's title can keep clear of it.
-    func occupiedWidth() -> CGFloat {
+    package func occupiedWidth() -> CGFloat {
         guard !shown.isEmpty else { return 0 }
         let s = Self.symbolSize(for: bounds.size)
         return CGFloat(Double(shown.count) * s + Double(shown.count - 1) * Self.gap + Self.inset)
     }
 
     private struct LayoutKey: Equatable {
-        var size: CGSize
-        var corner: ChromeCorner
-        var shown: [IndicatorItem]
+        package var size: CGSize
+        package var corner: ChromeCorner
+        package var shown: [IndicatorItem]
+
+        package init(size: CGSize, corner: ChromeCorner, shown: [IndicatorItem]) {
+            self.size = size
+            self.corner = corner
+            self.shown = shown
+        }
     }
     private var laidOut: LayoutKey?
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         // The chrome re-lays-out often; this only when something moved.
         let key = LayoutKey(size: bounds.size, corner: corner, shown: shown)
@@ -176,13 +182,13 @@ final class CornerIndicatorView: NSView, NSViewToolTipOwner {
 
     private var toolTipOwners: [Int: String] = [:]
 
-    nonisolated func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+    package nonisolated func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
         guard let data else { return "" }
         let i = Int(bitPattern: data) - 1
         return MainActor.assumeIsolated { toolTipOwners[i] ?? "" }
     }
 
-    override func accessibilityChildren() -> [Any]? {
+    package override func accessibilityChildren() -> [Any]? {
         shown.map { item in
             let e = NSAccessibilityElement()
             e.setAccessibilityRole(.image)

@@ -31,9 +31,21 @@ let cInterface: Target =
 // the self-test module and the executable's link differ.
 let selfTest = ProcessInfo.processInfo.environment["NVRVIEW_SELFTEST"] != nil
 
+// The app's feature modules (Sources/<Module>), each depending only on the
+// ones below it: AppBase first, then the features, then NVRViewApp on top.
+// They share one access rule: `package` for what another module uses.
+let appModules: [(name: String, dependencies: [Target.Dependency])] = [
+    ("AppBase", ["NVRCore", "VideoKit"]),
+]
+
 let appDependencies: [Target.Dependency] =
-    ["VideoKit", "NVRCore", "FakeCore", "DetectorKit", "AlertHost"] + (realCore ? ["NVRCoreC"] : [])
+    ["VideoKit", "NVRCore", "FakeCore", "DetectorKit", "AlertHost"] + appModules.map { .target(name: $0.name) }
+    + (realCore ? ["NVRCoreC"] : [])
 let coreDefine: [SwiftSetting] = realCore ? [.define("NVRVIEW_REAL_CORE")] : []
+// `-enable-testing` in release lets the self-test module use internals
+// (`@testable import`) without every declaration being package or public.
+let appSwiftSettings: [SwiftSetting] =
+    coreDefine + [.unsafeFlags(["-enable-testing"], .when(configuration: .release))]
 
 let package = Package(
     name: "NVRView",
@@ -64,12 +76,9 @@ let package = Package(
         // pipeline it uses. Never a dependency of the shipping app path; the
         // app links it only for `--fake`.
         .target(name: "FakeCore", dependencies: ["NVRCore", "VideoKit"]),
-        // All of the app's code. `-enable-testing` in release lets the
-        // self-test module use its internals (`@testable import`) without
-        // every declaration being public.
-        .target(
-            name: "NVRViewApp", dependencies: appDependencies,
-            swiftSettings: coreDefine + [.unsafeFlags(["-enable-testing"], .when(configuration: .release))]),
+        // The composition layer: the app model, windows and views that wire
+        // the feature modules together.
+        .target(name: "NVRViewApp", dependencies: appDependencies, swiftSettings: appSwiftSettings),
         // The app's self-test (`--selftest`) and its mocks.
         .target(
             name: "NVRViewSelfTest", dependencies: appDependencies + ["NVRViewApp"],
@@ -88,6 +97,8 @@ let package = Package(
             name: "NVRCoreTests",
             dependencies: ["NVRCore", "FakeCore", "VideoKit", "NVRViewCore"] + (realCore ? ["NVRCoreC"] : []),
             swiftSettings: realCore ? [.define("NVRVIEW_REAL_CORE")] : []),
-    ],
+    ] + appModules.map {
+        .target(name: $0.name, dependencies: $0.dependencies, swiftSettings: appSwiftSettings)
+    },
     swiftLanguageModes: [.v6]
 )
