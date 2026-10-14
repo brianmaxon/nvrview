@@ -1258,3 +1258,38 @@ async fn a_manual_retry_revives_a_refused_stream() {
     next_video(&mut a).await;
     s.close().await;
 }
+
+/// A stream wanted in the same moment that others are released: every stop
+/// reaches the device before the new start, so the device never has more
+/// live previews than the caller's cap. The session walks its streams in
+/// hash order, so the scenario repeats on fresh sessions.
+#[tokio::test(start_paused = true)]
+async fn stops_reach_the_device_before_a_new_start() {
+    for round in 0..12 {
+        let fake = Fake::start(Mode::Normal).await;
+        let s = DeviceSession::spawn(fake.connector(), config());
+        let mut old = Vec::new();
+        for c in 1..9u8 {
+            old.push(s.subscribe(c, StreamTier::Main).await.unwrap());
+        }
+        for sub in &mut old {
+            recv(sub).await;
+        }
+        let before = fake.seen.lock().unwrap().len();
+        // Nothing yields between the new subscription and the drops, so the
+        // session sees both in one pass.
+        let mut new = s.subscribe(0, StreamTier::Main).await.unwrap();
+        drop(old);
+        recv(&mut new).await;
+        wait_until("every stop", || fake.count(4) == 8).await;
+        let order: Vec<u32> = fake.seen.lock().unwrap()[before..]
+            .iter()
+            .map(|e| e.command)
+            .filter(|c| *c == 3 || *c == 4)
+            .collect();
+        let mut want = vec![4; 8];
+        want.push(3);
+        assert_eq!(order, want, "round {round}: a start preceded a stop");
+        s.close().await;
+    }
+}
