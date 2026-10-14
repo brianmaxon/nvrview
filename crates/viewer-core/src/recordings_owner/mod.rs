@@ -51,6 +51,8 @@ mod exports;
 mod locks;
 mod query;
 mod sound;
+mod sound_gaps;
+mod sound_span;
 mod sound_work;
 
 pub use sound::{MAX_LABELS_PER_DAY, PATTERN_ANALYZER, SOUND_KINDS};

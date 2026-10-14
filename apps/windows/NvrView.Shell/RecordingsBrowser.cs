@@ -52,7 +52,7 @@ public sealed record TimelineLane(
     RecordingCamera Camera, string Name, IReadOnlyList<RecordingSpan> Spans, IReadOnlyList<RecordedEvent> Events, bool Failed);
 
 /// <summary>One recordings window's state (see the file comment).</summary>
-public sealed class RecordingsBrowser
+public sealed partial class RecordingsBrowser
 {
     private readonly Guid _token;
     private (long Day, HashSet<RecordingCamera> Cameras)? _asked;
@@ -179,33 +179,6 @@ public sealed class RecordingsBrowser
     /// <summary>Analyzes the shown day's sound from the downloaded video, for one lane's camera or for all the searched cameras (the lanes).</summary>
     public void AnalyzeSound(RecordingCamera? camera = null) =>
         Model.AnalyzeSound(camera is { } c ? [c] : [.. Lanes.Select(l => l.Camera)], Day);
-
-    /// <summary>"Analyze this gap": measures one empty stretch of a lane's loudness from the downloaded video. Only a gap the core said is analyzable.</summary>
-    public void AnalyzeGap(LoudnessGap gap, RecordingCamera camera)
-    {
-        RecordingCamera mic = LoudnessScale.Microphone(camera);
-        if (gap.CanAnalyze && !Model.IsAnalyzing(mic, Day))
-        {
-            Model.AnalyzeSound(mic, Day, (gap.Start, gap.End));
-        }
-    }
-
-    /// <summary>The height of the loudness strips (the user drags it; kept across launches).</summary>
-    public double LoudnessHeight
-    {
-        get => RecordingsPanes.ClampLoudness(_layout.LoudnessHeight);
-        set
-        {
-            double h = RecordingsPanes.ClampLoudness(value);
-            if (h != LoudnessHeight)
-            {
-                _layout.LoudnessHeight = h;
-            }
-        }
-    }
-
-    /// <summary>Writes the strips' height to the settings file (when a drag ends).</summary>
-    public void KeepLoudnessHeight() => _layout.Save();
 
     /// <summary>Cancels a lane's analysis.</summary>
     public void CancelAnalysis(RecordingCamera camera) => Model.CancelAnalysis(camera, Day);
