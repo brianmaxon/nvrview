@@ -393,6 +393,7 @@ fi
 mac_selftest() {
   # The app's self-test on the fake core. Its lines go to a log; a failure
   # prints its problems.
+  swiftpm_guard || return 1
   mac_log=$(mktemp)
   mac_data=$(mktemp -d)
   mac_rc=0
@@ -424,13 +425,36 @@ mac_real_selftest() {
   grep -E 'selftest took|^selftest: ' "$real_log" || true
   rm -f "$real_log"
 }
+# Fails at once, naming the process, when a SwiftPM or test process left behind
+# by an earlier check (orphaned, parent 1) still holds apps/macos/.build; SwiftPM
+# would otherwise wait on its lock until the step's time limit. A live holder
+# (another check running) is only noted: SwiftPM waits for it.
+swiftpm_guard() {
+  guard_rc=0
+  holders=$(sh scripts/swiftpm-holders.sh apps/macos) || guard_rc=$?
+  case "$guard_rc" in
+    0) return 0 ;;
+    3)
+      echo "$holders" >&2
+      echo "STALE SwiftPM process(es) from an earlier check still hold apps/macos/.build (listed above: kind pid ppid age command)." >&2
+      echo "Stop them (kill PID, then kill -9 PID) and rerun; SwiftPM would wait on its lock until the time limit." >&2
+      return 1
+      ;;
+    *)
+      echo "note: another SwiftPM process is using apps/macos (live, listed below); this step waits for its lock:" >&2
+      echo "$holders" >&2
+      ;;
+  esac
+}
 swift_test() {
   # An overall limit (the whole run takes a few minutes); on a hang the test
-  # that last started is named.
+  # that last started is named, and the tree of processes is stopped.
+  swiftpm_guard || return 1
   (cd apps/macos &&
     "$py" -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-600}" "swift test" swift test)
 }
 demo_selftest() { # [renderer args]
+  swiftpm_guard || return 1
   (cd apps/macos && swift build --product NVRViewDemo &&
     .build/debug/NVRViewDemo "$@" --tiles 6 --fps 200 --selftest 60 --until-frames 20 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
 }

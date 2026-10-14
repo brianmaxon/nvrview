@@ -2,6 +2,7 @@ import AVFoundation
 import CoreGraphics
 import CoreVideo
 import Foundation
+import NVRCore
 import VideoKit
 
 /// Synthetic recordings for checking the follow cut and grids (docs/UX.md
@@ -172,12 +173,18 @@ public enum SyntheticRecording {
                     group.leave()
                 }
             }
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in group.notify(queue: .global()) { c.resume() } }
+            let outcome = await WriterWait.drain(group, writer: writer, ceiling: WriterWait.shortCeiling)
+            if outcome != .drained {
+                writer.cancelWriting()
+                throw WriteError.failed("the writer stopped asking for samples (\(outcome)): \(String(describing: writer.error))")
+            }
             if failed {
                 writer.cancelWriting()
                 throw WriteError.failed(String(describing: writer.error))
             }
-            await writer.finishWriting()
+            guard await WriterWait.finish(writer, ceiling: WriterWait.shortCeiling) else {
+                throw WriteError.failed("finishWriting did not return")
+            }
             if writer.status != .completed { throw WriteError.failed(String(describing: writer.error)) }
         }
     }

@@ -174,6 +174,39 @@ struct ExportWriterTests {
         FileManager.default.temporaryDirectory.appendingPathComponent("nvrview-export-\(UUID().uuidString)")
     }
 
+    /// A writer whose input is never finished and never asked for samples
+    /// (the shape of the hang): the wait ends when the writer is canceled,
+    /// and at its ceiling when nothing happens.
+    @Test func aWriterWaitEndsWhenTheWriterStopsOrTheCeilingPasses() async throws {
+        @Sendable func writer() throws -> AVAssetWriter {
+            let w = try AVAssetWriter(url: FileManager.default.temporaryDirectory.appendingPathComponent("nvrview-export-\(UUID().uuidString)").appendingPathExtension("mp4"), fileType: .mp4)
+            let input = AVAssetWriterInput(
+                mediaType: .video,
+                outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 64, AVVideoHeightKey: 64])
+            w.add(input)
+            #expect(w.startWriting())
+            w.startSession(atSourceTime: .zero)
+            return w
+        }
+        // Under the encoder gate: other tests count keyframes of files made
+        // with one encoder session at a time.
+        try await EncoderGate.run { try await Self.waitCases(writer) }
+    }
+
+    private static func waitCases(_ writer: @Sendable () throws -> AVAssetWriter) async throws {
+        let stuck = DispatchGroup()
+        stuck.enter()
+        let canceled = try writer()
+        canceled.cancelWriting()
+        #expect(await WriterWait.drain(stuck, writer: canceled, ceiling: 60) == .writerStopped)
+        let idle = try writer()
+        #expect(await WriterWait.drain(stuck, writer: idle, ceiling: 0.2) == .timedOut)
+        idle.cancelWriting()
+        stuck.leave()
+        let done = DispatchGroup()
+        #expect(await WriterWait.drain(done, writer: try writer(), ceiling: 60) == .drained)
+    }
+
     /// The camera and frame number a file's picture at `ms` shows.
     private func look(_ url: URL, at ms: Int64) async throws -> (color: Int?, frame: Int) {
         let file = try await RecordedFileSource.open(url)

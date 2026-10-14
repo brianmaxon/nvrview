@@ -33,13 +33,20 @@ import Testing
         let synthesizer = AVSpeechSynthesizer()
         let utterance = AVSpeechUtterance(string: "Hello, one moment please")
         let collected = SpeechBufferCollector()
+        // Hang guard: the synthesizer may never send its end (no voice
+        // installed, audio service busy); the test then fails instead of
+        // waiting forever. The first of the end and the guard resumes.
+        let resumed = ResumeOnce()
         let samples = await withCheckedContinuation { (done: CheckedContinuation<[Float], Never>) in
             synthesizer.write(utterance) { buffer in
                 guard let pcm = buffer as? AVAudioPCMBuffer else { return }
-                if let s = collected.take(pcm) { done.resume(returning: s) }
+                if let s = collected.take(pcm), resumed.first() { done.resume(returning: s) }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 120) {
+                if resumed.first() { done.resume(returning: []) }
             }
         }
-        #expect(samples.count > 8_000)
+        #expect(samples.count > 8_000, "the system voice sent no end within 120 s")
         // Late callbacks after the end must not resume again (a second resume traps).
         try? await Task.sleep(for: .milliseconds(300))
     }
@@ -65,6 +72,13 @@ import Testing
         // 1 s at 48 kHz is about 16000 samples at 16 kHz (less the resampler's tail).
         #expect((15_000...16_100).contains(got.total))
     }
+}
+
+/// True once, for the first caller.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+    func first() -> Bool { lock.withLock { defer { used = true }; return !used } }
 }
 
 private final class SampleCount: @unchecked Sendable {
