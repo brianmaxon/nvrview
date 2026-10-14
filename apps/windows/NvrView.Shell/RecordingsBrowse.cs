@@ -295,7 +295,8 @@ public sealed record CalendarAnswer(long Revision, IReadOnlyList<(RecordingCamer
 }
 
 /// <summary>One recording file's range (a span of a timeline lane).</summary>
-public sealed record RecordingSpan(long Start, long End, IReadOnlyList<string> Causes, string? Tier);
+/// <param name="Bytes">The device's bytes for the span, when the core says (the Export tab's size estimate).</param>
+public sealed record RecordingSpan(long Start, long End, IReadOnlyList<string> Causes, string? Tier, long? Bytes = null);
 
 /// <summary><c>nv_recordings_spans</c>.</summary>
 public sealed record SpansAnswer(long Revision, bool Truncated, IReadOnlyList<(RecordingCamera Camera, IReadOnlyList<RecordingSpan> Spans)> Spans)
@@ -310,7 +311,7 @@ public sealed record SpansAnswer(long Revision, bool Truncated, IReadOnlyList<(R
             {
                 list.Add((camera, [.. Incident.Items(c, "spans").Select(s => new RecordingSpan(
                     DownloadProgress.Long(s, "start") ?? 0, DownloadProgress.Long(s, "end") ?? 0,
-                    [.. Incident.Items(s, "causes").Select(x => x.GetString() ?? "")], DownloadProgress.Str(s, "tier")))]));
+                    [.. Incident.Items(s, "causes").Select(x => x.GetString() ?? "")], DownloadProgress.Str(s, "tier"), DownloadProgress.Long(s, "bytes")))]));
             }
         }
         return new SpansAnswer(DownloadProgress.Long(root, "revision") ?? 0, DownloadProgress.Bool(root, "truncated"), list);

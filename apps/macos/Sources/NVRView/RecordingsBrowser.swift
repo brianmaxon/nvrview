@@ -97,6 +97,9 @@ final class RecordingsBrowser {
     /// `RecordingsPanes.shown`).
     var showSidebar = true
     var showInspector = true
+    /// The right pane's tab: the incident's details or the Export tab (kept
+    /// across incidents).
+    var inspectorTab = InspectorTab.incident
     /// What the window last laid out: its width and the panes it showed.
     @ObservationIgnored var shownPanes: (width: CGFloat, sidebar: Bool, inspector: Bool)?
     var kindFilters: Set<KindFilter> = [] { didSet { applyFilters() } }
@@ -148,6 +151,7 @@ final class RecordingsBrowser {
 
     init(model: RecordingsModel) {
         self.model = model
+        export.defaultQuality = { [weak model] in model?.app?.exportQuality ?? .main }
         holdID = model.newHold()
         player = model.makePlayer()
         editPlayer = EditPlayer(model: model, cameras: player)

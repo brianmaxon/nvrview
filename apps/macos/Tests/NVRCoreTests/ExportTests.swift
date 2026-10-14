@@ -317,6 +317,24 @@ struct ExportWriterTests {
         #expect(await dominantFrequency(of: target, from: 2.2, to: 3.8) == 880)
     }
 
+    @Test func followCutWithTheSoundOffWritesNoAudioTrack() async throws {
+        let dir = temporary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("a.mp4"), target = dir.appendingPathComponent("silent.mp4")
+        try await SyntheticRecording.write(.init(width: 320, height: 180, frames: 60, color: 0, audioHz: 440), to: a)
+        let cam = RecordingCamera(device: "d-example", channel: 0)
+        let plan = EditPlan(
+            kind: .follow, startMs: 10_000, endMs: 13_000,
+            sources: [.init(source: 0, camera: cam, name: "A", file: a.path, fileStartMs: 10_000, width: 320, height: 180)],
+            segments: [.init(startMs: 10_000, endMs: 13_000, source: 0, sourceInMs: 0)])
+        let outcome = await gatedEdit(plan: plan, to: target, settings: .init(fps: 10, sound: false), control: ExportControl())
+        #expect(outcome.result == .done, "\(outcome)")
+        #expect(try await AVURLAsset(url: target).loadTracks(withMediaType: .audio).isEmpty)
+        let loud = dir.appendingPathComponent("loud.mp4")
+        _ = await gatedEdit(plan: plan, to: loud, settings: .init(fps: 10), control: ExportControl())
+        #expect(try await AVURLAsset(url: loud).loadTracks(withMediaType: .audio).count == 1, "the same plan has sound when it is on")
+    }
+
     @Test func canceledExportLeavesNoFile() async throws {
         let dir = temporary()
         defer { try? FileManager.default.removeItem(at: dir) }

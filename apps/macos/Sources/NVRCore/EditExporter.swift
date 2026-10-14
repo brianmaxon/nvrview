@@ -23,12 +23,18 @@ public enum EditExporter {
         public var shareSafe: Bool
         /// The grid cell whose sound is written.
         public var gridCell: Int
+        /// Whether the sound is written (the Export tab's switch).
+        public var sound: Bool
 
-        public init(codec: ExportCodec = .h264, fps: Int = ExportGeometry.framesPerSecond, shareSafe: Bool = false, gridCell: Int = 0) {
+        public init(
+            codec: ExportCodec = .h264, fps: Int = ExportGeometry.framesPerSecond, shareSafe: Bool = false, gridCell: Int = 0,
+            sound: Bool = true
+        ) {
             self.codec = codec
             self.fps = fps
             self.shareSafe = shareSafe
             self.gridCell = gridCell
+            self.sound = sound
         }
     }
 
@@ -64,7 +70,7 @@ public enum EditExporter {
             var audio: (reader: AVAssetReader, output: AVAssetReaderOutput, input: AVAssetWriterInput)?
             var keepAlive: [AVURLAsset] = []
             defer { withExtendedLifetime(keepAlive) {} }
-            if let track = await soundTrack(plan, pieces: ExportGeometry.audioPieces(plan, gridCell: settings.gridCell), composition: AVMutableComposition()) {
+            if settings.sound, let track = await soundTrack(plan, pieces: ExportGeometry.audioPieces(plan, gridCell: settings.gridCell), composition: AVMutableComposition()) {
                 let reader = try AVAssetReader(asset: track.composition)
                 let output = AVAssetReaderAudioMixOutput(audioTracks: [track.track], audioSettings: ExportAudio.pcm)
                 let input = AVAssetWriterInput(mediaType: .audio, outputSettings: ExportAudio.aacSettings)

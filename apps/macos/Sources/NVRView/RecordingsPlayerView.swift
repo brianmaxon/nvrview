@@ -23,7 +23,9 @@ struct PlayerColumn: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
-                if let job = browser.export.job { ExportStrip(job: job, export: browser.export) }
+                if let job = browser.export.job, !(browser.showInspector && browser.inspectorTab == .export) {
+                    ExportStrip(job: job, export: browser.export)
+                }
                 TransportBar(browser: browser, player: browser.player)
                     .frame(height: RecordingsPanes.transportHeight)
                 Divider()
@@ -366,7 +368,6 @@ struct TransportBar: View {
                     }
                 }
                 .disabled(!d.canPlay)
-                ExportMenu(browser: browser)
                 PlayerViewMenu(browser: browser)
             }
             .buttonStyle(.borderless)
@@ -1024,52 +1025,6 @@ struct InOutBand: View {
     }
 }
 
-/// The export menu: in and out points, trim, follow cut and grid, range
-/// download, pictures, and the share-safe switch.
-struct ExportMenu: View {
-    @Bindable var browser: RecordingsBrowser
-
-    var body: some View {
-        let export = browser.export
-        let hasPoints = browser.pointsWindow != nil
-        Menu {
-            Button("Set In Point (I)") { browser.markIn() }
-            Button("Set Out Point (O)") { browser.markOut() }
-            Button("Clear In and Out") { browser.clearPoints() }.disabled(browser.points.isEmpty)
-            Divider()
-            Menu("Trim to In and Out") {
-                Button("All Cameras") { browser.trim(cameras: nil) }
-                Divider()
-                ForEach(browser.trimCameras, id: \.self) { c in
-                    Button(browser.cameraName(c)) { browser.trim(cameras: [c]) }
-                }
-            }
-            .disabled(!hasPoints)
-            Toggle("Exact Trim (Re-Encodes)", isOn: Bindable(export).trimExact)
-            Divider()
-            Button("Export Follow Cut…") { browser.exportEdit(.follow) }.disabled(browser.editable == nil)
-            Button("Export 2-Up…") { browser.exportEdit(.grid2) }.disabled(browser.editable == nil)
-            Button("Export 4-Up…") { browser.exportEdit(.grid4) }.disabled(browser.editable == nil)
-            Picker("Video", selection: Bindable(export).codec) {
-                Text("H.264").tag(ExportCodec.h264)
-                Text("HEVC").tag(ExportCodec.hevc)
-            }
-            Divider()
-            Button("Download Range…") { browser.beginRangeDownload() }
-            Divider()
-            Button("Save Picture…") { browser.saveStills(eachCamera: false) }
-            Button("Save a Picture of Each Camera…") { browser.saveStills(eachCamera: true) }
-            Divider()
-            Toggle("Share-Safe (No Names or Metadata)", isOn: Bindable(export).shareSafe)
-        } label: {
-            Label(hasPoints ? "Export (In/Out)" : "Export", systemImage: "square.and.arrow.up")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Export: in and out points (I and O), trim, follow cut or grid, range download, pictures")
-    }
-}
-
 extension RecordingsBrowser {
     /// The cameras a trim can name: the playing ones, or the edit's.
     var trimCameras: [RecordingCamera] {
@@ -1099,49 +1054,6 @@ struct ExportStrip: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 4)
         .background(.quaternary.opacity(0.4))
-    }
-}
-
-/// The range download sheet: cameras, the range, an optional name and folder.
-struct RangeDownloadSheet: View {
-    let browser: RecordingsBrowser
-    @State var request: RangeDownloadRequest
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Download Range").font(.title3.weight(.semibold))
-            Text("\(TransportState.clock(request.startMs)) to \(TransportState.clock(request.endMs)) on \(browser.dayTitle)")
-                .font(.callout).foregroundStyle(.secondary)
-            ForEach(browser.cameras, id: \.self) { c in
-                Toggle(browser.cameraName(c), isOn: Binding(
-                    get: { request.cameras.contains(c) },
-                    set: { on in if on { request.cameras.insert(c) } else { request.cameras.remove(c) } }))
-                .toggleStyle(.checkbox)
-            }
-            TextField("Name (optional)", text: $request.name).textFieldStyle(.roundedBorder)
-            HStack {
-                Text(request.folder?.path ?? "Downloads folder").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                Spacer()
-                Button("Choose Folder…") {
-                    if let f = browser.export.chooseFolder("Choose where to download", request.folder) { request.folder = f }
-                }
-                if request.folder != nil { Button("Default") { request.folder = nil } }
-            }
-            if browser.export.shareSafe { Text("Share-safe: neutral camera names, no incident.json").font(.caption).foregroundStyle(.secondary) }
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Download") {
-                    browser.downloadRange(request)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(request.cameras.isEmpty)
-            }
-        }
-        .padding(16)
-        .frame(width: 400)
     }
 }
 

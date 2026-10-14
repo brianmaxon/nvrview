@@ -77,6 +77,8 @@ final class FakeRecordingsState: @unchecked Sendable {
         var pendingThumbnails: [ThumbnailKey] = []
         var downloads: [Download] = []
         var nextDownload = 1
+        /// The tier of each camera in the last range download request (`"main"` or `"sub"`).
+        var lastRangeTiers: [String] = []
         /// Cameras on the sound "always listen" list.
         var watched: [RecordingCamera] = []
         /// Sound labels the app put: camera, kind, span, analyzer.
@@ -930,6 +932,9 @@ extension FakeCore {
     /// Finishes every queued thumbnail fetch (`thumbnail` `ready` with
     /// `coverKeyframe`) and download (`running`, then `done`), sending
     /// their events. Paused downloads wait.
+    /// The tier of each camera in the last range download request (the Export tab's self-test).
+    public func lastRangeDownloadTiers() -> [String] { recordings.locked { $0.lastRangeTiers } }
+
     public func completeRecordingWork() {
         guard !isFreed else { return }
         defer { completeSoundAnalyses() }
@@ -1240,9 +1245,15 @@ extension FakeCore {
         let dest = try Self.destination(o["dest"])
         let shareSafe = o["share_safe"] as? Bool ?? false
         var cameras: [RecordingCamera] = []
+        var tiers: [String] = []
         for item in list {
             let c = try Self.camera((item as? [String: Any])?["camera"])
-            if !cameras.contains(c) { cameras.append(c) }
+            let tier = (item as? [String: Any])?["tier"] as? String ?? "main"
+            guard tier == "main" || tier == "sub" else { throw .invalidArgument }
+            if !cameras.contains(c) {
+                cameras.append(c)
+                tiers.append(tier)
+            }
         }
         let (answer, queued) = try configuredWorld {
             w throws(CoreStatus) -> ([String: Any], FakeRecordingsState.Download?) in
@@ -1250,7 +1261,8 @@ extension FakeCore {
             if let dest, dest != w.downloadsDir { throw .notConfigured }
             for c in cameras where !Self.allowed(w, c) { throw .invalidArgument }
             var h: UInt64 = 0xcbf2_9ce4_8422_2325
-            let canonical = cameras.map { "\($0.device)/\($0.channel)/\($0.lens)" }.sorted().joined(separator: ",")
+            w.lastRangeTiers = tiers
+            let canonical = zip(cameras, tiers).map { "\($0.device)/\($0.channel)/\($0.lens)/\($1)" }.sorted().joined(separator: ",")
             for b in "\(start)-\(end)-\(canonical)".utf8 { h = (h ^ UInt64(b)) &* 0x100_0000_01b3 }
             let id = "r-\(start)-\(String(h, radix: 16))"
             if let existing = w.downloads.first(where: { $0.id == id }) {

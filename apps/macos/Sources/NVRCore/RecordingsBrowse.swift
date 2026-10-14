@@ -200,6 +200,8 @@ public struct RecordingSpan: Sendable, Equatable, Decodable {
     public var end: Int64
     public var causes: [String]?
     public var tier: String?
+    /// The device's bytes for the span, when the core says (the Export tab's size estimate).
+    public var bytes: Int64?
 }
 
 public struct CameraSpans: Sendable, Equatable, Decodable {

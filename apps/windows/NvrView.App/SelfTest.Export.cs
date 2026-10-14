@@ -37,6 +37,19 @@ internal sealed partial class SelfTest
         return image is null ? null : ExportSynthetic.Read(image);
     }
 
+    // Runs the Export tab's button for a kind with these cameras checked (none given: all of them).
+    private async Task PanelStart(ExportController export, ExportKind kind, params RecordingCamera[] cameras)
+    {
+        export.KindChoice = kind;
+        export.CameraChoice = cameras.Length > 0 ? [.. cameras] : null;
+        Expect(export.Kind == kind, $"export: the tab does not offer {kind.Title()} (kinds [{string.Join(", ", export.Kinds.Select(k => k.Id()))}], {export.SourceCameras.Count} source cameras, view {export.Context})");
+        if (export.Problem is { } why)
+        {
+            _problems.Add($"export: the tab would not start {kind.Title()}: {why}");
+        }
+        await export.StartAsync();
+    }
+
     private static async Task<bool> JobDone(RecordingsWindow w) =>
         await Until(() => w.Browser.Export.Job is { Running: false }, 90);
 
@@ -94,14 +107,14 @@ internal sealed partial class SelfTest
         // Writes the edit and returns its file, retrying with H.264 when this computer has no H.265 encoder.
         async Task<string?> Export(string? grid, string what)
         {
-            await export.ExportEditAsync(grid);
+            await PanelStart(export, grid is null ? ExportKind.FollowCut : ExportKind.Grid4);
             bool done = await JobDone(w);
             if (done && export.Job is { Files.Count: 0, Result: { } why } && why.Contains("H.265", StringComparison.Ordinal))
             {
                 Say($"export: {what}: {why}; H.264 instead");
                 export.DismissJob();
                 export.Codec = ExportCodec.H264;
-                await export.ExportEditAsync(grid);
+                await PanelStart(export, grid is null ? ExportKind.FollowCut : ExportKind.Grid4);
                 done = await JobDone(w);
             }
             string? file = export.Job?.Files.FirstOrDefault();
@@ -154,6 +167,16 @@ internal sealed partial class SelfTest
                         $"export: the follow cut at {t} ms shows camera {color?.ToString() ?? "none"} frame {frame}, expected camera {shot.Source} frame {expected}");
                 }
                 CheckSound(file, cut, 0, "follow cut");
+                // The sound switch: the same plan written with the sound off holds no sound.
+                export.DismissJob();
+                export.Sound = false;
+                if (await Export(null, "silent follow cut") is { } silent)
+                {
+                    (long StartMs, long EndMs, int Samples)? none = MfExport.SoundSpan(silent);
+                    Say($"export: silent follow cut {(none is { } q ? $"{q.Samples} samples" : "no sound")}");
+                    Expect(none is null or { Samples: 0 }, $"export: the follow cut written with the sound off holds {none?.Samples} sound samples");
+                }
+                export.Sound = true;
             }
             export.DismissJob();
 
@@ -239,6 +262,43 @@ internal sealed partial class SelfTest
         {
             RecordingCamera camera = p.Cameras[0];
 
+            // parity: export-panel-open
+            b.InspectorTab = InspectorTab.Incident;
+            b.ShowInspector = false;
+            w.OpenExportTab();
+            w.Refresh();
+            Expect(b.InspectorTab == InspectorTab.Export && b.ShowInspector, "export: Ctrl+E did not open the Export tab");
+            Expect(w.ExportShortcutRegistered, "export: Ctrl+E is not registered as a shortcut");
+            if (w.ShownPanes.Inspector)
+            {
+                Expect(w.ExportTabShown, "export: the Export tab is not the one shown");
+            }
+            string[] kindsDrawn = [.. w.ExportTabDrawn.Kinds];
+            string[] kindsWanted = [.. export.Kinds.Select(k => k.Id())];
+            Say($"export: the tab lists [{string.Join(", ", kindsDrawn)}]");
+            Expect(kindsWanted.Length > 0 && kindsDrawn.SequenceEqual(kindsWanted), $"export: the tab lists [{string.Join(", ", kindsDrawn)}], expected [{string.Join(", ", kindsWanted)}]");
+            Expect(export.Checked.SetEquals(p.Cameras), "export: the tab does not check the playing cameras");
+
+            // parity: export-panel-points
+            long start = scrub.Start;
+            p.Seek(start + 1_000);
+            export.MarkIn();
+            p.Seek(start + 4_000);
+            export.MarkOut();
+            w.Refresh();
+            (List<string> _, string drawnStart, string drawnEnd, string drawnSummary) = w.ExportTabDrawn;
+            Say($"export: I and O give {drawnStart} to {drawnEnd}, {drawnSummary}");
+            Expect(drawnStart == ExportPanel.TimeText(start + 1_000) && drawnEnd == ExportPanel.TimeText(start + 4_000),
+                $"export: the tab shows {drawnStart} to {drawnEnd}, expected {ExportPanel.TimeText(start + 1_000)} to {ExportPanel.TimeText(start + 4_000)}");
+            Expect(drawnSummary.Contains(", 0:03", StringComparison.Ordinal), $"export: the tab's summary is \"{drawnSummary}\", expected 3 seconds");
+            export.MovePoint(PointHandle.Out, start + 3_000);
+            w.Refresh();
+            Expect(w.ExportTabDrawn.End == ExportPanel.TimeText(start + 3_000), $"export: dragging the out flag left the tab at {w.ExportTabDrawn.End}");
+            Expect(export.SetStart(ExportPanel.TimeText(start + 500)) && export.Points.InMs == start + 500, "export: a typed start time did not set the in point");
+            Expect(!export.SetEnd("99:99"), "export: a time that is not a time was accepted");
+            export.ClearPoints();
+            Expect(export.PointsWindow is null, "export: Whole Range left points set");
+
             // parity: export-trim
             b.Download(incident.Key);
             bool downloaded = await Until(() =>
@@ -267,7 +327,7 @@ internal sealed partial class SelfTest
             Expect(output.CopyPossible, "export: a keyframe trim should be a copy");
             bool wrote = ExportSynthetic.Write(output.File, camera.Channel, (int)Math.Min((output.SourceOutMs + 3_000) / 100, 1_000));
             Expect(wrote, "export: the synthetic recording could not be written");
-            await export.TrimAsync([camera]);
+            await PanelStart(export, ExportKind.TrimCopy, camera);
             Expect(await JobDone(w), "export: the trim did not finish");
             ExportJob? job = export.Job;
             string[] files = job?.Files.ToArray() ?? [];
@@ -300,8 +360,7 @@ internal sealed partial class SelfTest
 
             // A canceled export leaves no file: cancel at once, an exact trim (it re-encodes).
             string[] before = Directory.GetFiles(dir);
-            export.TrimExact = true;
-            await export.TrimAsync([camera]);
+            await PanelStart(export, ExportKind.TrimExact, camera);
             export.Job?.Cancel();
             await JobDone(w);
             string[] afterCancel = Directory.GetFiles(dir);
@@ -314,7 +373,7 @@ internal sealed partial class SelfTest
 
             // parity: export-share-safe
             export.ShareSafe = true;
-            await export.TrimAsync([camera]);
+            await PanelStart(export, ExportKind.TrimCopy, camera);
             Expect(await JobDone(w), "export: the share-safe trim did not finish");
             if (export.Job?.Files.FirstOrDefault() is not { } safe)
             {
@@ -338,16 +397,19 @@ internal sealed partial class SelfTest
 
             // parity: export-range-download
             export.RawPoints = new InOutPoints(lo + 1_000, lo + 4_200);
-            export.BeginRangeDownload();
-            if (export.RangeRequest is not { } request)
-            {
-                _problems.Add("export: the range sheet did not open");
-                return;
-            }
-            Expect(request.Cameras.Count == p.Cameras.Count, $"export: the range sheet offers {request.Cameras.Count} cameras, expected {p.Cameras.Count}");
-            RecordingCamera[] cameras = [.. b.Cameras.Take(2)];
-            request.Cameras = new HashSet<RecordingCamera>(cameras);
-            export.DownloadRange(request);
+            export.CameraChoice = null;
+            // The tab offers the playing cameras, checked; the stream is Settings' choice until the tab says otherwise.
+            Expect(export.Checked.Count == p.Cameras.Count, $"export: the tab checks {export.Checked.Count} cameras, expected {p.Cameras.Count}");
+            ViewSettings settings = app.Viewer!.Settings;
+            ExportQuality savedQuality = settings.ExportQuality;
+            export.QualityChoice = null;
+            settings.ExportQuality = ExportQuality.Sub;
+            Expect(export.Quality == ExportQuality.Sub, $"export: the tab's stream ignores Settings ({export.Quality})");
+            settings.ExportQuality = ExportQuality.Main;
+            RecordingCamera[] cameras = [.. p.Cameras.Take(2)];
+            await PanelStart(export, ExportKind.Download, cameras);
+            string[] defaultTiers = [.. fake.LastRangeTiers];
+            Expect(defaultTiers.Length == 2 && defaultTiers.All(t => t == "main"), $"export: the default download asked for [{string.Join(", ", defaultTiers)}], expected main for both");
             long wantStart = DeviceTime.FloorDiv(lo + 1_000, 1000), wantEnd = -DeviceTime.FloorDiv(-(lo + 4_200), 1000);
             bool ranged = await Until(() =>
             {
@@ -358,7 +420,20 @@ internal sealed partial class SelfTest
             Say($"export: range download {range?.RangeText ?? "none"}, {range?.Cameras.Count ?? 0} cameras, {range?.State ?? "?"}");
             Expect(ranged && range?.Range == new DownloadRange(wantStart, wantEnd) && range.Cameras.Count == 2,
                 $"export: the range download is {range?.Range} with {range?.Cameras.Count ?? 0} cameras ({range?.State ?? "none"}), expected {wantStart}-{wantEnd} with 2");
-            Expect(b.Center == RecordingsCenter.Downloads, "export: a range download did not show the downloads");
+            // parity: export-panel-quality
+            export.QualityChoice = ExportQuality.Sub;
+            await PanelStart(export, ExportKind.Download, cameras);
+            string[] subTiers = [.. fake.LastRangeTiers];
+            Say($"export: the sub-stream download asked for [{string.Join(", ", subTiers)}]");
+            Expect(subTiers.Length == 2 && subTiers.All(t => t == "sub"), $"export: the sub-stream choice reached the core as [{string.Join(", ", subTiers)}]");
+            export.QualityChoice = null;
+            export.CameraChoice = null;
+            settings.ExportQuality = savedQuality;
+            await Until(() =>
+            {
+                fake.CompleteRecordingWork();
+                return service.Downloads.Where(d => d.Range is not null).All(d => d.State == "done");
+            }, 5);
             w.Refresh();
             Expect(w.DownloadCardTitles().Any(t => t.StartsWith("Range ", StringComparison.Ordinal)), "export: the downloads list does not say Range");
             b.Center = RecordingsCenter.Player;

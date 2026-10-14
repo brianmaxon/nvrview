@@ -90,7 +90,7 @@ struct RecordingsView: View {
                     .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
                     if panes.inspector {
                         Divider()
-                        IncidentInspector(browser: browser)
+                        InspectorPane(browser: browser)
                             .frame(width: RecordingsPanes.inspectorWidth)
                             .frame(maxHeight: .infinity)
                     }
@@ -117,13 +117,28 @@ struct RecordingsView: View {
             }
         }
         .sheet(isPresented: $browser.showingGroups) { CameraGroupsEditor(browser: browser) }
-        .sheet(item: Bindable(browser.export).rangeRequest) { RangeDownloadSheet(browser: browser, request: $0) }
+        .background {
+            // Cmd+E opens the Export tab (showing the right pane, in a window wide enough for it).
+            Button("Export Tab") { openExportTab() }
+                .keyboardShortcut("e", modifiers: .command)
+                .opacity(0)
+                .accessibilityHidden(true)
+        }
     }
 
     private struct PaneKey: Equatable {
         var width: CGFloat
         var sidebar: Bool
         var inspector: Bool
+    }
+
+    private func openExportTab() {
+        let wasShown = browser.showInspector
+        browser.openExportTab()
+        if !wasShown {
+            let need = RecordingsPanes.centerMin + (browser.showSidebar ? RecordingsPanes.sidebarWidth : 0) + RecordingsPanes.inspectorWidth
+            if need > (browser.shownPanes?.width ?? need) { grow(need) }
+        }
     }
 
     /// The header's pane buttons: turning a pane on in a window too narrow

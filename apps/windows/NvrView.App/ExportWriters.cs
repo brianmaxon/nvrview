@@ -148,7 +148,7 @@ internal sealed class ExportWriters(CoreHost host) : IExportWriters
     }
 
     /// <inheritdoc/>
-    public ExportOutcome ExportEdit(string planJson, ExportCodec codec, string partialPath, ExportControl control)
+    public ExportOutcome ExportEdit(string planJson, ExportCodec codec, string partialPath, ExportControl control, bool withSound = true)
     {
         if (EditFrames?.Invoke(planJson) is not { } frames || EditExportPlan.Parse(planJson) is not { } plan)
         {
@@ -157,7 +157,7 @@ internal sealed class ExportWriters(CoreHost host) : IExportWriters
         using (frames)
         {
             int count = ExportGeometry.FrameCount(plan.StartMs, plan.EndMs);
-            List<MfSoundPiece> sound = Sound(planJson, plan.Kind == "grid" ? GridSoundCell?.Invoke() ?? 0 : 0);
+            List<MfSoundPiece> sound = withSound ? Sound(planJson, plan.Kind == "grid" ? GridSoundCell?.Invoke() ?? 0 : 0) : [];
             return Outcome(
                 MfExport.RenderEdit(partialPath, frames.Width, frames.Height, ExportGeometry.FramesPerSecond, count, codec == ExportCodec.Hevc,
                     ExportGeometry.FramesPerSecond * 2,

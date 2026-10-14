@@ -50,7 +50,7 @@ public interface IExportWriters
     bool CanExportEdit { get; }
 
     /// <summary>Renders the edit list <paramref name="planJson"/> frame by frame into the MP4 at <paramref name="partialPath"/>.</summary>
-    ExportOutcome ExportEdit(string planJson, ExportCodec codec, string partialPath, ExportControl control);
+    ExportOutcome ExportEdit(string planJson, ExportCodec codec, string partialPath, ExportControl control, bool withSound = true);
 }
 
 /// <summary>One export running (or just ended), for the strip above the transport.</summary>
@@ -100,7 +100,7 @@ public sealed class ExportJob
     }
 }
 
-/// <summary>A range download being set up (the sheet).</summary>
+/// <summary>A range download being set up: the Export tab's range and checked cameras.</summary>
 public sealed class RangeDownloadRequest
 {
     public long StartMs { get; set; }
@@ -110,9 +110,6 @@ public sealed class RangeDownloadRequest
     public HashSet<RecordingCamera> Cameras { get; set; } = [];
 
     public string Name { get; set; } = "";
-
-    /// <summary>A folder the user chose instead of the downloads folder.</summary>
-    public string? Folder { get; set; }
 }
 
 /// <summary>What export keeps between launches: the share-safe switch, the trim kind, the codec, and the last folder.</summary>
@@ -128,6 +125,9 @@ public sealed class ExportSettings(string? path)
     /// <summary>The folder the last export went to.</summary>
     public string? Folder { get; set; }
 
+    /// <summary>Exports go straight into <see cref="Folder"/> with no save picker (the Export tab's "Choose…"; "Ask Each Time" clears it).</summary>
+    public bool Direct { get; set; }
+
     /// <summary>Reads the file (defaults when it is missing or unreadable).</summary>
     public void Load()
     {
@@ -139,6 +139,7 @@ public sealed class ExportSettings(string? path)
         TrimExact = o["trim_exact"] is JsonValue t && t.TryGetValue(out bool x) && x;
         Codec = o["codec"] is JsonValue c && c.TryGetValue(out string? name) && name == "hevc" ? ExportCodec.Hevc : ExportCodec.H264;
         Folder = o["folder"] is JsonValue f && f.TryGetValue(out string? dir) && !string.IsNullOrEmpty(dir) ? dir : null;
+        Direct = o["direct"] is JsonValue d && d.TryGetValue(out bool direct) && direct;
     }
 
     public void Save()
@@ -151,6 +152,10 @@ public sealed class ExportSettings(string? path)
         if (Folder is not null)
         {
             o["folder"] = Folder;
+        }
+        if (Direct)
+        {
+            o["direct"] = true;
         }
         try
         {
@@ -185,8 +190,6 @@ public sealed class ExportController
     public IExportDialogs? Dialogs { get; set; }
 
     public ExportJob? Job { get; private set; }
-
-    public RangeDownloadRequest? RangeRequest { get; set; }
 
     public bool Busy => Job?.Running == true;
 
@@ -229,6 +232,29 @@ public sealed class ExportController
         }
     }
 
+    /// <summary>Exports go straight into <see cref="Folder"/> with no picker (the tab's "Choose…"); "Ask Each Time" turns it off.</summary>
+    public bool Direct => _settings.Direct && Folder is not null;
+
+    /// <summary>The folder exports go straight into, or null when the pickers ask.</summary>
+    public string? DirectFolder => Direct ? Folder : null;
+
+    /// <summary>"Choose…" in the tab: exports go straight into <paramref name="folder"/> from now on.</summary>
+    public void ChooseFolder(string folder)
+    {
+        _settings.Folder = folder;
+        _settings.Direct = true;
+        _settings.Save();
+        Notify();
+    }
+
+    /// <summary>"Ask Each Time": the pickers come back.</summary>
+    public void AskEachTime()
+    {
+        _settings.Direct = false;
+        _settings.Save();
+        Notify();
+    }
+
     /// <summary>The folder the last export went to, if it still exists.</summary>
     public string? Folder => _settings.Folder is { } f && Directory.Exists(f) ? f : null;
 
@@ -267,7 +293,7 @@ public sealed class ExportController
     {
         if (ScrubSpan is { } s)
         {
-            RawPoints = Points.SetIn(_browser.Player.PositionMs, s.Lo, s.Hi);
+            RawPoints = Points.SetIn(_browser.Driver.Transport.PositionMs, s.Lo, s.Hi);
         }
     }
 
@@ -275,7 +301,7 @@ public sealed class ExportController
     {
         if (ScrubSpan is { } s)
         {
-            RawPoints = Points.SetOut(_browser.Player.PositionMs, s.Lo, s.Hi);
+            RawPoints = Points.SetOut(_browser.Driver.Transport.PositionMs, s.Lo, s.Hi);
         }
     }
 
@@ -287,6 +313,230 @@ public sealed class ExportController
         if (ScrubSpan is { } s)
         {
             RawPoints = Points.Move(handle, ms, s.Lo, s.Hi);
+        }
+    }
+
+    // ---- the Export tab ----
+
+    /// <summary>The kind the user chose in the tab (null: the first that applies, <see cref="Kind"/>).</summary>
+    public ExportKind? KindChoice
+    {
+        get => _kindChoice;
+        set
+        {
+            _kindChoice = value;
+            Notify();
+        }
+    }
+
+    private ExportKind? _kindChoice;
+
+    /// <summary>The cameras checked in the tab (null: all of the source's).</summary>
+    public HashSet<RecordingCamera>? CameraChoice
+    {
+        get => _cameraChoice;
+        set
+        {
+            _cameraChoice = value;
+            Notify();
+        }
+    }
+
+    private HashSet<RecordingCamera>? _cameraChoice;
+
+    /// <summary>The stream the tab chose for this export (null: Settings' choice).</summary>
+    public ExportQuality? QualityChoice
+    {
+        get => _qualityChoice;
+        set
+        {
+            _qualityChoice = value;
+            Notify();
+        }
+    }
+
+    private ExportQuality? _qualityChoice;
+
+    /// <summary>Settings > Capture's "Export from" (the app sets it).</summary>
+    public Func<ExportQuality> DefaultQuality { get; set; } = () => ExportQuality.Main;
+
+    /// <summary>The stream a download, and the download an export makes first, reads.</summary>
+    public ExportQuality Quality => QualityChoice ?? DefaultQuality();
+
+    /// <summary>Whether a follow cut or grid keeps the sound.</summary>
+    public bool Sound
+    {
+        get => _sound;
+        set
+        {
+            _sound = value;
+            Notify();
+        }
+    }
+
+    private bool _sound = true;
+
+    /// <summary>The cameras the range has: the ones playing, or the follow cut's or grid's.</summary>
+    public IReadOnlyList<RecordingCamera> SourceCameras
+    {
+        get
+        {
+            List<RecordingCamera> playing = [.. _browser.Player.Cameras];
+            // A follow cut may name fewer cameras than the incident has, and a playback fewer than its download:
+            // the most of the three is the incident's.
+            List<RecordingCamera> edit = _browser.PlayerView == PlayerView.Cameras
+                ? []
+                : [.. _browser.EditPlayer.Plan?.Sources.Select(x => x.Camera) ?? []];
+            List<RecordingCamera> downloaded = [.. _browser.Editable?.Download.Cameras.Select(x => x.Camera) ?? []];
+            return new[] { playing, edit, downloaded }.MaxBy(l => l.Count)!;
+        }
+    }
+
+    /// <summary>The cameras checked: the source's, unless the user unchecked some.</summary>
+    public HashSet<RecordingCamera> Checked
+    {
+        get
+        {
+            IReadOnlyList<RecordingCamera> source = SourceCameras;
+            return CameraChoice is { } chosen ? [.. chosen.Where(source.Contains)] : [.. source];
+        }
+    }
+
+    /// <summary>The checked cameras in the source's order.</summary>
+    public List<RecordingCamera> CheckedList
+    {
+        get
+        {
+            HashSet<RecordingCamera> set = Checked;
+            return [.. SourceCameras.Where(set.Contains)];
+        }
+    }
+
+    /// <summary>Checks or unchecks one camera.</summary>
+    public void SetCamera(RecordingCamera camera, bool isChecked)
+    {
+        HashSet<RecordingCamera> set = Checked;
+        if (isChecked)
+        {
+            set.Add(camera);
+        }
+        else
+        {
+            set.Remove(camera);
+        }
+        CameraChoice = set;
+    }
+
+    /// <summary>What is open, for the rules (<see cref="ExportPanel"/>).</summary>
+    public ExportContext Context => new(
+        HasRange: ScrubSpan is not null,
+        HasPictures: _browser.Player.Playback is not null && _browser.Player.Cells.Count > 0,
+        Editable: _browser.Editable is not null,
+        CanWriteEdit: Writers?.CanExportEdit == true,
+        SourceCameras: SourceCameras.Count,
+        CheckedCameras: CheckedList.Count);
+
+    /// <summary>The kinds that apply now.</summary>
+    public IReadOnlyList<ExportKind> Kinds => ExportPanel.Kinds(Context);
+
+    /// <summary>The kind shown: the user's choice while it applies, else the first that does.</summary>
+    public ExportKind? Kind => ExportPanel.DefaultKind(Kinds, KindChoice);
+
+    /// <summary>The range to export: the points', else the whole range of the incident (or day) shown.</summary>
+    public (long Start, long End)? Window => PointsWindow ?? (ScrubSpan is { } s ? (s.Lo, s.Hi) : null);
+
+    /// <summary>The range's start as the tab shows it.</summary>
+    public string StartText => Window is { } w ? ExportPanel.TimeText(w.Start) : "";
+
+    /// <summary>The range's end as the tab shows it.</summary>
+    public string EndText => Window is { } w ? ExportPanel.TimeText(w.End) : "";
+
+    private long? TypedTime(string text) =>
+        Window is { } w ? ExportPanel.ParseTime(text, DeviceTime.DayStart(DeviceTime.FloorDiv(w.Start, 1000)) * 1000) : null;
+
+    /// <summary>A start time typed in the tab; false when the text is not a time inside the range.</summary>
+    public bool SetStart(string text)
+    {
+        if (ScrubSpan is not { } s || TypedTime(text) is not long ms || ms < s.Lo || ms > s.Hi)
+        {
+            return false;
+        }
+        RawPoints = Points.SetIn(ms, s.Lo, s.Hi);
+        return Points.InMs == ms;
+    }
+
+    /// <summary>An end time typed in the tab; false when the text is not a time inside the range.</summary>
+    public bool SetEnd(string text)
+    {
+        if (ScrubSpan is not { } s || TypedTime(text) is not long ms || ms < s.Lo || ms > s.Hi)
+        {
+            return false;
+        }
+        RawPoints = Points.SetOut(ms, s.Lo, s.Hi);
+        return Points.OutMs == ms;
+    }
+
+    /// <summary>The size the core's spans add up to for the checked cameras and the stream chosen.</summary>
+    private long? Estimate((long Start, long End) window)
+    {
+        string tier = Quality.Tier();
+        HashSet<RecordingCamera> cameras = Checked;
+        long? total = null;
+        foreach (TimelineLane lane in _browser.Lanes.Where(l => cameras.Contains(l.Camera)))
+        {
+            var spans = lane.Spans.Where(s => s.Tier is null || s.Tier == tier)
+                .Select(s => (s.Start, s.End, Bytes: s.Bytes ?? 0)).ToList();
+            if (ExportPanel.Estimate(spans, DeviceTime.FloorDiv(window.Start, 1000), DeviceTime.FloorDiv(window.End, 1000)) is long bytes)
+            {
+                total = (total ?? 0) + bytes;
+            }
+        }
+        return total;
+    }
+
+    /// <summary>What the tab says is about to be written.</summary>
+    public string Summary =>
+        Kind is { } kind ? ExportPanel.Summary(kind, (Window?.End ?? 0) - (Window?.Start ?? 0), CheckedList.Count, Window is { } w ? Estimate(w) : null) : "";
+
+    /// <summary>Why the Export button would not start anything, or null.</summary>
+    public string? Problem => Kind is { } kind
+        ? ExportPanel.Problem(kind, Window?.Start ?? 0, Window?.End ?? 0, CheckedList.Count, Busy)
+        : "Play an incident or a camera to export from it";
+
+    /// <summary>The Export button: checks the choice, then runs the kind's command.</summary>
+    public async Task StartAsync()
+    {
+        if (Kind is not { } kind || Problem is { } problem)
+        {
+            Say(Problem ?? "Play an incident or a camera to export from it");
+            return;
+        }
+        (long Start, long End) window = Window ?? (0, 0);
+        bool all = CheckedList.Count == SourceCameras.Count;
+        switch (kind)
+        {
+            case ExportKind.TrimCopy or ExportKind.TrimExact:
+                TrimExact = kind == ExportKind.TrimExact;
+                await TrimAsync(all ? null : CheckedList);
+                break;
+            case ExportKind.FollowCut:
+                await ExportEditAsync(null);
+                break;
+            case ExportKind.Grid2:
+                await ExportEditAsync("2up");
+                break;
+            case ExportKind.Grid4:
+                await ExportEditAsync("4up");
+                break;
+            case ExportKind.Download:
+                DownloadRange(new RangeDownloadRequest { StartMs = window.Start, EndMs = window.End, Cameras = Checked });
+                break;
+            case ExportKind.StillCurrent:
+                await SaveStillsAsync(false);
+                break;
+            default:
+                await SaveStillsAsync(true);
+                break;
         }
     }
 
@@ -318,7 +568,23 @@ public sealed class ExportController
     /// </summary>
     public async Task<List<string>?> Destinations(IReadOnlyList<string> suggested, string extension, string message)
     {
-        if (Dialogs is null || suggested.Count == 0)
+        if (suggested.Count == 0)
+        {
+            return null;
+        }
+        if (DirectFolder is { } direct)
+        {
+            var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var chosen = new List<string>();
+            foreach (string s in suggested)
+            {
+                string free = ExportFile.Free(Path.Combine(direct, Path.GetFileName(s)), taken: used);
+                used.Add(Path.GetFileName(free));
+                chosen.Add(free);
+            }
+            return chosen;
+        }
+        if (Dialogs is null)
         {
             return null;
         }
@@ -404,7 +670,7 @@ public sealed class ExportController
     /// </summary>
     public async Task TrimAsync(IReadOnlyList<RecordingCamera>? chosen)
     {
-        if (PointsWindow is not { } window)
+        if ((PointsWindow ?? (ScrubSpan is { } span ? (span.Lo, span.Hi) : null)) is not { } window)
         {
             Say("Set an in point and an out point first (I and O)");
             return;
@@ -425,7 +691,7 @@ public sealed class ExportController
             Say("Play an incident or a camera to trim it");
             return;
         }
-        if (Model.DownloadRange(cameras, window.Start, window.End, null, new ExportOptions(null, ShareSafe)) is not { } queued)
+        if (Model.DownloadRange(cameras, window.Start, window.End, null, new ExportOptions(null, ShareSafe), Quality) is not { } queued)
         {
             return;
         }
@@ -576,32 +842,14 @@ public sealed class ExportController
         }
         string path = paths[0], partial = ExportFile.Partial(path);
         ExportCodec codec = Codec;
-        bool shareSafe = ShareSafe;
+        bool shareSafe = ShareSafe, sound = Sound;
         Run(gridLayout is null ? "Exporting the follow cut" : $"Exporting the {gridLayout} grid", control =>
-            [Commit(writers.ExportEdit(edit.Json, codec, partial, control), partial, path, shareSafe)]);
+            [Commit(writers.ExportEdit(edit.Json, codec, partial, control, sound), partial, path, shareSafe)]);
     }
 
     // ---- range download ----
 
-    /// <summary>Opens the range sheet: the points' span, else the scrubber's, for the cameras playing (else every camera).</summary>
-    public void BeginRangeDownload()
-    {
-        if (ScrubSpan is not { } span)
-        {
-            Say("Play an incident or a camera to choose a range");
-            return;
-        }
-        (long Start, long End) window = PointsWindow ?? (span.Lo, span.Hi);
-        HashSet<RecordingCamera> cameras = [.. _browser.Player.Cameras];
-        if (cameras.Count == 0)
-        {
-            cameras = [.. _browser.Cameras];
-        }
-        RangeRequest = new RangeDownloadRequest { StartMs = window.Start, EndMs = window.End, Cameras = cameras };
-        Notify();
-    }
-
-    /// <summary>Queues the range sheet's download; the Downloads list shows it.</summary>
+    /// <summary>Queues the Export tab's download; the Downloads tab lists it.</summary>
     public void DownloadRange(RangeDownloadRequest request)
     {
         List<RecordingCamera> cameras = [.. _browser.Cameras.Where(request.Cameras.Contains)];
@@ -610,16 +858,9 @@ public sealed class ExportController
             Say("Choose at least one camera");
             return;
         }
-        string? dest = null;
-        if (request.Folder is { } folder)
+        if (Model.DownloadRange(cameras, request.StartMs, request.EndMs, request.Name, new ExportOptions(DirectFolder, ShareSafe), Quality) is not null)
         {
-            dest = folder;
-            Remember(folder);
-        }
-        if (Model.DownloadRange(cameras, request.StartMs, request.EndMs, request.Name, new ExportOptions(dest, ShareSafe)) is not null)
-        {
-            RangeRequest = null;
-            _browser.Center = RecordingsCenter.Downloads;
+            Say("Download queued; its progress is in Downloads");
             Notify();
         }
     }
@@ -642,7 +883,8 @@ public sealed class ExportController
             return;
         }
         int shown = PlayerGrid.AudibleIndex(player.Mode, player.Cells.Count) ?? 0;
-        List<PlayerCell> cells = eachCamera ? [.. player.Cells] : [player.Cells[Math.Min(shown, player.Cells.Count - 1)]];
+        HashSet<RecordingCamera> checkedCameras = Checked;
+        List<PlayerCell> cells = eachCamera ? [.. player.Cells.Where(c => checkedCameras.Contains(c.Camera))] : [player.Cells[Math.Min(shown, player.Cells.Count - 1)]];
         Planned<StillPlan> planned = Model.PlanStills(ExportRequest.Stills(playback, cells.Select(c => c.Tile), StillFormat, Options(useFolder: false)));
         if (planned.Plan is not { } plan)
         {

@@ -17,6 +17,13 @@ public enum RecordingsCenter
     Downloads,
 }
 
+/// <summary>The right pane's tabs.</summary>
+public enum InspectorTab
+{
+    Incident,
+    Export,
+}
+
 /// <summary>The scrubber's span: the selected incident (with its margins) or the whole day.</summary>
 public enum ScrubScope
 {
@@ -113,6 +120,16 @@ public sealed class RecordingsBrowser
 
     /// <summary>The inspector the user wants.</summary>
     public bool ShowInspector { get; set; } = true;
+
+    /// <summary>The right pane's tab: the incident's details or the Export tab (kept across incidents).</summary>
+    public InspectorTab InspectorTab { get; set; } = InspectorTab.Incident;
+
+    /// <summary>Ctrl+E: shows the right pane on its Export tab.</summary>
+    public void OpenExportTab()
+    {
+        InspectorTab = InspectorTab.Export;
+        ShowInspector = true;
+    }
 
     /// <summary>The part of the day the timeline lanes show (zoom 1: the whole day in the lanes' width).</summary>
     public TimelineViewport Timeline
