@@ -47,7 +47,12 @@ has() { case " $parts " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 dotnet_image="${NVRVIEW_DOTNET_IMAGE:-mcr.microsoft.com/dotnet/sdk:10.0.301-noble}"
 mem="${NVRVIEW_DOCKER_MEMORY:-3g}"
 
+# Resolve symlinks: on macOS TMPDIR is under /var, a symlink to /private/var.
+# Docker Desktop does not share the /var/folders spelling, so a mount of it
+# becomes a directory in the Docker VM's memory that this script's cleanup
+# never sees, and repeated runs fill the VM ("no space left on device").
 out=$(mktemp -d "${TMPDIR:-/tmp}/nvrview-csharp.XXXXXX")
+out=$(cd "$out" && pwd -P)
 cleanup() { docker_slot_release; rm -rf "$out"; }
 trap cleanup EXIT INT TERM
 
