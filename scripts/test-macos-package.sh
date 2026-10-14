@@ -19,7 +19,7 @@ r="$work/repo"
 bin="$work/bin"
 log="$work/calls.log"
 mkdir -p "$r/scripts" "$r/apps/macos/Packaging" "$r/crates/viewer-ffi/include" "$r/fixtures/synthetic" "$bin"
-for f in package-macos.sh build-xcframework.sh macos-real-selftest.sh update-defaults.py release-notes-bundle.py detector-model.json; do
+for f in package-macos.sh build-xcframework.sh macos-real-selftest.sh tested-builds-lib.sh update-defaults.py release-notes-bundle.py detector-model.json; do
   cp "$src/scripts/$f" "$r/scripts/"
 done
 cp "$src"/apps/macos/Packaging/* "$r/apps/macos/Packaging/"
@@ -162,6 +162,46 @@ echo "// more" >>"$r/crates/viewer-ffi/include/nvrview.h"
 run pk7 bash scripts/package-macos.sh
 [ "$(count '^swift build')" -ge 2 ] && pass "a commit that changes VERSION and another file builds" || fail "a commit that changes VERSION and another file builds"
 run st5 bash scripts/macos-real-selftest.sh --bundle
+
+# The tested bundle is kept outside build/, so removing the worktree's build
+# folder (or the worktree) does not lose it: a release packages the same
+# binaries the self-test ran, not a fresh compile.
+tree3=$(cd "$r" && git rev-parse 'HEAD^{tree}')
+[ -x "$r/.git/nvrview-builds/macos/$tree3/NVRView.app/Contents/MacOS/NVRView" ] && [ -f "$r/.git/nvrview-builds/macos/$tree3/NVRView.app.tested" ] && pass "the self-test keeps the tested bundle in the common git directory" || fail "the self-test keeps the tested bundle in the common git directory"
+rm -rf "$r/build"
+: >"$log"
+run pk8 bash scripts/package-macos.sh && pass "packaging after the build folder was removed works" || { cat "$work/pk8.out"; fail "packaging after the build folder was removed works"; }
+[ "$(count '^swift build')" = 0 ] && [ "$(count 'cargo build')" = 0 ] && [ "$(count xcodebuild)" = 0 ] && pass "...without building anything" || { cat "$log"; fail "...without building anything"; }
+grep -q "restoring the tested app bundle kept for tree $tree3" "$work/pk8.out" && pass "...restoring the kept tested bundle" || fail "...restoring the kept tested bundle"
+[ -f "$r/build/NVRView-0.3.0-macos-arm64.zip" ] && pass "...into the package" || fail "...into the package"
+# A VERSION-only bump after it, with no build folder either.
+echo 0.4.0 >"$r/VERSION"
+(cd "$r" && git add -A && git commit -q -m "bump the version again")
+rm -rf "$r/build"
+: >"$log"
+run pk9 bash scripts/package-macos.sh && pass "a VERSION-only commit with no build folder packages" || { cat "$work/pk9.out"; fail "a VERSION-only commit with no build folder packages"; }
+[ "$(count '^swift build')" = 0 ] && grep -q "kept for tree $tree3" "$work/pk9.out" && grep -q '<string>0.4.0</string>' "$r/build/NVRView.app/Contents/Info.plist" && pass "...from the kept bundle of the tested tree, with the new version" || fail "...from the kept bundle of the tested tree, with the new version"
+# Nothing kept for a tree that differs by more than VERSION: it builds.
+echo "// unrelated" >>"$r/crates/viewer-ffi/include/nvrview.h"
+(cd "$r" && git add -A && git commit -q -m "change the header again")
+rm -rf "$r/build"
+: >"$log"
+run pk10 bash scripts/package-macos.sh
+[ "$(count '^swift build')" -ge 2 ] && grep -q 'no tested app bundle kept' "$work/pk10.out" && pass "a tree with no kept bundle is built" || fail "a tree with no kept bundle is built"
+
+# The store keeps the newest 3 trees and drops the rest.
+store="$work/store"
+(
+  . "$src/scripts/tested-builds-lib.sh"
+  mkdir -p "$work/item"; echo x >"$work/item/f"
+  for t in 1 2 3 4 5; do
+    h=$(printf '%040d' "$t")
+    tb_save "$store" "$h" "$work/item"
+    touch -t "20260101000$t" "$store/$h"
+  done
+  echo "$(tb_list "$store" | wc -l | tr -d ' ') $(tb_list "$store" | head -n 1)" >"$work/store.out"
+)
+[ "$(cut -d' ' -f1 "$work/store.out")" = 3 ] && [ "$(cut -d' ' -f2 "$work/store.out")" = "$(printf '%040d' 5)" ] && [ ! -d "$store/$(printf '%040d' 1)" ] && [ ! -d "$store/$(printf '%040d' 2)" ] && pass "the kept builds are bounded to the newest 3 trees" || { cat "$work/store.out"; fail "the kept builds are bounded to the newest 3 trees"; }
 
 echo "// edit" >>"$r/VERSION.note"
 : >"$log"

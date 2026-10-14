@@ -26,6 +26,16 @@
 # A finished worker's folder, its target\ build output included, is deleted with
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/windows-check.sh --clean <name>
+#   scripts/windows-check.sh --remove-worker <name>     # on every host of NVRVIEW_WINDOWS_HOSTS
+#
+# Both mirror an empty folder over the worker with robocopy before deleting it:
+# cargo and dotnet build paths are longer than `rmdir /s` can remove ("The
+# directory is not empty"), and robocopy can. --remove-worker (what the lead
+# runs after a merge) refuses the kept workers merge, fullcheck and main, and
+# reports each host it could not reach or could not clean, with a nonzero exit.
+# The same removal replaces src\ on every run. Tested release builds are not
+# in the worker: windows-app.sh keeps the last 3 trees in
+# %USERPROFILE%\nvrview\tested, which survives the removal of workers.
 #
 # Each run prints the Windows computer's free disk space first and warns
 # under 10 GB, then the time of every phase and step, and ends with a table
@@ -58,9 +68,17 @@ fi
 defaults_args=""
 release_notes=""
 notes_history=""
+remove_all=0
 if [ "${1:-}" = "--clean" ]; then
   clean=1
   NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --clean <worker name>}"
+elif [ "${1:-}" = "--remove-worker" ]; then
+  clean=1
+  remove_all=1
+  NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --remove-worker <worker name>}"
+  case "$NVRVIEW_WINDOWS_WORKER" in
+    merge | fullcheck | main) echo "refusing to remove the kept worker $NVRVIEW_WINDOWS_WORKER (merge, fullcheck and main stay)" >&2; exit 2 ;;
+  esac
 elif [ "${1:-}" = "--package" ]; then
   # Builds the release app on the Windows computer instead of running the
   # checks, and fetches NvrView-<version>-win-x64.zip into the directory.
@@ -102,7 +120,7 @@ $2"
       ${notes_history:+--history "$notes_history"} --out /dev/null >/dev/null
   fi
 elif [ $# -gt 0 ]; then
-  echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
+  echo "usage: $0 [--clean <worker name> | --remove-worker <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
 # A VERSION-only commit after a checked tree (a version bump) needs nothing
@@ -149,6 +167,44 @@ worker="${NVRVIEW_WINDOWS_WORKER:-main}"
 case "$worker" in
   *[!A-Za-z0-9_-]* | '') echo "NVRVIEW_WINDOWS_WORKER: letters, digits, - and _ only" >&2; exit 2 ;;
 esac
+ssh_opts="-o BatchMode=yes -o ConnectTimeout=10"
+# Windows commands that remove a folder with cargo's and dotnet's long paths.
+# `rmdir /s` stops at them ("The directory is not empty"); robocopy /MIR from an
+# empty folder removes them. /XJ keeps it out of junctions (src\target points
+# at the kept build output), and robocopy's exit codes 1-7 are not failures, so
+# its steps are joined with & and the outcome is checked at the end.
+# worker_remove_cmd NAME: the whole worker; worker_src_cmd: only its src\, run
+# inside the worker's folder.
+worker_remove_cmd() {
+  printf '%s' "cd /d %USERPROFILE%\\nvrview\\worker && ((if exist $1\\src\\target rmdir $1\\src\\target) & mkdir _rm_$1 & robocopy _rm_$1 $1 /MIR /XJ /NFL /NDL /NJH /NJS >nul & rmdir /s /q $1 & rmdir _rm_$1 & (if exist $1 (echo NOT-DELETED) else echo deleted))"
+}
+worker_src_cmd() {
+  printf '%s' "(if exist src\\target rmdir src\\target) && (if exist src (mkdir _rm_src & robocopy _rm_src src /MIR /XJ /NFL /NDL /NJH /NJS >nul & rmdir /s /q src & rmdir _rm_src))"
+}
+
+# --remove-worker: every host of NVRVIEW_WINDOWS_HOSTS, no lock (only the
+# worker's folder is touched). An unreachable host or a folder that stays is
+# reported and makes the exit status nonzero; the other hosts are still done.
+if [ "$remove_all" = 1 ]; then
+  rc=0
+  for h in $(windows_hosts); do
+    # shellcheck disable=SC2086
+    if ! ssh $ssh_opts "$h" "echo connected" >/dev/null 2>&1; then
+      echo "UNREACHABLE: $h: worker $worker was NOT removed there" >&2
+      rc=1
+      continue
+    fi
+    # shellcheck disable=SC2086,SC2029
+    out=$(ssh $ssh_opts "$h" "$(worker_remove_cmd "$worker")" 2>&1 | tr -d '\r' || true)
+    if printf '%s\n' "$out" | grep -qx deleted; then
+      echo "$h: removed worker $worker"
+    else
+      echo "FAILED: $h: worker $worker is still there: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')" >&2
+      rc=1
+    fi
+  done
+  exit "$rc"
+fi
 # The lock (scripts/windows-lock.sh): taken here unless the caller holds it,
 # at priority $NVRVIEW_WINDOWS_PRIORITY (agent by default; merges and releases
 # use merge). It picks the first free host of NVRVIEW_WINDOWS_HOSTS. --clean
@@ -160,7 +216,6 @@ else
   windows_lock
   host="${NVRVIEW_WINDOWS_HOST:-$(windows_hosts | head -n 1)}"
 fi
-ssh_opts="-o BatchMode=yes -o ConnectTimeout=10"
 gitbash='"C:\Program Files\Git\bin\bash.exe"'
 
 # shellcheck disable=SC2086 # ssh_opts is a list of options
@@ -178,7 +233,12 @@ if [ "$clean" = 1 ]; then
   # The junction goes first, with a plain rmdir, so deleting src never
   # reaches into target through it; then the folder with everything in it.
   # shellcheck disable=SC2086,SC2029
-  ssh $ssh_opts "$host" "cd /d %USERPROFILE% && (if exist nvrview\\worker\\$worker\\src\\target rmdir nvrview\\worker\\$worker\\src\\target) && (if exist nvrview\\worker\\$worker rmdir /s /q nvrview\\worker\\$worker) && echo deleted"
+  out=$(ssh $ssh_opts "$host" "$(worker_remove_cmd "$worker")" 2>&1 | tr -d '\r' || true)
+  if ! printf '%s\n' "$out" | grep -qx deleted; then
+    echo "FAILED: worker $worker is still on $host: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  echo deleted
   echo "free disk space on $host: $(free_gb || echo unknown) GB"
   exit 0
 fi
@@ -209,7 +269,7 @@ echo "sending the working tree to $1 (worker $worker)"
 git ls-files -z --cached --others --exclude-standard -- . \
   ':(exclude,glob)**/target/**' ':(exclude).claude/worktrees' ':(exclude).worktrees' |
   COPYFILE_DISABLE=1 tar --no-mac-metadata --null -T - -cf - |
-  ssh $ssh_opts "$1" "cd /d %USERPROFILE% && (if not exist nvrview\\worker\\$worker mkdir nvrview\\worker\\$worker) && cd nvrview\\worker\\$worker && (if not exist target mkdir target) && (if exist src\target rmdir src\target) && (if exist src rmdir /s /q src) && mkdir src && C:\Windows\System32\tar.exe -xf - -C src && mklink /J src\\target target >nul"
+  ssh $ssh_opts "$1" "cd /d %USERPROFILE% && (if not exist nvrview\\worker\\$worker mkdir nvrview\\worker\\$worker) && cd nvrview\\worker\\$worker && (if not exist target mkdir target) && $(worker_src_cmd) && mkdir src && C:\Windows\System32\tar.exe -xf - -C src && mklink /J src\\target target >nul"
 }
 sync_tree "$host"
 

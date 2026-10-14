@@ -135,6 +135,7 @@ mark_tested() {
   if [ "$(cat "$out/publish.pending")" = "$(publish_fingerprint)" ]; then
     mv "$out/publish.pending" "$out/publish.tested"
     echo "publish output recorded as tested for tree $NVRVIEW_TREE"
+    keep_tested_publish
   else
     rm -f "$out/publish.pending"
     echo "mark-tested: the publish output changed during the tests; it will be rebuilt for a package"
@@ -152,6 +153,45 @@ tested_publish_reusable() {
   tested=$(sed -n 's/^tree=//p' "$out/publish.tested")
   if [ "$tested" != "$NVRVIEW_TREE" ] && [ "$tested" != "${NVRVIEW_VERSION_ONLY_OF:-}" ]; then return 1; fi
   [ "$(cat "$out/publish.tested")" = "$(publish_fingerprint "$tested")" ]
+}
+
+# Where tested publish outputs are kept: outside every worker folder, so
+# deleting a finished worker (windows-check.sh --clean, --remove-worker) does
+# not take the build a release would package. The newest 3 trees are kept
+# (scripts/tested-builds-lib.sh); NVRVIEW_TESTED_STORE overrides the place.
+tested_store() { echo "${NVRVIEW_TESTED_STORE:-$HOME/nvrview/tested}"; }
+
+# Copies the publish output that just passed the tests, with its fingerprint,
+# to the store.
+keep_tested_publish() {
+  . scripts/tested-builds-lib.sh
+  if tb_save "$(tested_store)" "$NVRVIEW_TREE" "$out/publish" "$out/publish.tested"; then
+    echo "publish output kept for tree $NVRVIEW_TREE in $(tested_store)"
+  else
+    echo "mark-tested: could not keep the publish output; a package will rebuild it if this worker is removed"
+  fi
+}
+
+# When the worker has no usable tested publish output (a new worker, after the
+# old one was deleted), restores the kept one for the tree being packaged or
+# its VERSION-only ancestor. The fingerprint is checked afterwards by
+# tested_publish_reusable, as for a local one.
+restore_tested_publish() {
+  local cand store
+  tree_known || return 1
+  . scripts/tested-builds-lib.sh
+  store=$(tested_store)
+  for cand in "$NVRVIEW_TREE" "${NVRVIEW_VERSION_ONLY_OF:-}"; do
+    [ -n "$cand" ] && [ -f "$store/$cand/publish.tested" ] && [ -d "$store/$cand/publish" ] || continue
+    echo "restoring the tested publish output kept for tree $cand"
+    rm -rf "$out/publish" "$out/publish.tested" "$out/publish.pending"
+    cp -Rp "$store/$cand/publish" "$out/publish"
+    cp -p "$store/$cand/publish.tested" "$out/publish.tested"
+    if tested_publish_reusable; then tb_touch "$store" "$cand"; return 0; fi
+    echo "the kept publish output does not match its fingerprint; ignoring it"
+    rm -rf "$out/publish" "$out/publish.tested"
+  done
+  return 1
 }
 
 # Runs a .cmd file as a one-time scheduled task in the logged-on user's
@@ -251,7 +291,7 @@ package() {
   version="$(tr -d '[:space:]' <VERSION)"
   NVRVIEW_APP_PUBLISHED=1
   exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"
-  if tested_publish_reusable; then
+  if tested_publish_reusable || restore_tested_publish; then
     echo "reusing the publish output that passed the tests for tree $NVRVIEW_TREE or its version-only ancestor ${NVRVIEW_VERSION_ONLY_OF:-none} (hashes of all files match); only version.txt is written"
   else
     echo "no matching tested publish output; building it"

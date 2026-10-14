@@ -21,7 +21,9 @@
 # (the tree hash and a hash of the bundled files); a later
 # scripts/package-macos.sh for the same tree zips this very bundle instead of
 # building another one, and a second run for the same tree and files skips the
-# test. The core framework is built once per tree (scripts/build-xcframework.sh).
+# test. The tested bundle is also copied to the kept builds in the common git
+# directory (nvrview-builds/macos/<tree>, the newest 3 trees), which outlives
+# the worktree it was built in. The core framework is built once per tree (scripts/build-xcframework.sh).
 #
 # scripts/check.sh runs it in full runs (NVRVIEW_FULL_CHECK=1, the release
 # checks, and the periodic full run); it builds the release core, so ordinary
@@ -40,6 +42,19 @@ case "${1:-}" in
   '') ;;
   *) echo "usage: $0 [--bundle]" >&2; exit 2 ;;
 esac
+
+# Keeps the tested bundle where a worktree's removal cannot take it away, so a
+# release packages these very binaries (scripts/package-macos.sh restores it).
+keep_tested() {
+  . scripts/tested-builds-lib.sh
+  store="$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-builds/macos"
+  if [ -f "$store/$tree/NVRView.app.tested" ] && cmp -s build/NVRView.app.tested "$store/$tree/NVRView.app.tested"; then
+    tb_touch "$store" "$tree"
+  else
+    tb_save "$store" "$tree" build/NVRView.app build/NVRView.app.tested
+    echo "selftest: the tested bundle is kept for tree $tree (the newest $tb_keep_default trees are stored)"
+  fi
+}
 
 work=$(mktemp -d)
 mock_pid=""
@@ -71,6 +86,7 @@ if [ "$bundle" = 1 ]; then
   if [ -n "$tree" ] && [ "$(sed -n 's/^tree=//p' build/NVRView.app.tested 2>/dev/null)" = "$tree" ] &&
     [ "$(sed -n 's/^files=//p' build/NVRView.app.tested 2>/dev/null)" = "$files" ]; then
     echo "selftest: the shipped app bundle already passed for this tree and these bundled files; not run again"
+  keep_tested
     exit 0
   fi
   rm -f build/NVRView.app.tested
@@ -114,4 +130,5 @@ NVRVIEW_MOCK_SPEEDUP=16 NVRVIEW_PASSWORD=example-password "$exe" \
   --keychain-service nvrview-selftest-unused --selftest 60
 if [ "$bundle" = 1 ] && [ -n "$tree" ]; then
   printf 'tree=%s\nfiles=%s\n' "$tree" "$files" >build/NVRView.app.tested
+  keep_tested
 fi
