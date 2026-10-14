@@ -126,6 +126,31 @@ sh scripts/full-check-bg.sh start >"$work/start5.out" 2>&1
 wait_for nonempty "$FAKE_OUT" && pass "a tree whose Windows stamp used cached suites is checked" || fail "a tree whose Windows stamp used cached suites is checked"
 wait_for grep -q '^pass$' "$(stamp_dir)/fullcheck/result" || true
 
+# --- a VERSION-only commit after a fully checked tree runs nothing -------------------
+# The full stamps are carried to the new tree (scripts/stamps-lib.sh) and no
+# background check starts. A commit that changes VERSION and another file is
+# checked as usual.
+wait_for grep -q '^pass$' "$(stamp_dir)/fullcheck/result" || true
+rm -f "$FAKE_OUT"
+commit_file a.txt six
+scripts/checked.sh --record mac 1 fake >/dev/null
+scripts/checked.sh --record windows 1 fake >/dev/null
+t_checked=$(git rev-parse 'HEAD^{tree}')
+commit_file VERSION 0.2.0
+sh scripts/full-check-bg.sh start >"$work/start6.out" 2>&1
+grep -q 'already has full Mac and Windows stamps' "$work/start6.out" && pass "a VERSION-only commit after a full check starts nothing" || { cat "$work/start6.out"; fail "a VERSION-only commit after a full check starts nothing"; }
+check "...and no check ran" test ! -e "$FAKE_OUT"
+grep -q "carried the check stamp of tree $t_checked" "$work/start6.out" && pass "...and the output says where the pass came from" || fail "...and the output says where the pass came from"
+check "...the new tree has full stamps that name their source" grep -q "^carried_from=$t_checked$" "$(stamp_dir)/$(git rev-parse 'HEAD^{tree}').windows"
+sh scripts/checked.sh --mac --windows >/dev/null 2>&1 && pass "scripts/checked.sh accepts the new tree" || fail "scripts/checked.sh accepts the new tree"
+echo 0.3.0 >VERSION
+echo seven >a.txt
+git add -A
+git commit -q -m "version and a file"
+sh scripts/full-check-bg.sh start >"$work/start7.out" 2>&1
+wait_for nonempty "$FAKE_OUT" && pass "VERSION plus another file is checked" || fail "VERSION plus another file is checked"
+wait_for grep -q '^pass$' "$(stamp_dir)/fullcheck/result" || true
+
 # --- the background priority ---------------------------------------------------------
 lock="$here/windows-lock.sh"
 export NVRVIEW_WINDOWS_LOCK="$work/l2/windows.lock" NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"
