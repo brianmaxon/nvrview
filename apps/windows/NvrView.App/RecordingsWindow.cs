@@ -445,6 +445,8 @@ internal sealed partial class RecordingsWindow
         RefreshPlayer();
         RefreshLanes();
         RefreshInspector();
+        RefreshInspectorTabs();
+        RefreshExportTab();
         RefreshDownloads();
         RefreshNotice();
         ApplyPanes();

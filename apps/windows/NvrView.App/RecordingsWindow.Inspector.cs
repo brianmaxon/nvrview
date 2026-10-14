@@ -26,12 +26,7 @@ internal sealed partial class RecordingsWindow
 
     private void BuildInspector()
     {
-        _inspectorHost.Child = new ScrollViewer
-        {
-            Content = _inspectorBody,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-        };
+        BuildInspectorPane();
     }
 
     private string InspectorSignature(Incident? i, int selected) => i is null

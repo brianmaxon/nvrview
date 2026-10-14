@@ -18,6 +18,7 @@ internal static class CaptureSettingsPage
     {
         ViewSettings settings = viewer.Settings;
         var page = new StackPanel { Spacing = 12 };
+        page.Children.Add(RecordingsWindowSection(settings));
         page.Children.Add(new TextBlock { Text = "Recordings", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
 
         // Save recordings to: Choose… and Reset.
@@ -172,6 +173,34 @@ internal static class CaptureSettingsPage
         section.Children.Add(new TextBlock
         {
             Text = "A call is recorded from the moment it opens: the doorbell's video and three sound tracks, the conversation, the visitor, and you. The call's Record button (Ctrl+Shift+R) starts or stops a recording at any time, with this on or off. Recordings go beside the transcripts, with the same name (the newest 100, at most 10 GB in all, are kept).",
+            TextWrapping = TextWrapping.Wrap, MaxWidth = 560, Opacity = 0.7,
+        });
+        return section;
+    }
+
+    /// <summary>"Export from" (docs/UX.md "Recordings", "Export tab"): the stream the Recordings window's Export tab reads by default.</summary>
+    private static StackPanel RecordingsWindowSection(ViewSettings settings)
+    {
+        var section = new StackPanel { Spacing = 6 };
+        section.Children.Add(new TextBlock { Text = "Recordings window", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        var picker = new ComboBox { Header = "Export from", MinWidth = 220 };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(picker, "Export from");
+        foreach (ExportQuality q in Enum.GetValues<ExportQuality>())
+        {
+            picker.Items.Add(new ComboBoxItem { Content = q.Title(), Tag = q });
+        }
+        picker.SelectedIndex = settings.ExportQuality == ExportQuality.Sub ? 1 : 0;
+        picker.SelectionChanged += (_, _) =>
+        {
+            if (picker.SelectedItem is ComboBoxItem { Tag: ExportQuality q })
+            {
+                settings.ExportQuality = q;
+            }
+        };
+        section.Children.Add(picker);
+        section.Children.Add(new TextBlock
+        {
+            Text = "The Recordings window's Export tab downloads the main stream (full quality, larger files) or the sub-stream (smaller files, lower quality) of each camera. The tab can pick the other one for a single export.",
             TextWrapping = TextWrapping.Wrap, MaxWidth = 560, Opacity = 0.7,
         });
         return section;

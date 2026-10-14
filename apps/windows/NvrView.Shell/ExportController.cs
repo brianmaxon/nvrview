@@ -376,8 +376,10 @@ public sealed class ExportController
 
     private bool _sound = true;
 
-    /// <summary>The cameras the range has: the ones playing.</summary>
-    public IReadOnlyList<RecordingCamera> SourceCameras => [.. _browser.Player.Cameras];
+    /// <summary>The cameras the range has: the ones playing, or the follow cut's or grid's.</summary>
+    public IReadOnlyList<RecordingCamera> SourceCameras => _browser.PlayerView == PlayerView.Cameras
+        ? [.. _browser.Player.Cameras]
+        : [.. _browser.EditPlayer.Plan?.Sources.Select(x => x.Camera) ?? []];
 
     /// <summary>The cameras checked: the source's, unless the user unchecked some.</summary>
     public HashSet<RecordingCamera> Checked

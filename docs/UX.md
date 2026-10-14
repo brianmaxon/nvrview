@@ -1410,9 +1410,8 @@ grids on both (M3 and W3); exports on both (M4 and W4).
   could not be opened". The same drawing serves exports (W4):
   `EditFiles.Render` draws any time of the edit into a `GridRenderer`'s
   offscreen frame of any size.
-- **Export** (macOS, M4): the **Export** menu left of the view menu, and
-  the keys **I** and **O** on the player, which set the **in** and **out
-  points** at the playhead (a point that would cross the other clears it;
+- **Export** (macOS, M4; the Export tab on both apps): the keys **I** and
+  **O** on the player, which set the **in** and **out points** at the playhead (a point that would cross the other clears it;
   Clear In and Out removes both). The points show on the scrubber (a shaded
   span with a flag at each end, which can be dragged; a press elsewhere
   seeks as before) and over the timeline lanes, in the cameras view and in
@@ -1420,38 +1419,38 @@ grids on both (M3 and W3); exports on both (M4 and W4).
   outside a newly shown range is dropped). Every export asks where to save
   (a save panel for one file, a folder panel for several; names come from
   the core's plan, with " (2)" when taken) and remembers the folder with a
-  security-scoped bookmark. An export runs off the main thread with a
-  progress strip above the transport and a **Cancel**; a canceled or failed
+  security-scoped bookmark, unless the Export tab has a folder chosen (then
+  exports go straight into it). An export runs off the main thread with a
+  progress strip above the transport (the Export tab shows it in place when it
+  is open) and a **Cancel**; a canceled or failed
   export leaves no file (it is written under a hidden name and moved into
   place when whole). One export runs at a time.
-  - **Trim to In and Out** (all cameras or one): from the incident's
+  - **Trim** (the checked cameras): from the incident's
     downloaded files, or, when it is not downloaded, from a range
     download of just that span, made first. **Keyframe copy** (default):
     the compressed samples are copied, instant and lossless, starting at the
-    keyframe at or before the in point. **Exact Trim** re-encodes the whole
+    keyframe at or before the in point. **Trim (Exact)** re-encodes the whole
     output (VideoToolbox, H.264 or HEVC like the source) so it starts at the
     picture asked for; re-encoding only the first group of pictures would
     be quicker for a long clip, and the whole clip is simpler, so a trim is
     meant to be short. Sound is copied (AAC) or converted to AAC.
-  - **Export Follow Cut / 2-Up / 4-Up** writes the edit of the downloaded
+  - **Follow Cut / 2-Up / 4-Up** writes the edit of the downloaded
     incident, cut to the points when set, as an MP4 (H.264 or HEVC, chosen in
-    the menu) at 30 frames a second: each frame is the live view's Metal
+    the tab; the sound can be turned off there) at 30 frames a second: each frame is the live view's Metal
     drawing of the decoded files (`EditSession.render`); the size is the
     grid's canvas, or the largest source of the follow cut, scaled down to fit
     1920 by 1080. Sound follows the live rules: the shown camera's in a
     follow cut, the chosen cell's (the first) in a grid while it has video.
     Names are not burned into the picture.
-  - **Download Range** opens a sheet with the points' span (else the
-    scrubber's), the cameras (the playing ones checked), an optional name,
-    and optionally another folder than the downloads folder. It queues a
-    range download (`nv_download_range`); the Downloads list shows it as
-    "Range" with its times (the `download` event's `range`).
-  - **Save Picture** saves the current picture (a camera view's shown camera,
-    or the follow cut or grid as drawn at the playhead), **Save a Picture of
-    Each Camera** one per camera (what each playing tile shows, or each
-    camera's picture from its file at the playhead); PNG or JPEG as in Save
-    Picture of live view (Settings).
-  - **Share-Safe** (a switch, kept between launches): names are "Camera A",
+  - **Download Only** queues a range download of the checked cameras for the
+    points' span (else the scrubber's; `nv_download_range`); the Downloads
+    list shows it as "Range" with its times (the `download` event's `range`).
+  - **Current Picture** saves the current picture (a camera view's shown
+    camera, or the follow cut or grid as drawn at the playhead), **Picture of
+    Each Camera** one per checked camera (what each playing tile shows, or
+    each camera's picture from its file at the playhead); PNG or JPEG as in
+    Save Picture of live view (Settings).
+  - **Share-safe** (a switch, kept between launches): names are "Camera A",
     "Camera B", ..., the user's incident name and `incident.json` are left
     out, and written MP4 files carry no creation time, only the generic
     handler names `VideoHandler` and `SoundHandler`, and no user-data or
@@ -1459,11 +1458,8 @@ grids on both (M3 and W3); exports on both (M4 and W4).
     app adds no metadata of its own to pictures either. The `.parts` job
     state of a share-safe download still holds device keys until it is
     forgotten (FFI-RECORDINGS.md section 7a (d)).
-  - **On Windows** (W4) the same export is the **Export** button beside the
-    transport (a menu: Set In Point, Set Out Point, Clear In and Out, Trim to
-    In and Out, Trim One Camera, Exact Trim, Download Range, Save Picture,
-    Save a Picture of Each Camera, Share-Safe), with **I** and **O** (not
-    while typing). The in and out points show on the scrubber as a shaded
+  - **On Windows** (W4) the same export is the Export tab below, with **I**
+    and **O** (not while typing). The in and out points show on the scrubber as a shaded
     span with an I flag and an O flag (draggable; a press elsewhere seeks)
     and as a band over the lanes. Every export asks with the Windows save
     picker (one file) or folder picker (several; " (2)" when a name is
@@ -1477,13 +1473,13 @@ grids on both (M3 and W3); exports on both (M4 and W4).
     decodes from the keyframe and encodes the output again as H.264, and
     both carry the sound as it is (AAC). Choices where the docs were silent:
     a trim that the core says cannot be a copy is re-encoded even when Exact
-    Trim is off; **Save Picture** is the shown (or first) playback camera's
+    Trim is off; **Current Picture** is the shown (or first) playback camera's
     current picture drawn with the renderer of Save Picture, and a picture of
     each camera comes from its tile the same way (a downloaded file's picture
     at a time is decoded with Media Foundation, for the follow cut and grid
     views). Share-safe zeroes the creation times, renames the handlers to
     `VideoHandler` and `SoundHandler`, and turns user-data and metadata boxes
-    into free space with their contents cleared. **Export Follow Cut / 2-Up /
+    into free space with their contents cleared. **Follow Cut / 2-Up /
     4-Up** draws 30 frames a second with W3's offscreen renderer
     (`EditFrameRenderer`, over a second set of the plan's files, so the
     player's pictures do not move) into the size macOS uses, and writes them
@@ -1491,6 +1487,47 @@ grids on both (M3 and W3); exports on both (M4 and W4).
     player's rules give (`AudioPiece.Of`), copied from the files as AAC; a
     file whose sound has another format than the first piece's is left
     silent rather than re-encoded.
+  - **The Export tab** (both apps). The Recordings window's right pane has
+    two tabs, **Incident** and **Export**; the choice is kept when another
+    incident is selected, and **Cmd+E** (Windows: **Ctrl+E**) shows the pane
+    on the Export tab. There is no Export menu. The tab, top to bottom:
+    1. **What:** the playing incident (or "The range playing") with editable
+       **Start** and **End** times (`HH:MM:SS`, or with milliseconds; Return
+       or leaving the box sets the point, and text that is not a time inside
+       the range goes back), **Whole Range** to clear the points, and a live
+       line: the cameras, the duration, and the estimated size when the
+       core's spans say bytes ("2 cameras, 1:05, about 25 MB"). With no
+       points the range is the incident's (with its margins) or the day's.
+       **I** and **O**, and dragging the scrubber's flags, update the boxes
+       as they happen.
+    2. **Cameras:** a checklist, all of the incident's cameras checked at
+       first (shown for trims, downloads, and a picture of each camera).
+    3. **Kind:** one of **Trim (Keyframe Copy)**, **Trim (Exact)**, **Follow
+       Cut**, **2-Up**, **4-Up** (one video with sound), **Download Only**
+       (the device's files as they are), **Current Picture**, **Picture of
+       Each Camera**. A kind that does not apply is not listed: the follow
+       cut and grids need the incident downloaded (and, for grids, two
+       cameras), a picture needs a playing camera. The choice is kept while
+       it applies; otherwise the first kind is shown.
+    4. **Quality:** **Main Stream** or **Sub-stream**, sent as the `tier` of
+       the range download (a download only, and a trim of an incident that is
+       not downloaded, which downloads its range first). Until chosen it is
+       **Settings > Capture > Recordings window > Export from** (Main stream
+       unless changed).
+    5. **Options:** **Share-safe**; **Sound** (and the H.264 or HEVC choice)
+       for the follow cut and grids; the destination: the folder chosen with
+       **Choose…** (exports go straight into it, remembered between launches)
+       or **Ask Each Time** (the save panel or picker, as before).
+    6. **The Export button** (named for the kind: Trim, Export, Download,
+       Save Picture, Save Pictures). Below it the reason it would not start
+       ("Choose at least one camera", "Set an in point and an out point
+       first (I and O)", "Wait for the export in progress, or cancel it"); a
+       running export shows its progress with **Cancel** in the tab, and a
+       finished one what was written with **Show in Finder** (Windows: Show
+       in Explorer). **Downloads…** opens the Downloads tab for the history.
+    The decisions (which kinds apply, the default, the summary, the
+    problems, the times) are one rule type on both apps (`ExportPanelRules`,
+    `ExportPanel`) with the same vectors, `fixtures/synthetic/export-panel.json`.
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the

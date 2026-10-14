@@ -74,6 +74,9 @@ internal sealed class ViewSettingsFile
     /// <summary>Saved pictures name the camera "Camera A" (off by default).</summary>
     public bool ShareSafePictureNames { get; set; }
 
+    /// <summary>"Export from" (the Recordings window's Export tab): absent for the main stream, or sub.</summary>
+    public string? ExportQuality { get; set; }
+
     /// <summary>"Save recordings to" (docs/CAPTURE.md "Live recording"); absent: the Videos folder's nvrview folder.</summary>
     public string? RecordingsFolder { get; set; }
 
@@ -106,6 +109,7 @@ internal sealed class ViewSettings(string? file)
     private string? _picturesFolder;
     private PictureFormat _pictureFormat = PictureFormat.Png;
     private bool _shareSafeNames;
+    private ExportQuality _exportQuality = ExportQuality.Main;
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
     private HashSet<string> _talkAllowed = [];
@@ -487,6 +491,27 @@ internal sealed class ViewSettings(string? file)
         }
     }
 
+    /// <summary>"Export from": the stream a download and an export read until the Export tab says otherwise (the main stream unless changed).</summary>
+    public ExportQuality ExportQuality
+    {
+        get
+        {
+            Load();
+            return _exportQuality;
+        }
+        set
+        {
+            Load();
+            if (_exportQuality == value)
+            {
+                return;
+            }
+            _exportQuality = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
     /// <summary>Saved pictures name the camera "Camera A" instead of its own name.</summary>
     public bool ShareSafePictureNames
     {
@@ -677,6 +702,7 @@ internal sealed class ViewSettings(string? file)
             _picturesFolder = string.IsNullOrWhiteSpace(read?.PicturesFolder) ? null : read.PicturesFolder;
             _pictureFormat = PictureFormats.FromKey(read?.PictureFormat);
             _shareSafeNames = read?.ShareSafePictureNames ?? false;
+            _exportQuality = ExportPanel.QualityOf(read?.ExportQuality);
             _callsInWindow = read?.CallsOpenInWindow ?? false;
             _callPresentations = read?.CallPresentation is { } cp ? new Dictionary<string, string>(cp) : [];
             _placement = read?.CallWindowPlacement == "activeScreen" ? CallWindowPlacement.Mode.ActiveScreen : CallWindowPlacement.Mode.Remembered;
@@ -722,6 +748,7 @@ internal sealed class ViewSettings(string? file)
                     PicturesFolder = _picturesFolder,
                     PictureFormat = _pictureFormat == PictureFormat.Png ? null : _pictureFormat.Key(),
                     ShareSafePictureNames = _shareSafeNames,
+                    ExportQuality = _exportQuality == ExportQuality.Sub ? "sub" : null,
                     CallsOpenInWindow = _callsInWindow,
                     CallPresentation = _callPresentations.Count > 0 ? new Dictionary<string, string>(_callPresentations) : null,
                     CallWindowPlacement = _placement == CallWindowPlacement.Mode.ActiveScreen ? "activeScreen" : null,
