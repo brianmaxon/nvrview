@@ -34,6 +34,8 @@ struct ExportFolder {
         return url
     }
 
+    func forget() { defaults.removeObject(forKey: Self.key) }
+
     func remember(_ folder: URL) {
         let data = (try? folder.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil))
             ?? (try? folder.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
@@ -113,15 +115,12 @@ final class ExportJob {
     }
 }
 
-/// A range download being set up.
-struct RangeDownloadRequest: Identifiable, Equatable {
-    let id = UUID()
+/// A range download being set up: the Export tab's range and checked cameras.
+struct RangeDownloadRequest: Equatable {
     var startMs: Int64
     var endMs: Int64
     var cameras: Set<RecordingCamera>
     var name = ""
-    /// A folder the user chose instead of the downloads folder.
-    var folder: URL?
 }
 
 /// What the export menu and keys keep: the points, the switches, the job.
@@ -137,17 +136,48 @@ final class ExportModel {
     var trimExact = false
     var codec = ExportCodec.h264
     private(set) var job: ExportJob?
-    var rangeRequest: RangeDownloadRequest?
-    @ObservationIgnored var folder = ExportFolder()
+    @ObservationIgnored var folder = ExportFolder() { didSet { folderPath = directFolder?.path } }
+    /// The Export tab's choices: the kind (nil: the first that applies), the
+    /// cameras checked (nil: all), the stream (nil: Settings' choice), sound.
+    var kind: ExportKind?
+    var cameras: Set<RecordingCamera>?
+    var qualityChoice: ExportQuality?
+    var sound = true
+    /// Exports go straight into the remembered folder, with no save panel
+    /// (set by "Choose…" in the tab; "Ask Each Time" clears it).
+    var direct: Bool { didSet { defaults.set(direct, forKey: Self.directKey); folderPath = directFolder?.path } }
+    /// The folder shown in the tab, when exports go straight into one.
+    private(set) var folderPath: String?
+    /// Settings > Capture's "Export from" (the app sets it).
+    @ObservationIgnored var defaultQuality: () -> ExportQuality = { .main }
     /// The save and folder panels (the self-test answers these itself).
     @ObservationIgnored var saveURL: @MainActor (_ name: String, _ directory: URL?, _ type: UTType) -> URL? = ExportPanels.save
     @ObservationIgnored var chooseFolder: @MainActor (_ message: String, _ directory: URL?) -> URL? = ExportPanels.folder
     @ObservationIgnored private let defaults: UserDefaults
     static let shareSafeKey = "exportShareSafe"
+    static let directKey = "exportDirect"
+
+    /// The stream a download reads: the tab's choice, else the setting.
+    var quality: ExportQuality { qualityChoice ?? defaultQuality() }
+
+    /// The remembered folder when exports go straight into it.
+    var directFolder: URL? { direct ? folder.url : nil }
+
+    /// "Choose…" in the tab: exports go straight into `url` from now on.
+    func choose(folder url: URL) {
+        folder.remember(url)
+        direct = true
+        folderPath = url.path
+    }
+
+    /// "Ask Each Time": the save panels come back.
+    func askEachTime() { direct = false }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         shareSafe = defaults.bool(forKey: Self.shareSafeKey)
+        direct = defaults.bool(forKey: Self.directKey)
+        folderPath = direct ? ExportFolder(defaults: defaults).url?.path : nil
     }
 
     var busy: Bool { job?.running == true }
@@ -216,6 +246,14 @@ extension RecordingsBrowser {
     /// Names already taken in a chosen folder get " (2)" and so on.
     func destinations(suggested: [String], type: UTType, message: String) -> [URL]? {
         guard let first = suggested.first else { return nil }
+        if let folder = export.directFolder {
+            var taken = Set<String>()
+            return suggested.map { path in
+                let url = Self.free(folder.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent), taken: taken)
+                taken.insert(url.lastPathComponent)
+                return url
+            }
+        }
         let startFolder = export.folder.url ?? URL(fileURLWithPath: first).deletingLastPathComponent()
         let directory = FileManager.default.fileExists(atPath: startFolder.path) ? startFolder : nil
         if suggested.count == 1 {
@@ -270,7 +308,7 @@ extension RecordingsBrowser {
     /// points. From the incident's download when it has one; otherwise the
     /// range is downloaded first, then trimmed.
     func trim(cameras chosen: [RecordingCamera]?) {
-        guard let window = pointsWindow else {
+        guard let window = pointsWindow ?? scrubSpan.map({ ($0.lowerBound, $0.upperBound) }) else {
             message = "Set an in point and an out point first (I and O)"
             return
         }
@@ -288,7 +326,8 @@ extension RecordingsBrowser {
             return
         }
         guard let queued = model.downloadRange(
-            cameras: cameras, startMs: window.start, endMs: window.end, name: nil, options: ExportOptions(shareSafe: export.shareSafe))
+            cameras: cameras, startMs: window.start, endMs: window.end, name: nil, options: ExportOptions(shareSafe: export.shareSafe),
+            quality: export.quality)
         else { return }
         message = "Downloading that range first; the trim follows when it is done"
         model.whenFinished(queued.download) { [weak self] d in
@@ -376,7 +415,7 @@ extension RecordingsBrowser {
         }
         guard let url = destinations(suggested: [plan.suggestedFile], type: .mpeg4Movie, message: "Choose where to save the video")?.first
         else { return }
-        let settings = EditExporter.Settings(codec: export.codec, shareSafe: export.shareSafe, gridCell: editPlayer.gridSound)
+        let settings = EditExporter.Settings(codec: export.codec, shareSafe: export.shareSafe, gridCell: editPlayer.gridSound, sound: export.sound)
         run(view == .follow ? "Exporting the follow cut" : "Exporting the \(view.rawValue) grid") { control in
             [await EditExporter.export(plan: plan, to: url, settings: settings, control: control)]
         }
@@ -384,34 +423,20 @@ extension RecordingsBrowser {
 
     // MARK: Range download
 
-    /// Opens the range sheet: the points' range, else the scrubber's, for
-    /// the cameras playing (else every camera).
-    func beginRangeDownload() {
-        guard let span = scrubSpan else {
-            message = "Play an incident or a camera to choose a range"
-            return
-        }
-        let window = pointsWindow ?? (span.lowerBound, span.upperBound)
-        var cameras = Set(playerView == .cameras ? player.cameras : (editPlayer.plan?.sources.map(\.camera) ?? []))
-        if cameras.isEmpty { cameras = Set(self.cameras) }
-        export.rangeRequest = RangeDownloadRequest(startMs: window.0, endMs: window.1, cameras: cameras)
-    }
-
-    /// Queues the range sheet's download; the Downloads list shows it.
+    /// Queues the Export tab's download; the Downloads tab lists it.
     func downloadRange(_ request: RangeDownloadRequest) {
         let cameras = self.cameras.filter { request.cameras.contains($0) }
         var options = ExportOptions(shareSafe: export.shareSafe)
-        if let folder = request.folder {
-            options.dest = folder.path
-            export.folder.remember(folder)
-        }
+        if let folder = export.directFolder { options.dest = folder.path }
         guard !cameras.isEmpty else {
             message = "Choose at least one camera"
             return
         }
-        if model.downloadRange(cameras: cameras, startMs: request.startMs, endMs: request.endMs, name: request.name, options: options) != nil {
-            export.rangeRequest = nil
-            center = .downloads
+        if model.downloadRange(
+            cameras: cameras, startMs: request.startMs, endMs: request.endMs, name: request.name, options: options,
+            quality: export.quality) != nil
+        {
+            message = "Download queued; its progress is in Downloads"
         }
     }
 
@@ -446,7 +471,8 @@ extension RecordingsBrowser {
             return
         }
         let shown = PlayerGrid.audibleIndex(player.mode, count: player.cells.count) ?? 0
-        let cells = eachCamera ? player.cells : [player.cells[min(shown, player.cells.count - 1)]]
+        let checked = exportChecked
+        let cells = eachCamera ? player.cells.filter { checked.contains($0.camera) } : [player.cells[min(shown, player.cells.count - 1)]]
         let tiles = cells.map(\.tile.id)
         guard let plan = stillPlan(ExportRequest.stills(playback: playback, tiles: tiles, format: stillFormat, options: export.options(useFolder: false))),
             let urls = destinations(suggested: plan.stills.map(\.suggestedFile), type: stillType(plan.stills[0].suggestedFile), message: "Choose where to save the pictures")
@@ -497,7 +523,8 @@ extension RecordingsBrowser {
             return
         }
         var stills: [StillPlan.Still] = []
-        for source in plan.sources {
+        let checked = exportChecked
+        for source in plan.sources where checked.contains(source.camera) {
             let request = ExportRequest.still(
                 download: plan.download, camera: source.camera, atMs: at, exact: true, format: format, options: export.options(useFolder: false))
             if let p = stillPlan(request) { stills += p.stills }

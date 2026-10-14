@@ -679,6 +679,54 @@ extension SelfTest {
         return SyntheticRecording.read(image, picture: CGRect(x: 0, y: 0, width: 320, height: 180))
     }
 
+    /// Runs the Export tab's button for `kind` with these cameras checked (nil: all of them).
+    func exportPanelStart(_ b: RecordingsBrowser, _ kind: ExportKind, cameras: Set<RecordingCamera>? = nil) {
+        b.export.kind = kind
+        b.export.cameras = cameras
+        if b.exportKind != kind { problems.append("export: the tab does not offer \(kind.title)") }
+        if let why = b.exportProblem { problems.append("export: the tab would not start \(kind.title): \(why)") }
+        b.startExport()
+    }
+
+    func exportPanelOpen(_ b: RecordingsBrowser) {
+        // parity: export-panel-open
+        b.inspectorTab = .incident
+        b.showInspector = false
+        b.openExportTab()
+        if b.inspectorTab != .export || !b.showInspector { problems.append("export: Cmd+E did not open the Export tab") }
+        let want: [ExportKind] = [.trimCopy, .trimExact, .followCut, .grid2, .grid4, .download, .stillCurrent, .stillEach]
+        print("export: the tab offers \(b.exportKinds.map(\.rawValue))")
+        if b.exportKinds != want { problems.append("export: the tab offers \(b.exportKinds.map(\.rawValue)) for a downloaded incident") }
+        if b.exportChecked.isEmpty || b.exportChecked != Set(b.exportSource) { problems.append("export: the tab does not check the incident's cameras") }
+        // The tab is kept when another incident is selected.
+        let keys = b.selection
+        b.selection = []
+        if b.inspectorTab != .export { problems.append("export: the tab did not stay on Export") }
+        b.selection = keys
+    }
+
+    func exportPanelPoints(_ b: RecordingsBrowser, _ plan: EditPlan) {
+        // parity: export-panel-points
+        let s = plan.startMs
+        b.export.points.clear()
+        b.editPlayer.seek(to: s + 1_000)
+        b.markIn()
+        b.editPlayer.seek(to: s + 4_000)
+        b.markOut()
+        let want = (ExportPanelRules.timeText(ms: s + 1_000), ExportPanelRules.timeText(ms: s + 4_000))
+        print("export: I and O give \(b.exportStartText) to \(b.exportEndText)")
+        if b.exportStartText != want.0 || b.exportEndText != want.1 { problems.append("export: the tab shows \(b.exportStartText) to \(b.exportEndText), expected \(want)") }
+        if !b.exportSummary.contains("0:03") { problems.append("export: the tab's summary is \"\(b.exportSummary)\", expected 3 seconds") }
+        // A flag dragged on the scrubber moves the tab's end time too.
+        b.movePoint(.out, to: s + 3_000)
+        if b.exportEndText != ExportPanelRules.timeText(ms: s + 3_000) { problems.append("export: dragging the out flag left the tab at \(b.exportEndText)") }
+        // Typed times set the points; a time outside the range is refused.
+        if !b.setExportStart(ExportPanelRules.timeText(ms: s + 500)) || b.points.inMs != s + 500 { problems.append("export: a typed start time did not set the in point") }
+        if b.setExportEnd("99:99") { problems.append("export: a time that is not a time was accepted") }
+        b.clearPoints()
+        if b.pointsWindow != nil { problems.append("export: Whole Range left points set") }
+    }
+
     func exportTrim(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
         // parity: export-trim
         guard let plan = b.editPlayer.plan, let source = plan.sources.first else { return editBack(b, fake, folder: folder) }
@@ -691,8 +739,10 @@ extension SelfTest {
         b.export.shareSafe = false
         b.export.trimExact = false
         let s = plan.startMs
+        exportPanelOpen(b)
+        exportPanelPoints(b, plan)
         b.export.points = InOutPoints(inMs: s + 2_500, outMs: s + 5_000)
-        b.trim(cameras: [source.camera])
+        exportPanelStart(b, .trimCopy, cameras: [source.camera])
         when({ b.export.job?.running == false }, timeout: 60) { [self] in
             guard let job = b.export.job, job.files.count == 1, let url = job.files.first else {
                 problems.append("export: the trim wrote \(b.export.job?.files.count ?? 0) files (\(b.export.job?.result ?? b.message ?? "no message"))")
@@ -739,7 +789,7 @@ extension SelfTest {
         b.export.dismissJob()
         let s = plan.startMs
         b.export.points = InOutPoints(inMs: s + 2_500, outMs: s + 5_000)
-        b.trim(cameras: [source.camera])
+        exportPanelStart(b, .trimCopy, cameras: [source.camera])
         when({ b.export.job?.running == false }, timeout: 60) { [self] in
             guard let url = b.export.job?.files.first else {
                 problems.append("export: the share-safe trim wrote nothing (\(b.export.job?.result ?? "no message"))")
@@ -764,7 +814,7 @@ extension SelfTest {
         let s = incident.start * 1000
         b.export.points = InOutPoints(inMs: s + 500, outMs: s + 2_500)
         b.export.codec = .hevc
-        b.exportEdit(.follow)
+        exportPanelStart(b, .followCut)
         when({ b.export.job?.running == false }, timeout: 90) { [self] in
             guard let url = b.export.job?.files.first else {
                 problems.append("export: the follow cut wrote nothing (\(b.export.job?.result ?? b.message ?? "no message"))")
@@ -813,7 +863,7 @@ extension SelfTest {
         let s = incident.start * 1000
         b.export.points = InOutPoints(inMs: s, outMs: s + 2_000)
         b.export.codec = .h264
-        b.exportEdit(.grid4)
+        exportPanelStart(b, .grid4)
         when({ b.export.job?.running == false }, timeout: 90) { [self] in
             guard let url = b.export.job?.files.first else {
                 problems.append("export: the grid wrote nothing (\(b.export.job?.result ?? b.message ?? "no message"))")
@@ -877,14 +927,21 @@ extension SelfTest {
         guard let plan = b.editPlayer.plan, let rec = Optional(b.model) else { return exportFinish(b, fake, run, folder: folder) }
         let s = plan.startMs
         b.export.points = InOutPoints(inMs: s + 1_000, outMs: s + 4_200)
-        b.beginRangeDownload()
-        guard var request = b.export.rangeRequest else {
-            problems.append("export: the range sheet did not open")
+        // The tab offers the incident's cameras, checked; the stream is Settings' choice until the tab says otherwise.
+        if b.exportChecked.count != plan.sources.count { problems.append("export: the tab checks \(b.exportChecked.count) cameras, expected \(plan.sources.count)") }
+        b.export.qualityChoice = nil
+        guard let appModel = b.model.app else {
+            problems.append("export: the recordings model has no app model")
             return exportFinish(b, fake, run, folder: folder)
         }
-        if request.cameras.count != plan.sources.count { problems.append("export: the range sheet offers \(request.cameras.count) cameras, expected \(plan.sources.count)") }
-        request.cameras = [plan.sources[0].camera, plan.sources[1].camera]
-        b.downloadRange(request)
+        let saved = appModel.exportQuality
+        appModel.exportQuality = .sub
+        if b.exportQuality != .sub { problems.append("export: the tab's stream ignores Settings (\(b.exportQuality))") }
+        appModel.exportQuality = .main
+        let twoCameras: Set<RecordingCamera> = [plan.sources[0].camera, plan.sources[1].camera]
+        exportPanelStart(b, .download, cameras: twoCameras)
+        let defaultTiers = fake.lastRangeDownloadTiers()
+        if defaultTiers != ["main", "main"] { problems.append("export: the default download asked for \(defaultTiers), expected main for both") }
         let wantStart = Int64((Double(s + 1_000) / 1000).rounded(.down)), wantEnd = Int64((Double(s + 4_200) / 1000).rounded(.up))
         when({
             fake.completeRecordingWork()
@@ -895,9 +952,23 @@ extension SelfTest {
             if d?.range != DownloadRange(start: wantStart, end: wantEnd) || d?.cameras.count != 2 || d?.state != "done" {
                 problems.append("export: the range download is \(String(describing: d?.range)) with \(d?.cameras.count ?? 0) cameras (\(d?.state ?? "none"), \(rec.notice ?? "")), expected \(wantStart)–\(wantEnd) with 2")
             }
-            if b.center != .downloads { problems.append("export: a range download did not show the downloads") }
+            // parity: export-panel-quality
+            b.export.qualityChoice = .sub
+            exportPanelStart(b, .download, cameras: twoCameras)
+            let subTiers = fake.lastRangeDownloadTiers()
+            print("export: the sub-stream download asked for \(subTiers)")
+            if subTiers != ["sub", "sub"] { problems.append("export: the sub-stream choice reached the core as \(subTiers)") }
+            b.export.qualityChoice = nil
+            appModel.exportQuality = saved
+            b.export.cameras = nil
             b.center = .player
-            exportStills(b, fake, run, folder: folder)
+            // The sub-stream download finishes too, so the next steps start with nothing running.
+            when({
+                fake.completeRecordingWork()
+                return rec.downloads.filter { $0.range != nil }.allSatisfy { $0.state == "done" }
+            }, timeout: 5) { [self] in
+                exportStills(b, fake, run, folder: folder)
+            }
         }
     }
 
@@ -906,7 +977,7 @@ extension SelfTest {
         guard let plan = b.editPlayer.plan else { return exportFinish(b, fake, run, folder: folder) }
         b.editPlayer.pause()
         b.editPlayer.seek(to: plan.startMs + 2_500)
-        b.saveStills(eachCamera: false)
+        exportPanelStart(b, .stillCurrent)
         when({ b.export.job?.running == false }, timeout: 30) { [self] in
             let one = b.export.job?.files ?? []
             print("export: current picture \(one.map(\.lastPathComponent))")
@@ -923,7 +994,7 @@ extension SelfTest {
                 problems.append("export: the picture could not be read back")
             }
             b.export.dismissJob()
-            b.saveStills(eachCamera: true)
+            exportPanelStart(b, .stillEach)
             when({ b.export.job?.running == false }, timeout: 30) { [self] in
                 let many = b.export.job?.files ?? []
                 print("export: a picture per camera \(many.map(\.lastPathComponent))")

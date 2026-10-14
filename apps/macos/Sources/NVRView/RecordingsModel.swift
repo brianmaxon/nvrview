@@ -604,11 +604,13 @@ final class RecordingsModel {
     /// `notice` set when it was refused.
     @discardableResult
     func downloadRange(
-        cameras: [RecordingCamera], startMs: Int64, endMs: Int64, name: String?, options: ExportOptions
+        cameras: [RecordingCamera], startMs: Int64, endMs: Int64, name: String?, options: ExportOptions,
+        quality: ExportQuality = .main
     ) -> QueuedDownload? {
         guard let core = core() else { return nil }
         do throws(CoreStatus) {
-            let json = ExportRequest.range(startMs: startMs, endMs: endMs, cameras: cameras, name: name, options: options)
+            let json = ExportRequest.range(
+                startMs: startMs, endMs: endMs, cameras: cameras, name: name, options: options, quality: quality)
             let answer = QueuedDownload.parse(answer: try core.downloadRange(json: json))
             notice = answer?.existing == true ? "Already downloaded or downloading" : nil
             return answer

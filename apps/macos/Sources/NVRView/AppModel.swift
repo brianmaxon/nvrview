@@ -247,6 +247,15 @@ final class AppModel {
             notify()
         }
     }
+    static let exportQualityKey = "exportQuality"
+    /// "Export from" (Settings > Capture > Recordings window): the stream a
+    /// download and an export read until the Export tab says otherwise.
+    var exportQuality = AppModel.exportQuality(in: .standard) {
+        didSet {
+            captureDefaults.set(exportQuality.rawValue, forKey: Self.exportQualityKey)
+            notify()
+        }
+    }
     static let recordingsFolderKey = "recordingsFolder"
     static let recordFromKey = "recordFrom"
     static let maxRecordingMinutesKey = "maxRecordingMinutes"
@@ -341,6 +350,10 @@ final class AppModel {
             ?? defaultPicturesFolder
     }
 
+    private static func exportQuality(in defaults: UserDefaults) -> ExportQuality {
+        defaults.string(forKey: exportQualityKey).flatMap(ExportQuality.init(rawValue:)) ?? .main
+    }
+
     private static func pictureFormat(in defaults: UserDefaults) -> PictureFormat {
         defaults.string(forKey: pictureFormatKey).flatMap(PictureFormat.init(rawValue:)) ?? .png
     }
@@ -350,6 +363,7 @@ final class AppModel {
         captureDefaults = defaults
         picturesFolder = Self.picturesFolder(in: defaults)
         pictureFormat = Self.pictureFormat(in: defaults)
+        exportQuality = Self.exportQuality(in: defaults)
         shareSafeNames = defaults.bool(forKey: Self.shareSafeNamesKey)
         recordingsFolder = Self.recordingsFolder(in: defaults)
         recordFrom = Self.recordFrom(in: defaults)

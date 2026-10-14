@@ -38,6 +38,16 @@ struct CaptureSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+            Section("Recordings Window") {
+                Picker("Export from", selection: Binding(get: { model.exportQuality }, set: { model.exportQuality = $0 })) {
+                    ForEach(ExportQuality.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Text(
+                    "The Recordings window's Export tab downloads the main stream (full quality, larger files) or the sub-stream (smaller files, lower quality) of each camera. The tab can pick the other one for a single export."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
             Section("Recordings") {
                 HStack {
                     Text("Save recordings to")
