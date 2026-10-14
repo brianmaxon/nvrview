@@ -179,13 +179,31 @@ final class StageView: NSView {
     var verifyBands: [NodePath: VerificationOverlayView] = [:]
     var verifyInsetOverlays: [CameraRef: VerificationOverlayView] = [:]
     var verifyToken: UUID?
+    /// Where each live check was first placed in this window (tile or
+    /// inset): it keeps that place until it ends, however the stage changes
+    /// (focus, a swap, another layout), so it does not jump around.
+    var verifyPlaced: [UInt64: VerifyPlace] = [:]
+    /// The placement setting `verifyPlaced` was decided under (choosing another
+    /// in Settings places the live checks again).
+    var verifyPlacedFor: VerifyPlacementSetting?
 
     // Alert insets (docs/UX.md "Alert insets"; StageView+Insets.swift).
     var insetBoard = InsetBoard()
     var alertInsetViews: [CameraRef: InsetView] = [:]
     /// Where each drawn inset's picture goes, in the overlay's coordinates.
     var insetVideoRects: [CameraRef: CGRect] = [:]
-    let moreChip = NSTextField(labelWithString: "")
+    let moreChip = MoreChipView(labelWithString: "")
+    /// This window's own inset grid; nil: the Settings default
+    /// (`effectiveInsetGrid`). Saved with the window.
+    var insetGridOverride: InsetGridSetting? {
+        didSet { if insetGridOverride != oldValue { syncInsets() } }
+    }
+    /// The grid the board and layout were last given.
+    var appliedInsetGrid = InsetGridSetting.standard
+    /// The user chose the window's grid (save the window).
+    var onInsetGridChange: () -> Void = {}
+    /// Whether the last layout left drawn insets out for lack of room.
+    var insetsTruncated = false
     /// Holds the insets above the tiles' chrome (top-left origin; clicks
     /// between insets reach the stage).
     let insetLayer = PassThroughView()
@@ -581,7 +599,21 @@ final class StageView: NSView {
         // Insets on top, the top of the stack drawn last; the same decoded
         // pictures as every other tile of that camera (no extra decode).
         for item in insetBoard.shown.reversed() {
-            guard let rect = insetVideoRects[item.camera], let tile = model.leases.tile(for: item.camera) else { continue }
+            guard let rect = insetVideoRects[item.camera] else { continue }
+            if item.isReturn && item.showsLayout {
+                // The whole layout in miniature: the stage's own leaves with
+                // their zoom and fill, drawn from the same tiles (their
+                // streams are as the stage asks for them).
+                let mini = state.tree.frames(in: CGRect(origin: .zero, size: rect.size), gap: 1)
+                for leaf in mini.leaves {
+                    guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
+                    draw(
+                        tile, camera: camera, rect: leaf.rect.offsetBy(dx: rect.minX, dy: rect.minY),
+                        zoom: zoom(atTile: leaf.path), fill: fills(atTile: leaf.path), path: leaf.path)
+                }
+                continue
+            }
+            guard let tile = model.leases.tile(for: item.camera) else { continue }
             draw(tile, camera: item.camera, rect: rect, zoom: .none, fill: false)
         }
         if key != lastKey || renderer.tiles.count != tiles.count {

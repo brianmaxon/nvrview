@@ -72,6 +72,11 @@ zoom-touch-pinch            windows  gap: the macOS self-test does not send a ma
 
 # ---- on macOS only ----------------------------------------------------------
 alert-inset-smoke-stays     macos    gap: Windows insets are call cards only, so a smoke alarm does not open one
+alert-inset-return-layout   macos    gap: Windows call cards do not swap with the stage, so there is no return inset
+alert-inset-return-tab      macos    gap: Windows call cards do not swap with the stage, so there is no return inset
+alert-inset-return-single   macos    gap: Windows call cards do not swap with the stage, so there is no return inset
+alert-inset-order           macos    gap: Windows has call cards only, no inset board with a stable order and a chip
+alert-inset-grid            macos    gap: Windows has call cards only, no inset grid setting
 alert-inset-swap            macos    gap: Windows call cards do not swap with the stage
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
@@ -100,6 +105,7 @@ verify-view-tile             macos    gap: Windows smart alerts UI is planned (N
 verify-view-order            macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 verify-view-passthrough      macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 verify-view-stick            macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
+verify-view-place-sticky     macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 alerts-detector-benchmark macos    gap: Windows detector is planned (Windows ML)
 alerts-e2e-verified          macos    gap: Windows smart alerts UI is planned (the Windows host for the verification contract, model and notifications is not built)
 alerts-e2e-not-confirmed     macos    gap: Windows smart alerts UI is planned (the Windows host for the verification contract, model and notifications is not built)

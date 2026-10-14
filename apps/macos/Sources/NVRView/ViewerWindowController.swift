@@ -113,6 +113,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         }
         stage.delegate = self
         stage.onInsetAnchorChange = { [weak self] in self?.onChange() }
+        stage.onInsetGridChange = { [weak self] in self?.onChange() }
         stage.onViewsChanged = { [weak self] in self?.onChange() }
         editBar.controller = self
         token = model.subscribe { [weak self] in self?.modelChanged() }
@@ -613,11 +614,14 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         return SavedWindow(
             content: content, frame: (fullScreen ? windowedFrame : nil) ?? window.frame, fullScreen: fullScreen,
             sidebarCollapsed: sidebarCollapsedPreference, insetAnchor: stage.insetAnchor, fill: state.views.fill,
-            tileViews: state.views.savedEntries)
+            tileViews: state.views.savedEntries, insetGrid: stage.insetGridOverride)
     }
 
     /// Puts the alert insets where the user left them (a restored window).
     func restoreInsetAnchor(_ anchor: InsetAnchor?) { stage.insetAnchor = anchor }
+
+    /// The window's own inset grid, if it had one (a restored window).
+    func restoreInsetGrid(_ grid: InsetGridSetting?) { stage.insetGridOverride = grid }
 
     /// Puts back the window's Fill Tiles and each tile's zoom, crop and Fill
     /// choice (a restored window). A file from before views were per tile

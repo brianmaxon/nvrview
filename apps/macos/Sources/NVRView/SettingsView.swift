@@ -394,6 +394,23 @@ struct AlertSettingsView: View {
                     Text("Opposite the detection indicators").tag("")
                     ForEach(ChromeCorner.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) }
                 }
+                Stepper(
+                    "Inset rows: \(model.insetGrid.rows)",
+                    value: Binding(
+                        get: { model.insetGrid.rows },
+                        set: { model.insetGrid = InsetGridSetting(rows: $0, columns: model.insetGrid.columns) }),
+                    in: InsetGridSetting.rowRange)
+                Stepper(
+                    "Inset columns: \(model.insetGrid.columns)",
+                    value: Binding(
+                        get: { model.insetGrid.columns },
+                        set: { model.insetGrid = InsetGridSetting(rows: model.insetGrid.rows, columns: $0) }),
+                    in: InsetGridSetting.columnRange)
+                Text(
+                    "Up to rows x columns insets show at once; the rest wait behind a \"+N more\" chip. A window can use its own grid: right-click an inset, Inset Grid. The size follows the window, so a small window shows fewer columns."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 Text(
                     "When a doorbell rings, a smoke or CO alarm is heard, or a person is detected on a camera marked as an entrance, and that camera is not on screen, its live video appears in an inset. Click it (or press Tab) to swap it with the stage; Esc closes it."
                 )

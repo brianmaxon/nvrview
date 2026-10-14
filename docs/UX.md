@@ -794,12 +794,36 @@ not in a separate system window.
   detections) and a header with the reason, time, and count like the alert
   header. It shows the sub-stream, so it appears quickly; it uses the same
   shared tiles as everything else (no extra device login).
-- **Several at once** stack, newest on top, up to three; beyond that a
-  "+N more" chip. A repeat on the same camera updates its inset instead of
-  adding one.
+- **Several at once** fill a grid of insets (rows x columns, below), the
+  newest camera at the top; beyond what the grid holds a "+N more" chip. The
+  order is stable. An event on a camera that already has an inset refreshes
+  it where it is (count, time); only a new camera takes the top. An inset
+  stays on screen at least 10 s before a newer one can push it out, so a
+  busy moment does not make them flicker in and out; a newer camera waits
+  (in the chip) until the lowest inset has had its 10 s. The chip lists the
+  waiting cameras (click it for the list); choosing one brings it in and
+  the lowest inset waits instead.
+- **Inset grid.** Settings > Alerts has Inset rows (1 to 4) and Inset
+  columns (1 to 6); up to rows x columns insets show at once, filled column
+  by column from the column nearest the inset corner's horizontal edge
+  (growing leftward from a right-hand corner). The default, 3 rows in 1
+  column, is the original stack of three. Each viewer window can have its own
+  grid (right-click an inset, Inset Grid, or Use the Settings Default), so a
+  full-screen window can use several columns and a small one few; it is saved
+  with the window (`insetGrid` in `windows.json`, left out while the window
+  follows the Settings). An inset is about 30% of the window's width, or
+  narrower so the columns fit side by side, never under 220 pt; columns that
+  do not fit are dropped and the rest show as many as fit, and the chip says
+  "(no room)" when the window is too small for the grid it asks for.
 - **Swap:** clicking the inset (or Tab) swaps places: the inset's camera
-  goes full screen and the camera you were watching becomes the inset, so one
-  more click swaps back. Esc or the inset's close control dismisses it.
+  goes full screen and what you were watching becomes the inset, so one
+  more click swaps back. Esc or the inset's close control dismisses it. When
+  you were watching a layout (several tiles, nothing focused), the return
+  inset shows the whole layout in miniature, live, with the same tile
+  arrangement (each tile with its zoom and fill); clicking it or Tab restores
+  that layout exactly (the same tiles, cameras, zoom, fill and selection).
+  When you were watching one focused or full-screen tile, the return inset
+  shows that camera.
 - **Closing:** doorbell and detection insets close by themselves about 60 s
   after the event ends unless hovered or used; smoke and CO insets stay until
   dismissed, and dismissing one also dismisses its alert (see "Alerts").
@@ -836,9 +860,12 @@ Details settled while building it (macOS):
   tile); its call controls then show over the stage instead.
 - Entrance is a per-camera option (the tile's context menu, Settings >
   Cameras), off by default, saved in the app's data directory.
-- The insets stack from their corner, newest nearest it; those that do not
-  fit the stage's height count in "+N more". The corner is a setting
-  (Settings > Alerts), opposite the corner indicators by default.
+- The insets fill the grid from their corner, newest nearest it; those that
+  do not fit the stage count in "+N more". The corner is a setting
+  (Settings > Alerts), opposite the corner indicators by default. The shared
+  rules (`InsetBoard`: order, the 10 s minimum, overflow; `InsetGeometry`:
+  the grid) are in NVRCore with unit tests; Windows has call cards only, so
+  it has no inset board yet (docs/PARITY.md).
 - Moving the column: a press on the header (its labels included) becomes a
   drag after 2 pt, one on the picture after the 6 pt click threshold;
   releasing after a drag never swaps. The column follows the pointer with
@@ -849,12 +876,16 @@ Details settled while building it (macOS):
   its insets (their minute starts again). The 12 pt margin keeps the column
   clear of the sidebar's 6 pt edge-reveal strip and of the top edge that
   reveals the toolbar in full screen.
-- Swapping with a layout that is not focused puts the selected (or first)
-  tile's camera into the return inset ("Back to the view"); clicking it, its
-  close control, or Tab swaps back. Clicking another inset while swapped puts
+- Swapping with a layout that is not focused puts the whole layout into the
+  return inset ("Back to the layout"): the stage's own leaves are drawn into
+  the inset's rectangle with the tile drawing (the same shared tiles and
+  the streams the layout's tiles already ask for: no extra decode or
+  login). Swapping from a focused tile puts that tile's camera into it
+  ("Back to the view"). Clicking it, its close control, or Tab swaps back. Clicking another inset while swapped puts
   that camera on the stage and keeps the way back. The swapped-in camera gets
   the main stream (the same aligned switch as focus) and a header along the
-  top of the stage.
+  top of the stage. Nothing of the layout is changed by the swap, so swapping
+  back restores it as it was.
 - Esc dismisses the swapped-in camera (the stage returns to its view), else
   the top inset; only when there is no inset does Esc leave focus as before.
   Tab and Esc go to the insets only while the stage has the keyboard.
@@ -1679,7 +1710,10 @@ events and the boxes the app's detector answered:
   the same boxes and steps over its picture. Esc or its × closes it and its
   checks. Clicking the inset puts its camera on the stage; it stays there
   (refreshes of the check do not undo it) until the user swaps back (click
-  the return inset, Tab) or the check ends. Bands and overlays let the mouse
+  the return inset, Tab) or the check ends. A check keeps the place it
+  started in (its tile's band, or an inset) until it ends, even when the
+  stage changes (focus, a swap, another layout); choosing another placement in
+  Settings places the live checks again. Bands and overlays let the mouse
   through to the tile (pan, fisheye aim) except on their own buttons.
 - **In a small window.** "Smart Alert Checks", a floating panel that never
   activates the app or takes the keyboard (it becomes key only if a control

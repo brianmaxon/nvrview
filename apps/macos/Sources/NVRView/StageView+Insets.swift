@@ -41,6 +41,7 @@ extension StageView {
         moreChip.alignment = .center
         moreChip.isHidden = true
         insetLayer.addSubview(moreChip)
+        moreChip.onClick = { [weak self] chip in self?.showWaitingMenu(from: chip) }
         stageCall.onClose = { [weak self] in
             guard let self else { return }
             if let shown = self.insetBoard.swap?.shown {
@@ -91,6 +92,16 @@ extension StageView {
         return state.tree.cameras.contains(where: same)
     }
 
+    /// The stage shows a layout: several tiles, none focused, no swap. A swap
+    /// then keeps the whole layout in the return inset; a focused or single
+    /// tile keeps just its camera.
+    var stageShowsLayout: Bool {
+        insetBoard.swap == nil && state.focused == nil && state.tree.leafCount > 1
+    }
+
+    /// The grid this window uses: its own choice, else the Settings default.
+    var effectiveInsetGrid: InsetGridSetting { insetGridOverride ?? model.insetGrid }
+
     /// The camera that fills the whole stage, if one does.
     var stageFillingCamera: CameraRef? {
         if let s = insetBoard.swap { return s.shown }
@@ -130,7 +141,7 @@ extension StageView {
         let displaced =
             state.focused.flatMap { state.tree[$0]?.camera } ?? state.selected.flatMap { state.tree[$0]?.camera }
             ?? state.tree.cameras.first
-        insetBoard.swap(camera, displaced: displaced, now: clock.now)
+        insetBoard.swap(camera, displaced: displaced, displacedLayout: stageShowsLayout, now: clock.now)
         // Clicking a call's inset is using the call.
         model.calls.use(camera)
         syncInsets()
@@ -267,7 +278,7 @@ extension StageView {
         switch key {
         case .swap:
             let displaced = state.focused.flatMap { state.tree[$0]?.camera } ?? state.tree.cameras.first
-            insetBoard.swapTop(displaced: displaced, now: clock.now)
+            insetBoard.swapTop(displaced: displaced, displacedLayout: stageShowsLayout, now: clock.now)
             syncInsets()
         case .dismiss:
             if let shown = insetBoard.swap?.shown {
@@ -322,7 +333,10 @@ extension StageView {
             }
         }
         guard let deadline = insetBoard.deadline, now >= deadline else { return }
-        if !insetBoard.tick(now: now).isEmpty { syncInsets() }
+        // Closing, or a waiting inset taking the place of an older one.
+        let before = insetBoard
+        _ = insetBoard.tick(now: now)
+        if insetBoard != before { syncInsets() }
     }
 
     // MARK: Keeping things in step
@@ -331,6 +345,8 @@ extension StageView {
     /// the swapped-in camera's stream, the views and their places.
     func syncInsets() {
         guard !fixedTile else { return }
+        appliedInsetGrid = effectiveInsetGrid
+        insetBoard.setCapacity(appliedInsetGrid.capacity, now: clock.now)
         insetBoard.dropSoundAlarms { [alertActive] in !alertActive($0) }
         insetBoard.remove { [model] in model.runtime($0.camera.device) == nil }
         var wanted: [CameraRef: Int] = [:]
@@ -376,6 +392,7 @@ extension StageView {
             view.onPopOut = { [weak self] in self?.model.popOutCall(camera) }
             view.onDrag = { [weak self] phase, point in self?.dragInsets(phase, at: point) }
             view.onResetPosition = { [weak self] in self?.resetInsetPosition() }
+            view.extraMenuItems = { [weak self] in self?.insetGridMenuItems() ?? [] }
             insetLayer.addSubview(view)
             alertInsetViews[camera] = view
         }
@@ -388,6 +405,10 @@ extension StageView {
     /// From `refreshChrome` (model changes, the window's slow timer).
     func refreshInsets() {
         guard !fixedTile else { return }
+        if appliedInsetGrid != effectiveInsetGrid {
+            syncInsets()
+            return
+        }
         let before = insetBoard
         insetBoard.dropSoundAlarms { [alertActive] in !alertActive($0) }
         if followCallPresentations() || insetBoard != before {
@@ -413,8 +434,10 @@ extension StageView {
             guard let view = alertInsetViews[item.camera] else { continue }
             view.apply(
                 InsetContent(
-                    header: item.header(now: now), cameraName: model.name(of: item.camera), critical: item.kind.isCritical,
-                    isReturn: item.isReturn, call: item.kind.isCall ? callContent(item.camera) : nil))
+                    header: item.header(now: now),
+                    cameraName: item.showsLayout ? layoutName : model.name(of: item.camera), critical: item.kind.isCritical,
+                    isReturn: item.isReturn, call: item.kind.isCall ? callContent(item.camera) : nil,
+                    showsLayout: item.showsLayout))
         }
         // Over the stage: the swapped-in camera's header, and the call of a
         // doorbell that fills the stage.
@@ -495,16 +518,19 @@ extension StageView {
     func layoutInsetViews() {
         let b = insetLayer.bounds
         guard b.width > 0, b.height > 0 else { return }
-        let width = InsetGeometry.width(stage: Double(b.width))
+        let grid = effectiveInsetGrid
+        let width = InsetGeometry.width(stage: Double(b.width), columns: grid.columns)
         let shown = insetBoard.shown
         let heights = shown.map { item -> Double in
-            let aspect = pictureSizes[item.camera].map { $0.width > 0 ? Double($0.height / $0.width) : 0.5625 } ?? 0.5625
+            var aspect = pictureSizes[item.camera].map { $0.width > 0 ? Double($0.height / $0.width) : 0.5625 } ?? 0.5625
+            // A layout in miniature has the stage's shape.
+            if item.showsLayout, b.width > 0 { aspect = Double(b.height / b.width) }
             let call = alertInsetViews[item.camera]?.callPanel.isHidden == false ? Double(InsetView.callHeight) : 0
             return InsetGeometry.headerHeight + width * min(max(aspect, 0.3), 1.2) + call
         }
         let anchor = effectiveInsetAnchor
-        let frames = InsetGeometry.frames(
-            count: shown.count, width: width, heights: heights, anchor: anchor,
+        let frames = InsetGeometry.grid(
+            heights: heights, width: width, rows: grid.rows, columns: grid.columns, anchor: anchor,
             stage: (Double(b.width), Double(b.height)))
         var rects: [CameraRef: CGRect] = [:]
         for (i, item) in shown.enumerated() {
@@ -524,12 +550,19 @@ extension StageView {
         let column = frames.map { CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }.reduce(CGRect.null) { $0.union($1) }
         insetColumn = column.isNull ? nil : column
         stageCall.avoid = insetColumn
-        let more = insetBoard.more + max(shown.count - frames.count, 0)
+        let cutOff = max(shown.count - frames.count, 0)
+        insetsTruncated = cutOff > 0
+        let more = insetBoard.more + cutOff
         moreChip.isHidden = more == 0
         if more > 0, let last = frames.last {
-            moreChip.stringValue = "+\(more) more"
+            // "No room" says the window is too small for the grid it asks for.
+            moreChip.stringValue = cutOff > 0 ? "+\(more) more (no room)" : "+\(more) more"
+            moreChip.toolTip = cutOff > 0 ? "The window is too small to draw the whole inset grid" : "Click to bring one in"
+            let chipWidth = cutOff > 0 ? 150.0 : 90.0
             let y = anchor.growsUpward ? last.y - 6 - 20 : last.y + last.height + 6
-            moreChip.frame = CGRect(x: last.x, y: y, width: 90, height: 20)
+            moreChip.frame = CGRect(
+                x: min(max(last.x, 0), max(Double(b.width) - chipWidth, 0)), y: min(max(y, 2), max(Double(b.height) - 22, 2)),
+                width: chipWidth, height: 20)
         }
         // A live check's boxes and steps ride on its inset (this also keeps
         // the insets, each with its overlay, above the stage's call controls
@@ -538,10 +571,92 @@ extension StageView {
         restackInsetLayer()
     }
 
+    // MARK: The waiting list and the window's grid
+
+    /// What the return inset of a layout is called.
+    var layoutName: String {
+        let n = state.tree.cameras.count
+        return "Layout, \(n) camera\(n == 1 ? "" : "s")"
+    }
+
+    /// The "+N more" chip's menu: the cameras waiting for room; choosing one
+    /// brings it in (the lowest drawn inset waits instead).
+    private func showWaitingMenu(from chip: NSView) {
+        let menu = NSMenu()
+        for item in insetBoard.waiting {
+            let title = "\(model.name(of: item.camera)) · \(item.kind.reason)"
+            menu.addItem(
+                ClosureMenuItem(title: title) { [weak self] in
+                    guard let self else { return }
+                    self.bringInInset(item.camera)
+                })
+        }
+        guard !menu.items.isEmpty else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: chip.bounds.height + 2), in: chip)
+    }
+
+    /// A waiting camera was chosen from the chip.
+    func bringInInset(_ camera: CameraRef) {
+        guard insetBoard.bringIn(camera, now: clock.now) else { return }
+        syncInsets()
+    }
+
+    /// The inset menu's "Inset Grid" items: rows, columns, and back to the
+    /// Settings default.
+    private func insetGridMenuItems() -> [NSMenuItem] {
+        let current = effectiveInsetGrid
+        func choice(_ title: String, _ on: Bool, _ set: @escaping () -> Void) -> NSMenuItem {
+            let item = ClosureMenuItem(title: title, action: set)
+            item.state = on ? .on : .off
+            return item
+        }
+        let rows = NSMenu()
+        for r in InsetGridSetting.rowRange {
+            rows.addItem(choice("\(r)", r == current.rows) { [weak self] in self?.setInsetGrid(rows: r, columns: nil) })
+        }
+        let columns = NSMenu()
+        for c in InsetGridSetting.columnRange {
+            columns.addItem(choice("\(c)", c == current.columns) { [weak self] in self?.setInsetGrid(rows: nil, columns: c) })
+        }
+        let parent = NSMenuItem(title: "Inset Grid (this window)", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let rowsItem = NSMenuItem(title: "Rows", action: nil, keyEquivalent: "")
+        rowsItem.submenu = rows
+        let columnsItem = NSMenuItem(title: "Columns", action: nil, keyEquivalent: "")
+        columnsItem.submenu = columns
+        sub.addItem(rowsItem)
+        sub.addItem(columnsItem)
+        if insetGridOverride != nil {
+            sub.addItem(ClosureMenuItem(title: "Use the Settings Default") { [weak self] in self?.useDefaultInsetGrid() })
+        }
+        parent.submenu = sub
+        return [.separator(), parent]
+    }
+
+    /// This window's own rows and/or columns (the other keeps its value).
+    func setInsetGrid(rows: Int?, columns: Int?) {
+        let current = effectiveInsetGrid
+        insetGridOverride = InsetGridSetting(rows: rows ?? current.rows, columns: columns ?? current.columns)
+        onInsetGridChange()
+    }
+
+    /// Back to the Settings default for this window.
+    func useDefaultInsetGrid() {
+        insetGridOverride = nil
+        onInsetGridChange()
+    }
+
     // MARK: Self-test
 
     /// The inset views drawn now, top of the stack first.
     var shownInsetViews: [InsetView] { insetBoard.shown.compactMap { alertInsetViews[$0.camera] }.filter { !$0.isHidden } }
+}
+
+/// The "+N more" chip: a click asks for the list of waiting cameras.
+@MainActor
+final class MoreChipView: NSTextField {
+    var onClick: ((NSView) -> Void)?
+    override func mouseDown(with event: NSEvent) { onClick?(self) }
 }
 
 /// A transparent view whose own area lets clicks through to what is below;

@@ -33,6 +33,9 @@ public struct SavedWindow: Codable, Equatable, Sendable {
     /// insets"); nil: the default corner. Left out of the file while nil;
     /// files without it (or with a value that cannot be read) load as nil.
     public var insetAnchor: InsetAnchor?
+    /// This window's own inset grid (docs/UX.md "Alert insets"); nil: the
+    /// Settings default. Left out of the file while nil.
+    public var insetGrid: InsetGridSetting?
     /// The window's Fill Tiles switch (docs/UX.md "Fill Tiles"). Left out
     /// while off.
     public var fill: Bool
@@ -51,8 +54,9 @@ public struct SavedWindow: Codable, Equatable, Sendable {
     public init(
         content: Content, frame: CGRect, fullScreen: Bool = false, sidebarCollapsed: Bool = false,
         insetAnchor: InsetAnchor? = nil, fill: Bool = false, tileViews: [SavedTileView] = [],
-        legacyTileViews: [LegacyTileView] = []
+        legacyTileViews: [LegacyTileView] = [], insetGrid: InsetGridSetting? = nil
     ) {
+        self.insetGrid = insetGrid
         self.content = content
         self.frame = frame
         self.fullScreen = fullScreen
@@ -64,7 +68,7 @@ public struct SavedWindow: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case content, frame, fullScreen, sidebarCollapsed, insetAnchor, fill, tiles, tileViews
+        case content, frame, fullScreen, sidebarCollapsed, insetAnchor, insetGrid, fill, tiles, tileViews
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -74,6 +78,7 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         try c.encode(fullScreen, forKey: .fullScreen)
         try c.encode(sidebarCollapsed, forKey: .sidebarCollapsed)
         try c.encodeIfPresent(insetAnchor, forKey: .insetAnchor)
+        try c.encodeIfPresent(insetGrid, forKey: .insetGrid)
         if fill { try c.encode(true, forKey: .fill) }
         if !tileViews.isEmpty { try c.encode(tileViews, forKey: .tiles) }
     }
@@ -88,6 +93,7 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         fullScreen = try c.decode(Bool.self, forKey: .fullScreen)
         sidebarCollapsed = try c.decodeIfPresent(Bool.self, forKey: .sidebarCollapsed) ?? false
         insetAnchor = (try? c.decodeIfPresent(InsetAnchor.self, forKey: .insetAnchor)) ?? nil
+        insetGrid = (try? c.decodeIfPresent(InsetGridSetting.self, forKey: .insetGrid)) ?? nil
         fill = ((try? c.decodeIfPresent(Bool.self, forKey: .fill)) ?? nil) ?? false
         let entries = ((try? c.decodeIfPresent([Lossy<SavedTileView>].self, forKey: .tiles)) ?? nil) ?? []
         // Read through the model: clamped, without empty entries or
