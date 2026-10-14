@@ -216,7 +216,7 @@ extension SelfTest {
         }
         if !model.audible.isEmpty { problems.append("ending the call did not restore what played before") }
         if window.state.focused == nil { problems.append("Esc on an inset also left focus") }
-        autoCloseStep(doorbell)
+        layoutReturnStep(doorbell)
     }
 
     /// A doorbell inset closes by itself a minute after the press ended.
@@ -1092,7 +1092,7 @@ extension SelfTest {
             let downward = stage.insetAnchor.map { $0.y == 0 && abs($0.x - 1.0 / 3) < 0.01 } == true && high.count == 2
                 && high[0].minX == high[1].minX && abs(high[0].minY - m) < 0.5 && abs(high[1].minY - (high[0].maxY + gap)) < 0.5
             print("inset drag with two insets: one column, bottom grows upward \(upward), top grows downward \(downward)")
-            if !upward { problems.append("two insets at the bottom did not stack upward from it in one column: \(low)") }
+            if !upward { problems.append("two insets at the bottom did not stack upward from it in one column: \(low) board \(stage.insetBoard.items.map { "\($0.camera.channel) \($0.kind)" }) shown \(stage.insetBoard.shown.count) chip \(stage.moreChip.stringValue) \(b)") }
             if !downward { problems.append("two insets at the top did not stack downward from it in one column: \(high)") }
             finishInsetDrag(doorbell, hall)
         }
@@ -1132,6 +1132,190 @@ extension SelfTest {
             advance(StageView.focusDuration)
             fisheyeStep()
         }
+    }
+
+    // MARK: Return inset and inset order (docs/UX.md "Alert insets")
+
+    /// What the grid draws now: the renderer's tiles and the drawable's size.
+    private func drawnTiles(_ stage: StageView) -> (tiles: [GridTile], drawable: CGSize) {
+        let grid = stage.grid
+        grid.prepare?(grid.renderer, grid.drawableSize)
+        return (grid.renderer.tiles, grid.drawableSize)
+    }
+
+    /// After a swap from a layout, the return inset draws the whole layout in
+    /// miniature; a click or Tab restores the layout as it was; after a swap
+    /// from a single focused tile it shows that one camera.
+    func layoutReturnStep(_ doorbell: CameraRef) {
+        let focusedBefore = window?.state.focused
+        guard let model = app.model, let window else { return checkLog() }
+        let stage = window.stage
+        stage.unfocus()
+        advance(StageView.focusDuration)
+        let leaves = stage.frames.leaves
+        guard leaves.count >= 3, leaves.allSatisfy({ $0.camera != nil }), let first = leaves.first else {
+            problems.append("the inset return steps need a layout of several cameras")
+            return restoreFocusThenAutoClose(doorbell, focusedBefore)
+        }
+        let cameras = stage.state.tree.cameras
+        // A zoomed tile and a selection must survive the round trip.
+        stage.zoom(at: CGPoint(x: first.rect.midX, y: first.rect.midY), by: 2, eased: false)
+        let zoomBefore = stage.zoom(atTile: first.path)
+        stage.state.selected = leaves[1].path
+        stage.insetBoard.started(.detection("people"), camera: doorbell, visible: false, now: model.clock.now, at: Date())
+        stage.syncInsets()
+        guard let rect = stage.insetVideoRects[doorbell] else {
+            problems.append("no inset to click for the return inset")
+            return restoreFocusThenAutoClose(doorbell, focusedBefore)
+        }
+        // parity: alert-inset-return-layout
+        // A real click on the inset: the stage shows its camera and the return
+        // inset draws all the layout's tiles, scaled into the inset's rectangle.
+        mouse(.leftMouseDown, CGPoint(x: rect.midX, y: rect.midY), in: window)
+        mouse(.leftMouseUp, CGPoint(x: rect.midX, y: rect.midY), in: window)
+        let swapped = stage.insetBoard.swap?.shown == doorbell
+        let returnItem = stage.insetBoard.items.first { $0.isReturn }
+        let isLayout = returnItem?.showsLayout == true && stage.insetBoard.swap?.displacedLayout == true
+        let drawn = drawnTiles(stage)
+        let miniature = Array(drawn.tiles.suffix(leaves.count))
+        let expected = Set(leaves.compactMap { $0.camera.flatMap { model.leases.tile(for: $0) }.map(ObjectIdentifier.init) })
+        let got = Set(miniature.map { ObjectIdentifier($0.picture as AnyObject) })
+        let union = miniature.reduce(CGRect.null) { $0.union($1.destination) }
+        let returnRect = returnItem.flatMap { stage.insetVideoRects[$0.camera] } ?? .zero
+        let sameShare =
+            drawn.drawable.width > 0 && stage.bounds.width > 0
+            && abs(union.width / drawn.drawable.width - returnRect.width / stage.bounds.width) < 0.02
+            && abs(union.height / drawn.drawable.height - returnRect.height / stage.bounds.height) < 0.02
+        print(
+            "return layout: swapped \(swapped), return inset shows the layout \(isLayout), tiles drawn \(drawn.tiles.count) "
+                + "(stage 1 + \(leaves.count) in the inset), same pictures \(expected == got), in the inset's rectangle \(sameShare)")
+        if !swapped { problems.append("a click on the inset did not swap it onto the stage") }
+        if !isLayout { problems.append("the return inset does not show the layout the stage had") }
+        if drawn.tiles.count != 1 + leaves.count { problems.append("the grid drew \(drawn.tiles.count) tiles, expected the stage plus the layout") }
+        if expected != got { problems.append("the miniature does not draw the layout's own tiles") }
+        if !sameShare { problems.append("the miniature layout is not scaled into the return inset's rectangle") }
+
+        // parity: alert-inset-return-tab
+        press("\t", keyCode: ViewerKeys.tab)
+        let restored = stage.insetBoard.swap == nil && stage.state.tree.cameras == cameras
+            && stage.state.selected == leaves[1].path && stage.zoom(atTile: first.path) == zoomBefore
+        let again = drawnTiles(stage)
+        print("return Tab: layout restored with the same cameras, zoom and selection \(restored), tiles drawn \(again.tiles.count)")
+        if !restored { problems.append("Tab did not restore the same layout (cameras, zoom, selection)") }
+        if again.tiles.count != leaves.count + 1 { problems.append("after Tab the grid draws \(again.tiles.count) tiles") }
+
+        // parity: alert-inset-return-single
+        // A single focused tile keeps the one-camera return inset.
+        stage.focus(leaves[2].path)
+        advance(StageView.focusDuration)
+        stage.swapInset(doorbell)
+        let single = stage.insetBoard.items.first { $0.isReturn }
+        let oneCamera = single?.showsLayout == false && single?.camera == leaves[2].camera
+        let singleDrawn = drawnTiles(stage).tiles.count
+        print("return single: shows the focused camera \(oneCamera), tiles drawn \(singleDrawn)")
+        if !oneCamera { problems.append("a swap from a focused tile did not keep a one-camera return inset") }
+        if singleDrawn != 2 { problems.append("the single-camera return drew \(singleDrawn) tiles, expected 2") }
+        press("\t", keyCode: ViewerKeys.tab)
+        if stage.insetBoard.swap != nil { problems.append("Tab did not swap back from the single-camera return") }
+        stage.unfocus()
+        advance(StageView.focusDuration)
+        stage.dismissInset(doorbell)
+        stage.zoom(at: CGPoint(x: first.rect.midX, y: first.rect.midY), by: 0.5, eased: false)
+        insetOrderStep(doorbell, focusedBefore)
+    }
+
+    /// The steps after these expect the window focused as the call steps
+    /// left it; the layout steps put that back.
+    private func restoreFocusThenAutoClose(_ doorbell: CameraRef, _ focused: NodePath?) {
+        if let focused, let stage = window?.stage {
+            stage.focus(focused)
+            advance(StageView.focusDuration)
+        }
+        autoCloseStep(doorbell)
+    }
+
+    /// Four cameras with events interleaved on a simulated clock: three
+    /// insets in, the fourth waits until the lowest has been up 10 s, then
+    /// the order holds; the chip brings a waiting camera in.
+    func insetOrderStep(_ doorbell: CameraRef, _ focusedBefore: NodePath?) {
+        guard let model = app.model, let window else { return checkLog() }
+        let stage = window.stage
+        let cameras = (0..<4).map { CameraRef(device: doorbell.device, channel: $0) }
+        // parity: alert-inset-order
+        let start = model.clock.now
+        var changes: [Double] = []
+        var last: [CameraRef] = []
+        for second in 0..<24 {
+            stage.insetBoard.started(
+                .detection("people"), camera: cameras[second % 4], visible: false, now: model.clock.now, at: Date())
+            stage.syncInsets()
+            advance(1)
+            let shown = stage.insetBoard.shown.map(\.camera)
+            if shown != last {
+                changes.append(model.clock.now - start)
+                last = shown
+            }
+        }
+        let stable = changes.count == 4 && changes.dropLast().allSatisfy { $0 <= 3 } && (changes.last ?? 0) >= InsetBoard.minimumShownTime
+        let counts = cameras.compactMap { stage.insetBoard.item(for: $0)?.count }
+        print("inset order: changes at \(changes.map { Int($0) }) s, repeats refreshed in place \(counts.allSatisfy { $0 >= 6 })")
+        if !stable { problems.append("insets churned: shown set changed at \(changes) s (expected 3 arrivals, then one swap after 10 s)") }
+        if counts.count != 4 || !counts.allSatisfy({ $0 >= 6 }) { problems.append("repeated events did not refresh their insets in place") }
+        let waiting = stage.insetBoard.waiting.map(\.camera)
+        let chipText = stage.moreChip.isHidden ? "" : stage.moreChip.stringValue
+        print("inset order: waiting \(waiting.count), chip \"\(chipText)\"")
+        if waiting.count != 1 || !chipText.hasPrefix("+") { problems.append("the chip does not show the waiting camera: \"\(chipText)\"") }
+        // The chip lists the waiting camera; choosing it brings it in.
+        if let camera = waiting.first {
+            stage.bringInInset(camera)
+            let nowShown = stage.insetBoard.shown.first?.camera == camera && stage.insetBoard.shown.count == 3
+                && stage.insetBoard.waiting.count == 1
+            if !nowShown { problems.append("choosing a waiting camera did not bring it in") }
+        }
+        for item in stage.insetBoard.items { stage.dismissInset(item.camera) }
+        insetGridStep(doorbell, focusedBefore)
+    }
+
+    /// The Settings grid (rows x columns) sets how many insets show; a
+    /// window can override it, saved with the window.
+    func insetGridStep(_ doorbell: CameraRef, _ focusedBefore: NodePath?) {
+        guard let model = app.model, let window else { return checkLog() }
+        let stage = window.stage
+        let cameras = (0..<7).map { CameraRef(device: doorbell.device, channel: $0) }
+        // parity: alert-inset-grid
+        model.insetGrid = InsetGridSetting(rows: 2, columns: 3)
+        for camera in cameras {
+            stage.insetBoard.started(.detection("people"), camera: camera, visible: false, now: model.clock.now, at: Date())
+        }
+        stage.refreshChrome()
+        stage.syncInsets()
+        let shown = stage.insetBoard.shown.count
+        let more = stage.insetBoard.more
+        let chip = stage.moreChip.isHidden ? "" : stage.moreChip.stringValue
+        let columns = Set(stage.shownInsetViews.map { Int($0.frame.minX) }).count
+        let fits = InsetGeometry.fittingColumns(stage: Double(stage.insetLayer.bounds.width), columns: 3)
+        print("inset grid 2x3: \(shown) shown, \(more) more, chip \"\(chip)\", \(columns) columns of \(fits) fitting")
+        if shown != 6 || more != 1 { problems.append("a 2 x 3 inset grid shows \(shown) with \(more) more, expected 6 and 1") }
+        if !chip.hasPrefix("+1 more") { problems.append("the 7th inset is not in \"+N more\": \"\(chip)\"") }
+        if fits >= 3 && !stage.insetsTruncated && columns != 3 { problems.append("the insets are in \(columns) columns, expected 3") }
+
+        // This window's own grid wins and is saved with the window; the
+        // Settings default is untouched.
+        stage.setInsetGrid(rows: 1, columns: 2)
+        let overridden = stage.insetBoard.shown.count == 2 && stage.insetBoard.more == 5
+            && window.savedWindow?.insetGrid == InsetGridSetting(rows: 1, columns: 2)
+            && model.insetGrid == InsetGridSetting(rows: 2, columns: 3)
+        print("inset grid override 1x2: \(stage.insetBoard.shown.count) shown, saved \(window.savedWindow?.insetGrid != nil), settings kept \(model.insetGrid.capacity == 6)")
+        if !overridden { problems.append("this window's inset grid did not override the Settings default") }
+        stage.useDefaultInsetGrid()
+        let back = stage.insetBoard.shown.count == 6 && window.savedWindow?.insetGrid == nil
+        if !back { problems.append("Use the Settings Default did not bring the Settings grid back") }
+        // The Settings default changes for windows without their own.
+        model.insetGrid = .standard
+        stage.refreshChrome()
+        if stage.insetBoard.shown.count != 3 { problems.append("changing the Settings grid did not reach the window") }
+        for item in stage.insetBoard.items { stage.dismissInset(item.camera) }
+        restoreFocusThenAutoClose(doorbell, focusedBefore)
     }
 
     // MARK: Fisheye (docs/UX.md "Fisheye cameras")

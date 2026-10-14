@@ -13,6 +13,8 @@ struct InsetContent: Equatable {
     var call: CallContent?
     /// "● Recording 0:42" while the call is recorded (the call bar's pill).
     var recording: String? = nil
+    /// The return inset draws the whole layout the stage showed.
+    var showsLayout = false
 }
 
 /// The doorbell call's part of an inset (or of the stage, when the doorbell
@@ -106,6 +108,8 @@ final class InsetView: NSView, CallControlsDelegate {
     var onDrag: ((DragPhase, CGPoint) -> Void)?
     /// "Reset Position" in the inset's menu (stage).
     var onResetPosition: (() -> Void)?
+    /// More menu items over the stage (the window's inset grid).
+    var extraMenuItems: (() -> [NSMenuItem])?
 
     enum DragPhase {
         case began, moved, ended
@@ -235,14 +239,14 @@ final class InsetView: NSView, CallControlsDelegate {
     func apply(_ c: InsetContent) {
         guard c != content else { return }
         content = c
-        title.stringValue = c.isReturn ? "Back to the view (click or Tab)" : c.header
+        title.stringValue = c.isReturn ? (c.showsLayout ? "Back to the layout (click or Tab)" : "Back to the view (click or Tab)") : c.header
         name.stringValue = c.cameraName
         recordingPill.stringValue = c.recording ?? ""
         recordingPill.isHidden = c.recording == nil || c.isReturn
         close.toolTip = c.isReturn ? "Swap back" : "Close (Esc)"
         let color: NSColor = c.isReturn ? .secondaryLabelColor : c.critical ? .systemRed : .systemTeal
         border.borderColor = color.cgColor
-        setAccessibilityLabel("\(c.isReturn ? "Back to the view" : c.header), \(c.cameraName)")
+        setAccessibilityLabel("\(c.isReturn ? (c.showsLayout ? "Back to the layout" : "Back to the view") : c.header), \(c.cameraName)")
         if let call = c.call {
             callPanel.isHidden = false
             callPanel.apply(call)
@@ -358,6 +362,7 @@ final class InsetView: NSView, CallControlsDelegate {
             if let reset = onResetPosition {
                 menu.addItem(ClosureMenuItem(title: "Reset Position", action: reset))
             }
+            for item in extraMenuItems?() ?? [] { menu.addItem(item) }
             guard !menu.items.isEmpty else { return nil }
         case .window:
             menu.addItem(ClosureMenuItem(title: "Pop In Call") { [weak self] in self?.onPopIn() })

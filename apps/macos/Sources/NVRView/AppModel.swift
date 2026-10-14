@@ -175,6 +175,25 @@ final class AppModel {
         }
     }
     static let insetCornerKey = "insetCorner"
+    /// How many alert insets a window draws at once, as rows and columns
+    /// (Settings > Alerts; a window may override it).
+    var insetGrid: InsetGridSetting = AppModel.storedInsetGrid() {
+        didSet {
+            UserDefaults.standard.set(insetGrid.rows, forKey: Self.insetRowsKey)
+            UserDefaults.standard.set(insetGrid.columns, forKey: Self.insetColumnsKey)
+            notify()
+        }
+    }
+    static let insetRowsKey = "insetRows"
+    static let insetColumnsKey = "insetColumns"
+    private static func storedInsetGrid() -> InsetGridSetting {
+        let d = UserDefaults.standard
+        guard d.object(forKey: insetRowsKey) != nil || d.object(forKey: insetColumnsKey) != nil else { return .standard }
+        let std = InsetGridSetting.standard
+        return InsetGridSetting(
+            rows: d.object(forKey: insetRowsKey) == nil ? std.rows : d.integer(forKey: insetRowsKey),
+            columns: d.object(forKey: insetColumnsKey) == nil ? std.columns : d.integer(forKey: insetColumnsKey))
+    }
     /// Where the call settings below are kept: the standard defaults, a
     /// throwaway suite in the self-test (`useCallDefaults`).
     @ObservationIgnored private(set) var callDefaults = UserDefaults.standard

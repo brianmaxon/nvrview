@@ -32,19 +32,34 @@ extension StageView {
         var tiles: [CameraRef: [VerifyCheck]] = [:]
         var insets: [CameraRef: [VerifyCheck]] = [:]
         let alerts = model.alertsModel!
+        var live: Set<UInt64> = []
         for c in alerts.board.shown {
-            // Every angle the check looks at that this window shows gets the
-            // band; the first angle decides the inset.
-            var inTile = false
-            for cam in c.cameras.compactMap({ model.cameraRef($0) }) where showsCamera(cam) {
-                if alerts.place(c, onScreen: true) == .tile {
-                    tiles[cam, default: []].append(c)
-                    inTile = true
+            live.insert(c.id)
+            let cameras = c.cameras.compactMap { model.cameraRef($0) }
+            let inLayout = cameras.filter { state.tree.cameras.contains($0) }
+            // The place it started in holds until the check ends; only a tile
+            // whose camera left the layout altogether is decided again.
+            var place = verifyPlaced[c.id]
+            if place == .tile && inLayout.isEmpty { place = nil }
+            if place == nil {
+                // Every angle the check looks at that this window shows gets
+                // the band; the first angle decides the inset.
+                if cameras.contains(where: showsCamera), alerts.place(c, onScreen: true) == .tile {
+                    place = .tile
+                } else if let cam = ref(c) {
+                    place = alerts.place(c, onScreen: showsCamera(cam))
                 }
+                verifyPlaced[c.id] = place
             }
-            guard !inTile, let cam = ref(c) else { continue }
-            if alerts.place(c, onScreen: showsCamera(cam)) == .inset { insets[cam, default: []].append(c) }
+            switch place {
+            case .tile?:
+                for cam in inLayout { tiles[cam, default: []].append(c) }
+            case .inset?:
+                if let cam = ref(c) { insets[cam, default: []].append(c) }
+            default: break
+            }
         }
+        verifyPlaced = verifyPlaced.filter { live.contains($0.key) }
         return (tiles, insets)
     }
 
