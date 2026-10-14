@@ -91,6 +91,12 @@ RUST_SHARED = [
     "rustfmt.toml", ".rustfmt.toml", "fixtures/synthetic/",
 ]
 FIXTURES = ["fixtures/synthetic/"]
+# Files that are never an input of any suite, even to a whole-tree one. The
+# VERSION file: no test or self-test asserts the value (the Windows build
+# compiles a fixed placeholder version, and the app reads the real one from
+# a file the packaging step writes; the macOS bundle gets it in Info.plist at
+# packaging time), so a version bump reruns nothing.
+NEVER_INPUT = {"VERSION"}
 
 # The C# projects under apps/windows and the projects each references (kept in
 # step with the project files: `suite-cache.py check-projects`, run by
@@ -135,36 +141,36 @@ SUITES = {
         # bindings change reruns the smoke test only; a shell or tile change
         # reruns those tests only.
         "csharp-docker-smoke": (dotnet_inputs("Smoke") + [W + "layout/", "scripts/csharp-check.sh",
-                                "scripts/docker-slot.sh", "scripts/docker-rust-image.sh", "VERSION"] + FIXTURES,
+                                "scripts/docker-slot.sh", "scripts/docker-rust-image.sh"] + FIXTURES,
                                 ["viewer-ffi", "mock-nvr"], ["linux-image", "dotnet-image"]),
-        "csharp-docker-shell": (dotnet_inputs("Shell.Tests") + ["scripts/csharp-check.sh", "scripts/docker-slot.sh", "VERSION"] + FIXTURES,
+        "csharp-docker-shell": (dotnet_inputs("Shell.Tests") + ["scripts/csharp-check.sh", "scripts/docker-slot.sh"] + FIXTURES,
                                 [], ["dotnet-image"]),
-        "csharp-docker-tiles": (dotnet_inputs("Tiles.Tests") + ["scripts/csharp-check.sh", "scripts/docker-slot.sh", "VERSION"],
+        "csharp-docker-tiles": (dotnet_inputs("Tiles.Tests") + ["scripts/csharp-check.sh", "scripts/docker-slot.sh"],
                                 [], ["dotnet-image"]),
         # The Swift package compiles against a header-only copy of the C
         # interface (docs/nvrview.h) and never links the Rust library by
         # default, so the Rust crates are not its inputs; the header is.
-        "swift-test": (["apps/macos/", "docs/nvrview.h", "crates/viewer-ffi/include/", "VERSION"] + FIXTURES, [], ["swift"]),
-        "macos-demo-metal": (["apps/macos/", "docs/nvrview.h", "crates/viewer-ffi/include/", "VERSION"] + FIXTURES, [], ["swift"]),
-        "macos-demo-layer": (["apps/macos/", "docs/nvrview.h", "crates/viewer-ffi/include/", "VERSION"] + FIXTURES, [], ["swift"]),
+        "swift-test": (["apps/macos/", "docs/nvrview.h", "crates/viewer-ffi/include/"] + FIXTURES, [], ["swift"]),
+        "macos-demo-metal": (["apps/macos/", "docs/nvrview.h", "crates/viewer-ffi/include/"] + FIXTURES, [], ["swift"]),
+        "macos-demo-layer": (["apps/macos/", "docs/nvrview.h", "crates/viewer-ffi/include/"] + FIXTURES, [], ["swift"]),
         "browser": ([""], [], ["rust"]),  # the whole tree
     },
     "windows": {
         # Each C# suite covers the projects it builds (their project
         # references, transitively), the shared build settings, and, for those
         # that load the core, the core crates and the fixtures.
-        "csharp-smoke": (dotnet_inputs("Smoke") + [W + "layout/", "scripts/csharp-smoke.sh", "VERSION"] + FIXTURES,
+        "csharp-smoke": (dotnet_inputs("Smoke") + [W + "layout/", "scripts/csharp-smoke.sh"] + FIXTURES,
                          ["viewer-ffi", "mock-nvr"], ["rust"]),
         # The tile features' logic on simulated time (managed code only).
-        "tiles-tests": (dotnet_inputs("Tiles.Tests") + ["scripts/csharp-smoke.sh", "VERSION"], [], ["rust"]),
-        "video-selftest": (dotnet_inputs("Demo") + ["scripts/csharp-video-selftest.sh", "VERSION"] + FIXTURES,
+        "tiles-tests": (dotnet_inputs("Tiles.Tests") + ["scripts/csharp-smoke.sh"], [], ["rust"]),
+        "video-selftest": (dotnet_inputs("Demo") + ["scripts/csharp-video-selftest.sh"] + FIXTURES,
                            ["viewer-ffi", "mock-nvr"], ["rust"]),
         # The shell tests are managed code only (no native library).
-        "shell-tests": (dotnet_inputs("Shell.Tests") + ["VERSION"] + FIXTURES, [], ["rust"]),
+        "shell-tests": (dotnet_inputs("Shell.Tests") + FIXTURES, [], ["rust"]),
         # The side-by-side update end to end, on the trimmed build: the
         # updater and start-up handling, the packaging script, and the
         # signing tool's crates. The rest of the app is the self-test areas'.
-        "app-update": (UPDATE_FILES + ["scripts/windows-app.sh", "VERSION"], ["viewer-ffi", "sign-update"], ["rust"]),
+        "app-update": (UPDATE_FILES + ["scripts/windows-app.sh"], ["viewer-ffi", "sign-update"], ["rust"]),
         # app-debug.AREA and app-publish are added below (WINDOWS_AREAS).
     },
 }
@@ -225,7 +231,7 @@ WINDOWS_OWNED = {
     "ptz": [_A + "SelfTest.Ptz.cs", _A + "PtzControls.cs", _A + "StageView.Ptz.cs", _A + "Viewer.Ptz.cs",
             _S + "FakePtz.cs", _S + "Ptz.cs", _S + "PtzModel.cs"],
 }
-WINDOWS_APP_EXTRA = ["scripts/windows-app.sh", "scripts/windows-selftest-areas.txt", "VERSION"] + FIXTURES
+WINDOWS_APP_EXTRA = ["scripts/windows-app.sh", "scripts/windows-selftest-areas.txt"] + FIXTURES
 
 
 def windows_area_excludes(area):
@@ -280,7 +286,7 @@ MAC_OWNED = {
                _C + "SmartAlerts.swift", _C + "SmartAlertSettings.swift", _C + "VerificationBoard.swift",
                _F + "FakeAlerts.swift", "apps/macos/Sources/AlertHost/", "apps/macos/Sources/DetectorKit/"],
 }
-MAC_APP_EXTRA = ["docs/nvrview.h", "crates/viewer-ffi/include/", "scripts/macos-selftest-areas.txt", "VERSION"] + FIXTURES
+MAC_APP_EXTRA = ["docs/nvrview.h", "crates/viewer-ffi/include/", "scripts/macos-selftest-areas.txt"] + FIXTURES
 
 
 def mac_area_excludes(area):
@@ -431,7 +437,7 @@ class Tree:
     def key(self, suite, paths, tool_kinds, excludes=()):
         """(key, dirty input or None). EXCLUDES are left out (a trailing / is a directory)."""
         ex_dirs = tuple(e for e in excludes if e.endswith("/"))
-        ex_files = set(e for e in excludes if not e.endswith("/"))
+        ex_files = set(e for e in excludes if not e.endswith("/")) | NEVER_INPUT
 
         def skip(path):
             return path in ex_files or path.startswith(ex_dirs)
