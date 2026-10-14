@@ -87,6 +87,11 @@ internal sealed class CameraTile(ulong id, DeviceEntry device, CameraRef camera,
 
     public double ReceivedRate { get; set; }
 
+    public long LastDecoded { get; set; }
+
+    /// <summary>Pictures decoded per second, from the tile's counters at each tile_stats event.</summary>
+    public double DecodedRate { get; set; }
+
     public long LastStatsAt { get; set; }
 
     /// <summary>The latest audio_stats event (JSON), for diagnostics.</summary>
@@ -149,6 +154,8 @@ internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera,
     public string? AudioStats => Shared?.AudioStats;
 
     public double ReceivedRate => Shared?.ReceivedRate ?? 0;
+
+    public double DecodedRate => Shared?.DecodedRate ?? 0;
 
     /// <summary>The tile's quality choice (docs/UX.md "Stream quality per tile"), kept in the layout leaf's "quality" member.</summary>
     public TileQuality Quality { get; set; } = quality;
@@ -1388,7 +1395,10 @@ internal sealed partial class Viewer : ITileBackend<CameraTile>
                     {
                         double dt = (now - stats.LastStatsAt) / (double)Stopwatch.Frequency;
                         stats.ReceivedRate = dt > 0 ? (e.Received - stats.LastReceived) / dt : 0;
+                        long decoded = stats.Video.Counters.Decoded;
+                        stats.DecodedRate = dt > 0 && decoded >= stats.LastDecoded ? (decoded - stats.LastDecoded) / dt : 0;
                     }
+                    stats.LastDecoded = stats.Video.Counters.Decoded;
                     stats.LastReceived = e.Received;
                     stats.LastStatsAt = now;
                 }

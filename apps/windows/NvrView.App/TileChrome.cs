@@ -68,6 +68,7 @@ internal sealed class TileChrome
     private readonly TextBlock _status;
     private readonly StackPanel _badges;
     private readonly TextBlock _diagnostics;
+    private readonly TextBlock _rates;
     private readonly Border _outline;
     private readonly Grid _header;
     private readonly Border _map;
@@ -314,6 +315,19 @@ internal sealed class TileChrome
             IsHitTestVisible = false,
         };
         Root.Children.Add(_diagnostics);
+
+        // The frame-rate readout (header menu, "Show frame rates"), just above the diagnostics line.
+        _rates = new TextBlock
+        {
+            Foreground = White,
+            FontSize = 11,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(6, 6, 6, 24),
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+        };
+        Root.Children.Add(_rates);
 
         Root.Children.Add(_indicators);
         PlaceIndicators();
@@ -619,6 +633,24 @@ internal sealed class TileChrome
             RetryClicked?.Invoke(Tile);
         }
     }
+
+    /// <summary>The frame-rate readout; null hides it.</summary>
+    public void SetRates(string? text)
+    {
+        if (text is null)
+        {
+            _rates.Visibility = Visibility.Collapsed;
+            return;
+        }
+        if (_rates.Text != text)
+        {
+            _rates.Text = text;
+        }
+        _rates.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The readout text now shown, null while hidden (self-test).</summary>
+    public string? RatesText => _rates.Visibility == Visibility.Visible ? _rates.Text : null;
 
     /// <summary>Text, badges and the header's model after a state change (not per frame).</summary>
     public void Refresh(string title, string? status, bool audible, string? diagnostics, TileHeaderTile? header, string? pill = null)

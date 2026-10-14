@@ -46,6 +46,25 @@ internal sealed partial class SelfTest
             Expect(stage.ChromeFor(withSymbols)!.Corner == ChromeCorner.BottomLeft, "the indicator corner setting did not move the symbols");
             v.Settings.IndicatorCorner = ChromeCorner.TopRight;
         }
+        // parity: frame-rates-readout
+        // View > Show frame rates: off by default, one readout per camera tile, remembered in the settings file.
+        Expect(!v.Settings.ShowFrameRates && Tiles.Where(t => t.CameraOrNone is not null).All(t => stage.ChromeFor(t)!.RatesText is null), "frame rates are not off by default");
+        stage.ToggleFrameRates();
+        bool ratesShown = await Until(() => Tiles.Where(t => t.CameraOrNone is not null).All(t => stage.ChromeFor(t)!.RatesText?.StartsWith("Device ", StringComparison.Ordinal) == true), 15);
+        Say($"frame rates: {stage.ChromeFor(Tiles.First(t => t.CameraOrNone is not null))!.RatesText}");
+        Expect(ratesShown, "Show frame rates did not show a readout on every tile");
+        string ratesFile = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-view-settings-{Guid.NewGuid():N}.json");
+        try
+        {
+            _ = new ViewSettings(ratesFile) { ShowFrameRates = true };
+            Expect(new ViewSettings(ratesFile).ShowFrameRates, "the frame rate choice was not remembered");
+        }
+        finally
+        {
+            File.Delete(ratesFile);
+        }
+        stage.ToggleFrameRates();
+        Expect(Tiles.Where(t => t.CameraOrNone is not null).All(t => stage.ChromeFor(t)!.RatesText is null), "Hide frame rates left a readout");
         // parity: indicator-strip-render
         await RenderStrip(stage);
 

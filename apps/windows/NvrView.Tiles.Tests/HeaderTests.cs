@@ -48,7 +48,7 @@ internal static class HeaderTests
 
     private static void AppWide()
     {
-        foreach (string t in new[] { "Settings…", "Keyboard shortcuts", "Full screen", "Leave full screen", "Fill tiles", "Hide diagnostics",
+        foreach (string t in new[] { "Settings…", "Keyboard shortcuts", "Full screen", "Leave full screen", "Fill tiles", "Hide diagnostics", "Show frame rates", "Hide frame rates",
                      "Show sidebar", "New window", "Recordings", "Indicator corner", "Edit layout", "Done editing", "Save as layout…", "New layout…",
                      "Check for updates…", "Update to 1.2.3…", "Switch to 1.2.3…", "Find devices", "Stop all recordings", "Open recordings folder" })
         {
