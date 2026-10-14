@@ -35,6 +35,10 @@
 # release-notes.json; the binary is untouched, so what ships is what was
 # tested, apart from the self-test module only the test build links in; see
 # scripts/macos-real-selftest.sh), and the bundle is signed again and zipped.
+# When this checkout has no such bundle (a new worktree, or a check taken from
+# the test result cache), the tested bundle kept in the common git directory
+# (nvrview-builds/macos/<tree>, newest 3 trees, saved by the self-test) is
+# restored first.
 # A tree that differs from the tested one in VERSION alone (a version bump)
 # reuses it too: the version is not compiled in, it is only in Info.plist, so
 # that file is written again from VERSION before the bundle is signed. --rebuild forces a build
@@ -112,6 +116,35 @@ same_but_version() { # TREE: whether it is the tree being packaged or differs fr
   [ "$1" = "$tree" ] ||
     { [ -n "$1" ] && git cat-file -e "$1^{tree}" 2>/dev/null && [ "$(git diff --name-only "$1" "$tree")" = VERSION ]; }
 }
+# The build folder of this checkout may hold no tested bundle (a new worktree,
+# or a check that was taken from the test result cache): the tested bundles
+# kept in the common git directory (scripts/macos-real-selftest.sh) are looked
+# through, this tree's first, then one that differs from it in VERSION alone.
+if [ "$rebuild" = 0 ] && [ "$real" = 1 ] && [ "$bundle_detector" = 0 ] && [ -n "$tree" ] &&
+  ! { [ -x "$app/Contents/MacOS/NVRView" ] && [ "$tested_tree" = "$built_tree" ] && same_but_version "$tested_tree"; }; then
+  . scripts/tested-builds-lib.sh
+  store="$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-builds/macos"
+  found=""
+  for cand in $(tb_list "$store"); do
+    [ -x "$store/$cand/NVRView.app/Contents/MacOS/NVRView" ] || continue
+    [ "$(sed -n 's/^tree=//p' "$store/$cand/NVRView.app.tested")" = "$cand" ] || continue
+    if [ "$cand" = "$tree" ]; then found=$cand; break; fi
+    if [ -z "$found" ] && same_but_version "$cand"; then found=$cand; fi
+  done
+  if [ -n "$found" ]; then
+    echo "restoring the tested app bundle kept for tree $found (this checkout has none for this tree)"
+    rm -rf "$app" build/NVRView.app.tested build/NVRView.app.tree
+    mkdir -p build
+    cp -Rp "$store/$found/NVRView.app" "$app"
+    cp -p "$store/$found/NVRView.app.tested" build/NVRView.app.tested
+    echo "$found" >build/NVRView.app.tree
+    tb_touch "$store" "$found"
+    tested_tree=$found
+    built_tree=$found
+  else
+    echo "no tested app bundle kept for this tree or a VERSION-only neighbor; building it"
+  fi
+fi
 if [ "$rebuild" = 0 ] && [ "$real" = 1 ] && [ "$bundle_detector" = 0 ] && [ -n "$tree" ] && [ -x "$app/Contents/MacOS/NVRView" ] &&
   [ "$tested_tree" = "$built_tree" ] && same_but_version "$tested_tree"; then
   reuse=1

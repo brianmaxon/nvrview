@@ -85,7 +85,7 @@ host=""
 for a; do case "$a" in -*|BatchMode=*|ConnectTimeout=*) ;; *) if [ "$a" != "$cmd" ]; then host="$a"; fi ;; esac; done
 echo "$host $(echo "$cmd" | cut -c1-40)" >>"$FS_DIR/ssh.log"
 case "$cmd" in
-  "echo connected") echo connected ;;
+  "echo connected") if [ "$host" = "${FS_DOWN_HOST:-none}" ]; then echo "ssh: connect to host $host: timed out" >&2; exit 255; fi; echo connected ;;
   *powershell*) echo 100 ;;
   *"rustc -vV"*) echo "rustc fake ${FS_TOOLS_SUFFIX:-}$( [ "$host" = "${FS_ODD_HOST:-none}" ] && echo odd )" ;;
   *"windows-worker.sh"*)
@@ -128,7 +128,11 @@ case "$cmd" in
     fi
     printf '\nWindows checks passed in 5s.\n'
     ;;
-  *tar.exe*) cat >/dev/null; echo "synced" >>"$FS_DIR/sync.$host" ;;
+  *tar.exe*) cat >/dev/null; echo "synced" >>"$FS_DIR/sync.$host"; printf '%s\n' "$cmd" >"$FS_DIR/synccmd.$host" ;;
+  *robocopy*)
+    printf '%s %s\n' "$host" "$cmd" >>"$FS_DIR/remove.log"
+    # Windows' cmd prints CRLF lines; a host with FS_STUCK_HOST cannot delete the folder.
+    if [ "$host" = "${FS_STUCK_HOST:-none}" ]; then printf 'NOT-DELETED\r\n'; else printf 'deleted\r\n'; fi ;;
   *) ;;
 esac
 EOF
@@ -262,6 +266,50 @@ for failing in rust rest; do
   fi
   unset FS_FAIL_PART
 done
+
+# --- removing workers (long paths) ---------------------------------------------
+# A removal mirrors an empty folder over the worker with robocopy before any
+# rmdir /s, which cannot delete cargo's and dotnet's long paths; src\ is
+# replaced the same way on every sync.
+robocopy_first() { # FILE: no rmdir /s comes before the first robocopy
+  awk '{ r = index($0, "robocopy"); d = index($0, "rmdir /s"); exit !(r > 0 && (d == 0 || r < d)) }' "$1"
+}
+fresh rm
+export NVRVIEW_WINDOWS_HOSTS="win-a win-b"
+cd "$r"
+PATH="$r.bin:$PATH" scripts/windows-check.sh --remove-worker agent1 >"$work/rm1.out" 2>&1 && pass "--remove-worker removes a worker" || { cat "$work/rm1.out"; fail "--remove-worker removes a worker"; }
+[ "$(wc -l <"$FS_DIR/remove.log" | tr -d ' ')" = 2 ] && grep -q '^win-a ' "$FS_DIR/remove.log" && grep -q '^win-b ' "$FS_DIR/remove.log" && pass "...on every host" || fail "...on every host"
+grep -q '_rm_agent1 agent1 /MIR /XJ' "$FS_DIR/remove.log" && pass "...by mirroring an empty folder over it" || { cat "$FS_DIR/remove.log"; fail "...by mirroring an empty folder over it"; }
+head -n 1 "$FS_DIR/remove.log" >"$FS_DIR/remove.one"
+robocopy_first "$FS_DIR/remove.one" && pass "...before any rmdir /s, which fails on long paths" || fail "...before any rmdir /s, which fails on long paths"
+grep -q 'removed worker agent1' "$work/rm1.out" && pass "...and says which hosts" || fail "...and says which hosts"
+# The kept workers are refused, before any host is asked.
+: >"$FS_DIR/ssh.log"
+rm -f "$FS_DIR/remove.log"
+for kept in merge fullcheck main; do
+  if PATH="$r.bin:$PATH" scripts/windows-check.sh --remove-worker "$kept" >"$work/rm-$kept.out" 2>&1; then fail "--remove-worker refuses $kept"; else
+    grep -q 'refusing to remove the kept worker' "$work/rm-$kept.out" && pass "--remove-worker refuses the kept worker $kept" || fail "--remove-worker refuses the kept worker $kept"
+  fi
+done
+[ ! -s "$FS_DIR/ssh.log" ] && [ ! -f "$FS_DIR/remove.log" ] && pass "...without touching a host" || fail "...without touching a host"
+if PATH="$r.bin:$PATH" scripts/windows-check.sh --remove-worker 'a b' >/dev/null 2>&1; then fail "--remove-worker refuses an odd name"; else pass "--remove-worker refuses an odd name"; fi
+# An unreachable host is reported and fails the command; the other host is done.
+rm -f "$FS_DIR/remove.log"
+if FS_DOWN_HOST=win-a PATH="$r.bin:$PATH" scripts/windows-check.sh --remove-worker agent2 >"$work/rm-down.out" 2>&1; then fail "an unreachable host fails --remove-worker"; else pass "an unreachable host fails --remove-worker"; fi
+grep -q 'UNREACHABLE: win-a: worker agent2 was NOT removed there' "$work/rm-down.out" && pass "...and is named" || { cat "$work/rm-down.out"; fail "...and is named"; }
+grep -q '^win-b ' "$FS_DIR/remove.log" && ! grep -q '^win-a ' "$FS_DIR/remove.log" && grep -q 'win-b: removed worker agent2' "$work/rm-down.out" && pass "...while the reachable host is still cleaned" || fail "...while the reachable host is still cleaned"
+# A folder that stays is a failure too.
+if FS_STUCK_HOST=win-b PATH="$r.bin:$PATH" scripts/windows-check.sh --remove-worker agent3 >"$work/rm-stuck.out" 2>&1; then fail "a folder that stays fails --remove-worker"; else pass "a folder that stays fails --remove-worker"; fi
+grep -q 'FAILED: win-b: worker agent3 is still there' "$work/rm-stuck.out" && pass "...and is named" || fail "...and is named"
+# --clean uses the same removal on one host.
+rm -f "$FS_DIR/remove.log"
+NVRVIEW_WINDOWS_HOST=win-b PATH="$r.bin:$PATH" scripts/windows-check.sh --clean agent4 >"$work/clean.out" 2>&1 && grep -q '_rm_agent4 agent4 /MIR' "$FS_DIR/remove.log" && pass "--clean mirrors an empty folder over the worker too" || { cat "$work/clean.out"; fail "--clean mirrors an empty folder over the worker too"; }
+cd "$here"
+# The sync replaces src\ the same way.
+fresh syncsrc
+export NVRVIEW_WINDOWS_HOSTS="win-a"
+run_check "$r" "$work/syncsrc.out" || true
+if grep -q 'robocopy _rm_src src /MIR /XJ' "$FS_DIR/synccmd.win-a" && robocopy_first "$FS_DIR/synccmd.win-a"; then pass "each sync removes the old src\\ with robocopy, not rmdir /s"; else fail "each sync removes the old src\\ with robocopy, not rmdir /s"; fi
 
 echo
 if [ "$failures" -ne 0 ]; then
