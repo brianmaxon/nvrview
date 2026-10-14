@@ -6,6 +6,8 @@ import Foundation
 import FakeCore
 import NVRCore
 import VideoKit
+import AppBase
+import AppStage
 
 // Doorbell insets and calls, call windows, insets dragged: the self-test's "calls" steps (scripts/macos-selftest-areas.txt).
 // Part of SelfTest (SelfTest.swift has the order of the steps and the shared helpers).

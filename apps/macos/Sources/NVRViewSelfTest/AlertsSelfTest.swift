@@ -4,6 +4,8 @@ import DetectorKit
 import Foundation
 import NVRCore
 import Synchronization
+import AppBase
+import AppAlerts
 
 /// Self-test steps `alerts-e2e-verified`, `alerts-e2e-not-confirmed` and
 /// `alerts-ui-real-core`, and the debugging and review steps
@@ -81,7 +83,7 @@ final class AlertsSelfTest {
     private func fail(_ id: String, _ text: String) { problems.append("\(id): \(text)") }
 
     private func scenario(
-        _ id: String, device: AppModel.DeviceRuntime, channel: Int, ha: MockHomeAssistant, personVisible: Bool,
+        _ id: String, device: DeviceRuntime, channel: Int, ha: MockHomeAssistant, personVisible: Bool,
         expectAlert: Bool
     ) async {
         let before = ha.turnOns(Self.helper)
@@ -190,7 +192,7 @@ final class AlertsSelfTest {
 
     /// Settings > Smart Alerts to the Events window, with the app's host in
     /// between (the stub detector reports a person).
-    private func uiScenario(device: AppModel.DeviceRuntime, channel: Int, ha: MockHomeAssistant) async {
+    private func uiScenario(device: DeviceRuntime, channel: Int, ha: MockHomeAssistant) async {
         let id = "alerts-ui-real-core"
         let alerts = model.alertsModel!
         let before = ha.turnOns(Self.helper)
@@ -280,7 +282,7 @@ final class AlertsSelfTest {
     /// checks set to zero so that no step waits on the real clock (the
     /// spacing and the 10 s case are tested on the simulated clock in the
     /// core's tests); the night is the whole day (equal fixed hours).
-    private func cooldownScenario(device: AppModel.DeviceRuntime, channel: Int) async {
+    private func cooldownScenario(device: DeviceRuntime, channel: Int) async {
         let logsSecond = "alerts-cooldown-logs-second"
         let expiry = "alerts-night-evidence-expiry"
         let always = "alerts-cooldown-always-alert"
@@ -414,7 +416,7 @@ final class AlertsSelfTest {
 
     /// A motion-only decision keeps no evidence (the other half of
     /// `alerts-evidence-kept`).
-    private func motionOnlyKeepsNothing(device: AppModel.DeviceRuntime, channel: Int) async {
+    private func motionOnlyKeepsNothing(device: DeviceRuntime, channel: Int) async {
         let id = "alerts-evidence-kept"
         guard let core = try? model.bridge.smartAlerts(), let deviceID = device.deviceID,
             let trigger = try? core.alertsTriggerPut(

@@ -2,6 +2,8 @@
 import CryptoKit
 import Foundation
 import NVRCore
+import AppBase
+import AppUpdates
 
 /// Self-test step `updates-bundled-defaults` (docs/UPDATES.md, "Bundled
 /// defaults"): an `update-defaults.json` in a throwaway app folder, with a

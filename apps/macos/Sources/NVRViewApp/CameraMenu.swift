@@ -1,5 +1,6 @@
 import AppKit
 import NVRCore
+import AppPTZ
 
 /// The Camera menu's Recordings submenu: the running recordings, each
 /// with Stop, rebuilt each time it opens.

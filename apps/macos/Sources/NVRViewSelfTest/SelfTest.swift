@@ -6,6 +6,7 @@ import Foundation
 import FakeCore
 import NVRCore
 import VideoKit
+import AppStage
 
 /// `--selftest SECONDS`: runs the real app (its window behind all others, no
 /// focus, muted), then checks, in order:

@@ -3,6 +3,7 @@ import AppKit
 import FakeCore
 import Foundation
 import NVRCore
+import AppRecordings
 
 // The recording player's Quality choice (docs/UX.md "Recordings", "Quality"):
 // Auto's streams by layout, speed and zoom, High and Low during playback,

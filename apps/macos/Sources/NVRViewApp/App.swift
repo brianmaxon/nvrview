@@ -4,6 +4,11 @@ import FakeCore
 import Foundation
 import NVRCore
 import VideoKit
+import AppBase
+import AppUpdates
+import AppAlerts
+import AppRecordings
+import AppStage
 
 // An unbundled executable gets no window from a SwiftUI `WindowGroup`, so
 // this uses the AppKit lifecycle (like NVRViewDemo); SwiftUI draws the

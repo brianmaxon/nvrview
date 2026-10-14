@@ -31,9 +31,44 @@ let cInterface: Target =
 // the self-test module and the executable's link differ.
 let selfTest = ProcessInfo.processInfo.environment["NVRVIEW_SELFTEST"] != nil
 
+// The app's feature modules (Sources/<Module>), each depending only on the
+// ones below it: AppBase first, the features next, then NVRViewApp on top (the
+// app model, the windows, and the wiring). A feature never names the app
+// model: it asks for what it needs through a host protocol (AppHost in
+// AppBase, and a narrower one per feature) that the app model conforms to.
+// What another module uses is `package`, not public.
+let appModules: [(name: String, dependencies: [Target.Dependency])] = [
+    // Shared by all: the stores, options, device types, AppHost, and helpers.
+    ("AppBase", ["NVRCore", "VideoKit"]),
+    // Updates: checking, downloading, release notes, and their settings page.
+    ("AppUpdates", ["AppBase"]),
+    // Doorbell calls: the call sessions, microphone, speech, and transcripts.
+    ("AppCalls", ["AppBase"]),
+    // Capture: pictures and live recordings, and their settings page.
+    ("AppCapture", ["AppBase"]),
+    // Camera motion: the pan, tilt, zoom, lens, and preset model and controls.
+    ("AppPTZ", ["AppBase"]),
+    // Recordings: browsing, playback, editing, and export.
+    ("AppRecordings", ["AppBase", "AppCapture"]),
+    // Smart alerts on this computer: settings, the events window, evidence
+    // and verification views, and the model behind them.
+    ("AppAlerts", ["AppBase", "AppCapture", "AlertHost", "DetectorKit"]),
+    // The stage: the tile grid, headers, insets, and the call window.
+    ("AppStage", ["AppBase", "AppCalls", "AppCapture", "AppPTZ", "AppAlerts"]),
+]
+
 let appDependencies: [Target.Dependency] =
-    ["VideoKit", "NVRCore", "FakeCore", "DetectorKit", "AlertHost"] + (realCore ? ["NVRCoreC"] : [])
+    ["VideoKit", "NVRCore", "FakeCore", "DetectorKit", "AlertHost"] + appModules.map { .target(name: $0.name) }
+    + (realCore ? ["NVRCoreC"] : [])
 let coreDefine: [SwiftSetting] = realCore ? [.define("NVRVIEW_REAL_CORE")] : []
+// `-enable-testing` in release lets the self-test module use internals
+// (`@testable import`) without every declaration being package or public.
+// `-disable-cmo` keeps cross-module optimization from copying function bodies
+// into a module's interface: without it every edit in a feature module
+// rebuilt everything above it (about 30 s in release); with it only the
+// edited module and the final link run.
+let appSwiftSettings: [SwiftSetting] =
+    coreDefine + [.unsafeFlags(["-enable-testing", "-disable-cmo"], .when(configuration: .release))]
 
 let package = Package(
     name: "NVRView",
@@ -64,12 +99,9 @@ let package = Package(
         // pipeline it uses. Never a dependency of the shipping app path; the
         // app links it only for `--fake`.
         .target(name: "FakeCore", dependencies: ["NVRCore", "VideoKit"]),
-        // All of the app's code. `-enable-testing` in release lets the
-        // self-test module use its internals (`@testable import`) without
-        // every declaration being public.
-        .target(
-            name: "NVRViewApp", dependencies: appDependencies,
-            swiftSettings: coreDefine + [.unsafeFlags(["-enable-testing"], .when(configuration: .release))]),
+        // The composition layer: the app model, windows and views that wire
+        // the feature modules together.
+        .target(name: "NVRViewApp", dependencies: appDependencies, swiftSettings: appSwiftSettings),
         // The app's self-test (`--selftest`) and its mocks.
         .target(
             name: "NVRViewSelfTest", dependencies: appDependencies + ["NVRViewApp"],
@@ -88,6 +120,8 @@ let package = Package(
             name: "NVRCoreTests",
             dependencies: ["NVRCore", "FakeCore", "VideoKit", "NVRViewCore"] + (realCore ? ["NVRCoreC"] : []),
             swiftSettings: realCore ? [.define("NVRVIEW_REAL_CORE")] : []),
-    ],
+    ] + appModules.map {
+        .target(name: $0.name, dependencies: $0.dependencies, swiftSettings: appSwiftSettings)
+    },
     swiftLanguageModes: [.v6]
 )
