@@ -60,6 +60,24 @@ import Testing
         #expect(try JSONDecoder().decode([SavedWindow].self, from: wide)[0].insetAnchor == InsetAnchor(x: 1, y: 0))
     }
 
+    @Test func insetGridRoundTripsIsOptionalAndClamped() throws {
+        let w = SavedWindow(
+            content: .layout(id: "layout-1"), frame: CGRect(x: 1, y: 2, width: 900, height: 600),
+            insetGrid: InsetGridSetting(rows: 2, columns: 3))
+        let back = try JSONDecoder().decode([SavedWindow].self, from: JSONEncoder().encode([w]))
+        #expect(back == [w])
+        #expect(back[0].insetGrid == InsetGridSetting(rows: 2, columns: 3))
+        let plain = try JSONEncoder().encode([SavedWindow(content: .layout(id: "layout-1"), frame: .zero)])
+        #expect(!String(decoding: plain, as: UTF8.self).contains("insetGrid"))
+        var obj = try #require(JSONSerialization.jsonObject(with: plain) as? [[String: Any]])
+        obj[0]["insetGrid"] = "wide"
+        let bad = try JSONSerialization.data(withJSONObject: obj)
+        #expect(try JSONDecoder().decode([SavedWindow].self, from: bad)[0].insetGrid == nil)
+        obj[0]["insetGrid"] = ["rows": 40, "columns": 0]
+        let wide = try JSONSerialization.data(withJSONObject: obj)
+        #expect(try JSONDecoder().decode([SavedWindow].self, from: wide)[0].insetGrid == InsetGridSetting(rows: 4, columns: 1))
+    }
+
     @Test func keepsAFrameWhoseTitleBarIsOnAScreen() {
         let f = CGRect(x: 100, y: 100, width: 900, height: 600)
         #expect(SavedWindow.placement(of: f, screens: [screen], minSize: min) == f)

@@ -105,6 +105,7 @@ verify-view-tile             macos    gap: Windows smart alerts UI is planned (N
 verify-view-order            macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 verify-view-passthrough      macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 verify-view-stick            macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
+verify-view-place-sticky     macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 alerts-detector-benchmark macos    gap: Windows detector is planned (Windows ML)
 alerts-e2e-verified          macos    gap: Windows smart alerts UI is planned (the Windows host for the verification contract, model and notifications is not built)
 alerts-e2e-not-confirmed     macos    gap: Windows smart alerts UI is planned (the Windows host for the verification contract, model and notifications is not built)

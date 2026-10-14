@@ -183,6 +183,9 @@ final class StageView: NSView {
     /// inset): it keeps that place until it ends, however the stage changes
     /// (focus, a swap, another layout), so it does not jump around.
     var verifyPlaced: [UInt64: VerifyPlace] = [:]
+    /// The placement setting `verifyPlaced` was decided under (choosing another
+    /// in Settings places the live checks again).
+    var verifyPlacedFor: VerifyPlacementSetting?
 
     // Alert insets (docs/UX.md "Alert insets"; StageView+Insets.swift).
     var insetBoard = InsetBoard()

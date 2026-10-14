@@ -190,6 +190,21 @@ extension SelfTest {
             if stage.insetBoard.items.contains(where: { $0.kind == .verification }) {
                 problems.append("a check of a camera on screen opened an inset")
             }
+            // parity: verify-view-place-sticky
+            // A check keeps the place it started in: with another tile
+            // focused (the camera no longer on screen) its band stays in the
+            // tile and no inset opens for it.
+            if let other = stage.frames.leaves.dropFirst().first {
+                stage.focus(other.path)
+                advance(StageView.focusDuration)
+                stage.syncVerification()
+                let kept = stage.verificationBand(for: camera) != nil
+                    && !stage.insetBoard.items.contains(where: { $0.kind == .verification })
+                print("verify view place: band stays in its tile after another tile is focused \(kept)")
+                if !kept { problems.append("a check jumped from its tile to an inset when the stage changed") }
+                stage.unfocus()
+                advance(StageView.focusDuration)
+            }
             smartTileCamera = camera
             verifyDismissStep(t ?? 0, camera, alertID: check?.alertID)
         }

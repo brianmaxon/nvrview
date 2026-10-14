@@ -32,6 +32,10 @@ extension StageView {
         var tiles: [CameraRef: [VerifyCheck]] = [:]
         var insets: [CameraRef: [VerifyCheck]] = [:]
         let alerts = model.alertsModel!
+        if verifyPlacedFor != alerts.settings.view.placement {
+            verifyPlaced = [:]
+            verifyPlacedFor = alerts.settings.view.placement
+        }
         var live: Set<UInt64> = []
         for c in alerts.board.shown {
             live.insert(c.id)
