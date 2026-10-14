@@ -1396,21 +1396,30 @@ async fn sync_previews<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     c: &mut Conn<R, W>,
 ) -> Result<(), Failure> {
     escalate_if_all_silent(ctx)?;
+    // Streams nobody listens to any more are stopped before anything is
+    // started, so the device never sees a new start while a stop that
+    // freed its slot is still unsent (a device allows few live streams).
     let keys: Vec<StreamKey> = ctx.subs.streams.keys().copied().collect();
-    for key in keys {
-        let Some(st) = ctx.subs.streams.get_mut(&key) else {
+    for key in &keys {
+        let Some(st) = ctx.subs.streams.get_mut(key) else {
             continue;
         };
         st.subs.retain(|q| !q.cancelled.load(Ordering::SeqCst));
         if st.subs.is_empty() {
             let mid = st.msg_id;
-            ctx.subs.streams.remove(&key);
+            ctx.subs.streams.remove(key);
             if let Some(mid) = mid {
                 ctx.subs.by_msg.remove(&mid);
                 let bytes = c.session.stop_preview(mid).map_err(|e| e.to_string())?;
                 c.send(&bytes).await?;
             }
-        } else if st.force {
+        }
+    }
+    for key in keys {
+        let Some(st) = ctx.subs.streams.get_mut(&key) else {
+            continue;
+        };
+        if st.force {
             // The user asked for a fresh start: forget what was known.
             st.force = false;
             if let Some(old) = st.msg_id.take() {
