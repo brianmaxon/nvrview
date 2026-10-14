@@ -734,6 +734,9 @@ internal sealed class ViewerWindow
             case HeaderAction.ToggleSidebar:
                 ToggleSidebar();
                 break;
+            case HeaderAction.ShowFrameRates:
+                Stage.ToggleFrameRates();
+                break;
             case HeaderAction.Diagnostics:
                 Stage.ToggleDiagnostics();
                 break;

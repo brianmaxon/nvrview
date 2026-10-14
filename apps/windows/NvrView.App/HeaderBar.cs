@@ -272,6 +272,7 @@ internal sealed class HeaderBar
         AddAction(menu.Items, HeaderAction.OpenRecordingsFolder);
         AddAction(menu.Items, HeaderAction.ToggleSidebar, on: _window.SidebarDocked);
         menu.Items.Add(_window.Stage.IndicatorCornerMenu());
+        AddAction(menu.Items, HeaderAction.ShowFrameRates, on: _viewer.Settings.ShowFrameRates);
         AddAction(menu.Items, HeaderAction.Diagnostics, on: _window.Stage.Diagnostics);
         AddAction(menu.Items, HeaderAction.KeyboardShortcuts);
         menu.Items.Add(new MenuFlyoutSeparator());

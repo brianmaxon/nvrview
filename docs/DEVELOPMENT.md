@@ -195,7 +195,10 @@ at the end shows each suite as ran or cached, with its time.
   the output says so. Tests: `scripts/test-macos-package.sh`,
   `scripts/test-windows-builds.sh`.
   **The self-test is a module of its own.** The app's code is the SwiftPM
-  library `NVRViewApp`; `NVRViewSelfTest` holds the self-test and its mocks;
+  library `NVRViewApp` (the app model, windows, and wiring) on top of the
+  feature modules `AppBase`, `AppUpdates`, `AppCalls`, `AppCapture`, `AppPTZ`,
+  `AppRecordings`, `AppAlerts`, and `AppStage` (see "Swift app modules"
+  below); `NVRViewSelfTest` holds the self-test and its mocks;
   the executable `NVRView` is only `main.swift`. The shipped app links no
   self-test (`--selftest` answers "this build has no self-test"); building
   with `NVRVIEW_SELFTEST=1` links it (what the checks and
@@ -204,8 +207,8 @@ at the end shows each suite as ran or cached, with its time.
   the very objects the bundle was linked from, and runs it from a copy of the
   bundle with the self-test executable swapped in; the only difference from the
   shipped binary is the self-test module and the entry point that starts it.
-  (`NVRViewApp` is built with `-enable-testing` in release so the self-test
-  can `@testable import` its internals.) On Windows
+  (The app modules are built with `-enable-testing` in release so the
+  self-test can `@testable import` their internals.) On Windows
   the stamp records the host that ran the app half (`; host NAME`), and
   `scripts/windows-check.sh --package` builds the package on that host, where
   the tested publish output is. Every Windows run prints a `split decision:`
@@ -263,17 +266,58 @@ re-measure before changing any of it.
   decode crates on one code generation unit each. The comment there has the
   numbers, including the small CPU cost in the soak.
 - **Swift release builds are one serial compile per module.** Whole-module
-  optimization runs on one core, so a module's size is its build time: the
-  app's code (`NVRViewApp`, about 22,000 lines) is most of the optimized Swift
-  build, and the self-test (`NVRViewSelfTest`, about 7,700 lines) builds apart
-  from it and not at all in the shipped app. No expression or function body
-  takes long to type-check (one `body` at 376 ms with a 300 ms limit), so
-  there is nothing to fix there. A further split of `NVRViewApp` needs the
-  `AppModel` hub broken up first (the recordings and smart-alert screens and
-  their models depend on it and it on them).
+  optimization runs on one core, so a module's size is its build time. The
+  app is split into feature modules so an edit rebuilds one of them (see
+  "Swift app modules" below); the self-test (`NVRViewSelfTest`, about 7,700
+  lines) builds apart from them and not at all in the shipped app. No
+  expression or function body takes long to type-check (one `body` at 376 ms
+  with a 300 ms limit), so there is nothing to fix there.
 - **Not worth it, measured:** `-num-threads` for the Swift module (100 s
   against 105 s), and, for the Rust dependencies, trimming features (the
   heavy ones already use only the features they need).
+
+## Swift app modules
+
+The macOS app (`apps/macos/Sources`) is one SwiftPM module per area, with
+dependencies that run one way (the list is `appModules` in `Package.swift`):
+
+| module | holds | depends on |
+| --- | --- | --- |
+| `AppBase` | device and camera types, stores, options, `AppHost`, shared AppKit helpers, picture saving | core modules |
+| `AppUpdates` | updater, release notes, the Updates settings page | `AppBase` |
+| `AppCalls` | doorbell call sessions, microphone, speech, transcripts | `AppBase` |
+| `AppCapture` | picture and live-recording controller, the Capture settings page | `AppBase` |
+| `AppPTZ` | camera motion model and controls | `AppBase` |
+| `AppRecordings` | recordings browser, player, editor, export | `AppBase`, `AppCapture` |
+| `AppAlerts` | smart-alert model, settings, events window, evidence and verification views | `AppBase`, `AppCapture`, `AlertHost` |
+| `AppStage` | tile grid, headers, insets, the call window | `AppBase`, `AppCalls`, `AppCapture`, `AppPTZ`, `AppAlerts` |
+| `NVRViewApp` | the app model, windows, sidebar, settings window, wiring | all of the above |
+
+A feature never names `AppModel`. It asks for what it needs through a host
+protocol (`AppHost` in `AppBase`; `CaptureHost`, `AlertsHost`, `StageHost`
+extend it in their own modules) and `AppModel` conforms to them. Add a member to
+the protocol when a feature needs one, rather than reaching for the model.
+
+What another module uses is `package`, not `public`; a `struct` used across
+modules needs an explicit `package init` (the memberwise one is internal), and
+a class another module subclasses is `open`. The app modules are built with
+`-disable-cmo` in release: without it the compiler copies function bodies into
+each module's interface and every edit rebuilt all the modules above it.
+
+Measured release build times (`swift build -c release`, one edit in the
+module named, a function body only):
+
+| edit in | before the split | after |
+| --- | --- | --- |
+| a leaf view (`UpdateNotesView.swift`) | about 30 s | about 4 s |
+| `AppModel.swift` | about 30 s | about 10 s |
+| recordings (`RecordingsWindow.swift`) | about 30 s | about 13 s |
+| the stage (`StageView.swift`) | about 30 s | about 9 s |
+| smart alerts (`SmartAlertsModel.swift`) | about 30 s | about 12 s |
+| clean release build | 99 s | 84 s |
+
+Debug builds were already quick (an edit rebuilt in 4 to 5 s, now 3 to 5 s; a
+clean debug build 18 s, now 20 s).
 
 ## Versions
 

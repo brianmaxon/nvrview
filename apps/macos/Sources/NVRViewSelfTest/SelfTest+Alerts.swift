@@ -6,6 +6,7 @@ import Foundation
 import FakeCore
 import NVRCore
 import VideoKit
+import AppStage
 
 // Smart alerts: settings, live checks, the events log, the detector, end to end: the self-test's "alerts" steps (scripts/macos-selftest-areas.txt).
 // Part of SelfTest (SelfTest.swift has the order of the steps and the shared helpers).

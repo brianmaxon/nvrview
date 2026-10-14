@@ -4,6 +4,7 @@ import FakeCore
 import Foundation
 import NVRCore
 import VideoKit
+import AppRecordings
 
 // The recording player's picture features: digital zoom and pan, kept across
 // seeks and layout changes, the region shown matching the zoom math, Save

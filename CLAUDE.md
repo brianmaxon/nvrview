@@ -70,6 +70,13 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 - Keep the Rust core free of platform frameworks; Apple and Windows APIs live in
   the apps. The core must build and test on Linux and Windows.
 - A user-visible feature lands on both apps (or [docs/PARITY.md](docs/PARITY.md) says why not), and its table is updated in the same change; a new self-test step gets a `// parity: id` marker.
+- **Small, focused units, going forward.** New Mac app code goes in the
+  feature module it belongs to and reaches the app only through its host
+  protocol (docs/DEVELOPMENT.md, "Swift app modules"). Prefer files under
+  about 800 lines: when a change would push a file past that, split off the
+  part it touches by responsibility (an extension per concern, as
+  `StageView+Capture.swift` does) in the same change. The same applies to C#
+  and Rust. Existing large files are not refactored for their own sake.
 - American English spelling everywhere.
 
 ## Working efficiently

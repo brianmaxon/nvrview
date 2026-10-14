@@ -19,7 +19,7 @@ less than that. Nothing here was run on a Windows machine.
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
 | Split-pane layouts: split, drag dividers, drag a tile to swap, remove | yes | yes | Windows: Edit Layout (Ctrl+E) or the right-click menu; macOS: Layout menu and right-click menu. |
-| Layout presets ("Start From" shapes) in Edit Layout | yes | yes | macOS: the edit bar's Start From pop-up; Windows: the edit bar and a "Layout preset" submenu in the tile menu. Unsure whether the two preset lists are identical. |
+| Layout presets ("Start From" shapes) in Edit Layout | yes | yes | macOS: the edit bar's Start From pop-up; Windows: the edit bar and a "Layout preset" submenu in the tile menu. Compared: both apps list Single, 2 × 2, 1 + 3, 3 × 3, in that order, with the same shapes (1 + 3 is a two-thirds split with three stacked; the grids are balanced); a Windows test pins the shape to the Mac's JSON. |
 | Saved layouts, edits saved as they are made | yes | yes | Same JSON documents on both. |
 | Layout rename, duplicate, delete | yes | yes | Sidebar context menu. |
 | Groups (named sets of cameras shown as an even grid) | yes | yes | |
@@ -55,7 +55,7 @@ less than that. Nothing here was run on a Windows machine.
 | Level meter on the audible tile, mono meter on hover | yes | yes | UX.md also describes an optional edge meter column; neither app's code has one (a doc item that was never built, or not found). |
 | Retry button after 30 s without a picture | yes | yes | Both on the viewer clock. |
 | Tile status in words (connecting, reconnecting with countdown, waiting) | yes | yes | |
-| Frame rate display | yes | partial (diagnostics overlay, Ctrl+D) | macOS: View > Show Frame Rates; the Windows overlay is a different readout. |
+| Frame rate display | yes | yes | macOS: View > Show Frame Rates ("Device / Shown / display Hz" in the tile header). Windows: "Show frame rates" in the header's "…" menu, remembered, a per-tile readout "Device N fps · Decoded M fps" (the Windows renderer does not measure a shown rate or the display's Hz yet). The Ctrl+D diagnostics line is separate. The Windows self-test has `frame-rates-readout`; the Mac's does not. |
 | Digital zoom: mouse wheel, drag to pan | yes | yes | |
 | Zoomed picture grows over the bars until it fills the tile (or the full-screen stage), then crops | yes | yes | Same geometry and test vectors (TileZoom in NVRCore and NvrView.Tiles); self-test step `zoom-fills-tile` on both. Fill Tiles uses the same rule from the filled base on both. |
 | Trackpad or touchpad pinch zooms | yes | yes | Windows: a touchpad pinch arrives as Ctrl+wheel; a touch screen's two-finger pinch zooms around the point between the fingers (`StageView.PinchDigital`, steps bounded as the Virtual PTZ pinch is). Windows self-test step `zoom-touch-pinch`. |
@@ -226,6 +226,7 @@ the Credential Manager store only.
 What the table shows that is not just a platform difference:
 
 - The layout preset lists on the two apps were not compared.
+- Windows' frame-rate readout shows the decoded rate where the Mac shows the drawn (shown) rate and the display's refresh rate.
 - Windows' captions use an older engine than the Mac's.
 
 ## The self-test comparison

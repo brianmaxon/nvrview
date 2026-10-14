@@ -1936,6 +1936,8 @@ menu bar (docs/PARITY.md): this is a Windows-only part.
   and Open recordings folder), Settings (Ctrl+,), and a "…" menu with the rest:
   New window (Ctrl+N), Recordings (Ctrl+Alt+R), Stop all recordings (while one
   runs), Open recordings folder, Show or Hide sidebar (S), Indicator corner, Show or
+  Hide frame rates (a per-tile "Device N fps · Decoded M fps" readout at the tile's
+  bottom right, remembered, off by default), Show or
   Hide diagnostics (Ctrl+D), Keyboard shortcuts (F1), and the update entry.
 - **Full screen.** The header is hidden and slides over the stage from the top
   edge like the sidebar does from the left: resting the pointer in a thin strip

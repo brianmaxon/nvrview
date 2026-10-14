@@ -6,6 +6,8 @@ import Foundation
 import FakeCore
 import NVRCore
 import VideoKit
+import AppBase
+import AppStage
 
 // Pictures and recordings made from tiles, and the real core's recordings read back: the self-test's "capture" steps (scripts/macos-selftest-areas.txt).
 // Part of SelfTest (SelfTest.swift has the order of the steps and the shared helpers).

@@ -1678,6 +1678,15 @@ internal sealed partial class StageView : UserControl
     /// <summary>Whether the tiles show their diagnostics line.</summary>
     public bool Diagnostics => _diagnostics;
 
+    /// <summary>Whether the tiles show their frame-rate readout (header menu, remembered).</summary>
+    public bool FrameRates => _viewer.Settings.ShowFrameRates;
+
+    public void ToggleFrameRates() => _viewer.Settings.ShowFrameRates = !_viewer.Settings.ShowFrameRates;
+
+    /// <summary>"Device 15.0 fps · Decoded 15.0 fps": what the camera sends and what this tile decoded.</summary>
+    internal static string FrameRateText(StageTile t) =>
+        t.Shared is null ? "Device – fps · Decoded – fps" : $"Device {t.ReceivedRate:0.0} fps · Decoded {t.DecodedRate:0.0} fps";
+
     public void ToggleDiagnostics()
     {
         _diagnostics = !_diagnostics;
@@ -1746,10 +1755,12 @@ internal sealed partial class StageView : UserControl
     public void SyncOverlays()
     {
         ChromeCorner corner = _viewer.Settings.IndicatorCorner;
+        bool rates = _viewer.Settings.ShowFrameRates;
         DateTime now = _viewer.WallClock();
         bool blink = AlertBorder.ModeFor(_viewer.AnimationsEnabled()) == AlertBorder.Mode.Blinking;
         foreach (TileChrome c in _chromes)
         {
+            c.SetRates(rates && c.Tile.CameraOrNone is not null ? FrameRateText(c.Tile) : null);
             if (c.Tile.CameraOrNone is not { } camera)
             {
                 c.SetAlert(null, blink);

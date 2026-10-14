@@ -1,6 +1,8 @@
 import AppKit
 import NVRCore
 import SwiftUI
+import AppBase
+import AppStage
 
 /// A window's sidebar: layouts, groups, and devices with their cameras
 /// (docs/UX.md, the approved mockups). Clicking a layout or group shows it in
@@ -225,7 +227,7 @@ struct SidebarView: View {
         }
     }
 
-    private func deviceRow(_ device: AppModel.DeviceRuntime) -> some View {
+    private func deviceRow(_ device: DeviceRuntime) -> some View {
         HStack {
             Text(device.config.name).fontWeight(.semibold).lineLimit(1)
             if let count = ChannelFilter.countText(shown: model.listedChannels(device).count, total: device.channels.count) {
@@ -354,7 +356,7 @@ struct SidebarView: View {
 
     // MARK: Words
 
-    static func stateText(_ d: AppModel.DeviceRuntime) -> String {
+    static func stateText(_ d: DeviceRuntime) -> String {
         switch d.link.state {
         case nil: "Not connected"
         case .connecting?: "Connecting"

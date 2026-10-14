@@ -103,6 +103,9 @@ internal sealed class ViewSettingsFile
 
     /// <summary>The consent note was shown (the first time "Record calls" is turned on).</summary>
     public bool RecordCallsConsentShown { get; set; }
+
+    /// <summary>Tiles show the device and decoded frame rates (header menu, "Show frame rates"); off by default.</summary>
+    public bool ShowFrameRates { get; set; }
 }
 
 [JsonSerializable(typeof(ViewSettingsFile))]
@@ -139,6 +142,7 @@ internal sealed class ViewSettings(string? file)
     private double _maxRecordingGB = 4;
     private bool _recordCalls;
     private bool _recordCallsConsent;
+    private bool _showFrameRates;
 
     private static string MountKey(CameraRef camera) => $"{camera.Device}:{camera.Channel}";
 
@@ -655,6 +659,17 @@ internal sealed class ViewSettings(string? file)
         set => Change(ref _recordCalls, value);
     }
 
+    /// <summary>Tiles show the device and decoded frame rates (header menu; remembered, off by default).</summary>
+    public bool ShowFrameRates
+    {
+        get
+        {
+            Load();
+            return _showFrameRates;
+        }
+        set => Change(ref _showFrameRates, value);
+    }
+
     /// <summary>The consent note was shown.</summary>
     public bool RecordCallsConsentShown
     {
@@ -768,6 +783,7 @@ internal sealed class ViewSettings(string? file)
             _maxRecordingGB = Math.Clamp(read?.MaxRecordingGB ?? 4, CaptureSettings.MinBytes / 1e9, CaptureSettings.MaxBytes / 1e9);
             _recordCalls = read?.RecordCalls ?? false;
             _recordCallsConsent = read?.RecordCallsConsentShown ?? false;
+            _showFrameRates = read?.ShowFrameRates ?? false;
         }
         catch (Exception e) when (e is JsonException or IOException)
         {
@@ -817,6 +833,7 @@ internal sealed class ViewSettings(string? file)
                     MaxRecordingGB = _maxRecordingGB == 4 ? null : _maxRecordingGB,
                     RecordCalls = _recordCalls,
                     RecordCallsConsentShown = _recordCallsConsent,
+                    ShowFrameRates = _showFrameRates,
                 }, ViewSettingsJson.Default.ViewSettingsFile);
                 s.Flush(flushToDisk: true);
             }
