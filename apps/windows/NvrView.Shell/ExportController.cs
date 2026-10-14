@@ -382,15 +382,13 @@ public sealed class ExportController
         get
         {
             List<RecordingCamera> playing = [.. _browser.Player.Cameras];
-            if (_browser.PlayerView == PlayerView.Cameras)
-            {
-                return playing;
-            }
-            // A follow cut may name fewer cameras than the incident has; the playback still holds all of them.
-            List<RecordingCamera> edit = [.. _browser.EditPlayer.Plan?.Sources.Select(x => x.Camera) ?? []];
-            List<RecordingCamera> incident = [.. _browser.Editable?.Incident.Cameras.Select(x => x.Camera) ?? []];
+            // A follow cut may name fewer cameras than the incident has, and a playback fewer than its download:
+            // the most of the three is the incident's.
+            List<RecordingCamera> edit = _browser.PlayerView == PlayerView.Cameras
+                ? []
+                : [.. _browser.EditPlayer.Plan?.Sources.Select(x => x.Camera) ?? []];
             List<RecordingCamera> downloaded = [.. _browser.Editable?.Download.Cameras.Select(x => x.Camera) ?? []];
-            return new[] { edit, playing, incident, downloaded }.MaxBy(l => l.Count)!;
+            return new[] { playing, edit, downloaded }.MaxBy(l => l.Count)!;
         }
     }
 
