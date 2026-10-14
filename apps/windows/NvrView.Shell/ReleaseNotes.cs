@@ -195,6 +195,57 @@ public static class ReleaseNotesText
     }
 }
 
+/// <summary>How the notes view styles one line of formatted notes.</summary>
+public enum NoteLineKind
+{
+    Blank,
+    Heading,
+    Bullet,
+    Text,
+}
+
+/// <summary>One line of formatted notes with its style; <see cref="Level"/> is the bullet's indent in steps of two spaces.</summary>
+public readonly record struct NoteLine(string Text, NoteLineKind Kind, int Level);
+
+public static class ReleaseNotesLines
+{
+    /// <summary>The longest line that can be a heading.</summary>
+    public const int MaxHeadingLength = 60;
+
+    /// <summary>
+    /// Classifies each line of <see cref="ReleaseNotesText.Format"/> output. A heading is a short line that starts a
+    /// block (first line, or after a blank line), does not end like a sentence, and is followed by a bullet, a blank
+    /// line, or the end. Mirrors ReleaseNotesText.lineKinds in NVRCore.
+    /// </summary>
+    public static IReadOnlyList<NoteLine> Classify(string formatted)
+    {
+        string[] lines = formatted.Split('\n');
+        static bool IsBullet(string l) => l.TrimStart(' ').StartsWith("• ", StringComparison.Ordinal);
+        var result = new List<NoteLine>();
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i];
+            if (line.Length == 0)
+            {
+                result.Add(new NoteLine(line, NoteLineKind.Blank, 0));
+            }
+            else if (IsBullet(line))
+            {
+                result.Add(new NoteLine(line.TrimStart(' '), NoteLineKind.Bullet, (line.Length - line.TrimStart(' ').Length) / 2));
+            }
+            else
+            {
+                bool startsBlock = i == 0 || lines[i - 1].Length == 0;
+                bool nextOk = i + 1 >= lines.Length || lines[i + 1].Length == 0 || IsBullet(lines[i + 1]);
+                bool sentence = ".,;!?".Contains(line[^1], StringComparison.Ordinal);
+                bool heading = startsBlock && nextOk && !sentence && line.Length <= MaxHeadingLength && line[0] != ' ';
+                result.Add(new NoteLine(line, heading ? NoteLineKind.Heading : NoteLineKind.Text, 0));
+            }
+        }
+        return result;
+    }
+}
+
 /// <summary>What to do about the "What's New" window at launch.</summary>
 public static class WhatsNew
 {

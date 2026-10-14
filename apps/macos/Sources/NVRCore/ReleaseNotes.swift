@@ -139,6 +139,41 @@ public enum ReleaseNotesText {
     }
 }
 
+/// How the notes view styles one line of formatted notes.
+public enum NoteLineKind: Equatable, Sendable {
+    case blank
+    case heading
+    /// A bullet line; `level` is the number of leading spaces divided by two.
+    case bullet(level: Int)
+    case text
+}
+
+extension ReleaseNotesText {
+    /// The longest line that can be a heading.
+    public static let maxHeadingLength = 60
+
+    /// Classifies each line of `format(...)` output (the text keeps its lines;
+    /// only the styling differs). A heading is a short line that starts a
+    /// block (first line, or after a blank line), does not end like a
+    /// sentence, and is followed by a bullet, a blank line, or the end.
+    public static func lineKinds(_ formatted: String) -> [NoteLineKind] {
+        let lines = formatted.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        func isBullet(_ l: String) -> Bool { l.drop { $0 == " " }.hasPrefix("\u{2022} ") }
+        return lines.indices.map { i in
+            let line = lines[i]
+            if line.isEmpty { return .blank }
+            if isBullet(line) {
+                return .bullet(level: line.prefix { $0 == " " }.count / 2)
+            }
+            let startsBlock = i == 0 || lines[i - 1].isEmpty
+            let nextOK = i + 1 >= lines.count || lines[i + 1].isEmpty || isBullet(lines[i + 1])
+            let endsLikeSentence = ".,;!?".contains(line.last ?? " ")
+            let short = line.count <= maxHeadingLength && !line.hasPrefix(" ")
+            return startsBlock && nextOK && short && !endsLikeSentence ? .heading : .text
+        }
+    }
+}
+
 /// What to do about the "What's New" window at launch (docs/UX.md, "Release
 /// notes"). Mirrored by `WhatsNew` in NvrView.Shell.
 public enum WhatsNew {
