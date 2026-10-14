@@ -58,11 +58,50 @@ public static class SoundKinds
     }
 }
 
+/// <summary>
+/// A run of empty loudness buckets and why they are empty, as the core knows it (<c>gaps</c> of <c>nv_recordings_loudness</c>,
+/// minor 15): inclusive device-local seconds; <see cref="Reason"/> is <c>not_recorded</c>, <c>no_audio</c>, or <c>not_analyzed</c>;
+/// <see cref="Analyzable"/> means a finished download covers the gap, so "Analyze this gap" can measure it now. The same
+/// words as the macOS app's <c>LoudnessGap</c>.
+/// </summary>
+public sealed record LoudnessGap(long Start, long End, string Reason, bool Analyzable = false)
+{
+    /// <summary>The short label drawn on the gap.</summary>
+    public string Label => Reason switch
+    {
+        "not_recorded" => "Not recorded",
+        "no_audio" => "No audio",
+        "not_analyzed" => "Not analyzed yet",
+        _ => "No sound analyzed",
+    };
+
+    /// <summary>What hovering the gap says.</summary>
+    public string Help => Reason switch
+    {
+        "not_recorded" => "Not recorded: the device has no recording of this camera here",
+        "no_audio" => "No audio: this camera's recording here has no sound",
+        "not_analyzed" => Analyzable
+            ? "Not analyzed yet: the downloaded video here can be analyzed (right-click, Analyze this gap)"
+            : "Not analyzed yet: download this time first, then analyze its sound",
+        _ => "No sound analyzed here",
+    };
+
+    /// <summary>Whether the action "Analyze this gap" applies.</summary>
+    public bool CanAnalyze => Reason == "not_analyzed" && Analyzable;
+}
+
 /// <summary>One camera's loudness lane (<c>nv_recordings_loudness</c>): whole dBFS per bucket, null where no audio was analyzed (not silence).</summary>
-public sealed record LoudnessLane(RecordingCamera Camera, long Bucket, long Start, IReadOnlyList<int?> Peak, IReadOnlyList<int?> Rms)
+public sealed record LoudnessLane(RecordingCamera Camera, long Bucket, long Start, IReadOnlyList<int?> Peak, IReadOnlyList<int?> Rms,
+    IReadOnlyList<LoudnessGap>? Gaps = null)
 {
     /// <summary>Whether any bucket has audio.</summary>
     public bool Heard => Peak.Any(p => p is not null);
+
+    /// <summary>Why the empty stretches are empty (asked for with <c>gaps</c>).</summary>
+    public IReadOnlyList<LoudnessGap> GapList => Gaps ?? [];
+
+    /// <summary>The gap that holds a device-local second.</summary>
+    public LoudnessGap? GapAt(long second) => GapList.FirstOrDefault(g => g.Start <= second && second <= g.End);
 }
 
 /// <summary><c>nv_recordings_loudness</c>.</summary>
@@ -78,7 +117,11 @@ public sealed record LoudnessAnswer(long Revision, IReadOnlyList<LoudnessLane> L
             {
                 lanes.Add(new LoudnessLane(
                     camera, DownloadProgress.Long(l, "bucket_s") ?? 60, DownloadProgress.Long(l, "start") ?? 0,
-                    Values(l, "peak_db"), Values(l, "rms_db")));
+                    Values(l, "peak_db"), Values(l, "rms_db"),
+                    [.. Incident.Items(l, "gaps").Select(g => new LoudnessGap(
+                        DownloadProgress.Long(g, "start") ?? 0, DownloadProgress.Long(g, "end") ?? 0,
+                        g.TryGetProperty("reason", out JsonElement r) && r.ValueKind == JsonValueKind.String ? r.GetString() ?? "" : "",
+                        g.TryGetProperty("analyzable", out JsonElement a) && a.ValueKind == JsonValueKind.True))]));
             }
         }
         return new LoudnessAnswer(DownloadProgress.Long(root, "revision") ?? 0, lanes);
@@ -120,9 +163,12 @@ public static class LoudnessScale
     /// <summary>The cameras to ask for, for these lanes (each microphone once, in order).</summary>
     public static IReadOnlyList<RecordingCamera> Microphones(IEnumerable<RecordingCamera> cameras) => [.. cameras.Select(Microphone).Distinct()];
 
-    /// <summary><c>nv_recordings_loudness</c> for <paramref name="cameras"/> over [start, end].</summary>
-    public static string Query(long start, long end, long bucket, IEnumerable<RecordingCamera> cameras) =>
-        $"{{\"start\":{start},\"end\":{end},\"bucket_s\":{bucket},\"cameras\":[{string.Join(",", cameras.Select(c => c.Json))}]}}";
+    /// <summary><c>nv_recordings_loudness</c> for <paramref name="cameras"/> over [start, end], with the reasons for empty stretches when <paramref name="gaps"/>.</summary>
+    public static string Query(long start, long end, long bucket, IEnumerable<RecordingCamera> cameras, bool gaps = false)
+    {
+        string more = gaps ? ",\"gaps\":true" : "";
+        return $"{{\"start\":{start},\"end\":{end},\"bucket_s\":{bucket},\"cameras\":[{string.Join(",", cameras.Select(c => c.Json))}]{more}}}";
+    }
 }
 
 /// <summary>

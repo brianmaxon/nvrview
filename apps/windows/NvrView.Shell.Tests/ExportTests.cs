@@ -438,9 +438,21 @@ internal static class ExportTests
                 var back = new ExportSettings(path);
                 back.Load();
                 T.Check(back.ShareSafe && back.TrimExact && back.Codec == ExportCodec.Hevc && back.Folder == "/some/folder");
+                T.Check(back.LoudnessHeight is null);
                 var none = new ExportSettings(path + ".missing");
                 none.Load();
-                T.Check(!none.ShareSafe && !none.TrimExact && none.Codec == ExportCodec.H264 && none.Folder is null);
+                T.Check(!none.ShareSafe && !none.TrimExact && none.Codec == ExportCodec.H264 && none.Folder is null && none.LoudnessHeight is null);
+                // The loudness strips' height is kept too, within its range.
+                s.LoudnessHeight = 40;
+                s.Save();
+                var tall = new ExportSettings(path);
+                tall.Load();
+                T.Check(tall.LoudnessHeight == 40);
+                s.LoudnessHeight = 500;
+                s.Save();
+                var big = new ExportSettings(path);
+                big.Load();
+                T.Check(big.LoudnessHeight == RecordingsPanes.LoudnessMax);
             }
             finally
             {

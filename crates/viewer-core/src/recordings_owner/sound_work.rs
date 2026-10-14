@@ -25,6 +25,7 @@
 
 use super::day_audio;
 use super::sound::PATTERN_ANALYZER;
+use super::sound_span::{NoAudio, clip_chunks};
 use super::{Hub, RecError, camera_json, lock};
 use crate::audio::{AudioFrame, TileAudio, TileConfig};
 use crate::sound::SoundHub;
@@ -102,6 +103,8 @@ pub(super) struct Work {
     watches: Mutex<HashMap<(String, u8), Watch>>,
     queue: Mutex<Queue>,
     pub(super) source: Mutex<Option<Arc<dyn DayAudioSource>>>,
+    /// What measuring found out about missing sound (see [`NoAudio`]).
+    pub(super) no_audio: Mutex<NoAudio>,
 }
 
 struct Watch {
@@ -117,6 +120,9 @@ struct Request {
     device: String,
     camera: DeviceCamera,
     day: Secs,
+    /// Device-local seconds (inclusive) to analyze within the day; the
+    /// whole day when none.
+    span: Option<(Secs, Secs)>,
 }
 
 #[derive(Default)]
@@ -158,6 +164,9 @@ fn report(hub: &Hub, key: &str, channel: u8, state: &'static str, reason: Option
         w.state = Some(state);
         w.camera
     };
+    if reason == Some("no_audio") {
+        lock(&hub.sound.work.no_audio).camera_lacks(key, channel);
+    }
     hub.send(watch_event(key, camera, state, reason));
 }
 
@@ -394,6 +403,10 @@ fn analyze_event(r: &Request, state: &str, extra: Value) -> Value {
         "type": "sound_analyze", "request": r.id,
         "camera": camera_json(&r.device, r.camera), "day": r.day, "state": state,
     });
+    if let Some((start, end)) = r.span {
+        v["start"] = Value::from(start);
+        v["end"] = Value::from(end);
+    }
     if let (Value::Object(m), Value::Object(e)) = (&mut v, extra) {
         m.extend(e);
     }
@@ -405,10 +418,12 @@ pub(super) fn analyze_day(
     key: &str,
     camera: DeviceCamera,
     day: Secs,
+    span: Option<(Secs, Secs)>,
 ) -> Result<String, RecError> {
     let (req, start) = {
         let mut q = lock(&h.sound.work.queue);
-        let same = |r: &Request| r.device == key && r.camera == camera && r.day == day;
+        let same =
+            |r: &Request| r.device == key && r.camera == camera && r.day == day && r.span == span;
         if let Some(r) = q
             .waiting
             .iter()
@@ -431,6 +446,7 @@ pub(super) fn analyze_day(
             device: key.to_owned(),
             camera,
             day,
+            span,
         };
         q.waiting.push_back(req.clone());
         (req, !q.running.contains_key(key))
@@ -529,6 +545,13 @@ async fn run_request(
     };
     let from_files = explicit.is_none();
     let (device, camera, day) = (req.device.clone(), req.camera, req.day);
+    // Samples of the day the request covers.
+    let window = req.span.map(|(s, e)| {
+        (
+            (s - day).max(0) as u64 * RATE,
+            (e - day + 1).clamp(0, 86_400) as u64 * RATE,
+        )
+    });
     let flag = cancel.clone();
     let done =
         h.rt.spawn_blocking(move || {
@@ -539,6 +562,10 @@ async fn run_request(
                 })?,
                 None => Box::new(day_audio::chunks(files, day)),
             };
+            let chunks: Box<dyn Iterator<Item = AudioChunk> + Send> = match window {
+                Some((lo, hi)) => Box::new(clip_chunks(chunks, lo, hi)),
+                None => chunks,
+            };
             Ok::<_, &'static str>(analyze(day, chunks, &flag))
         })
         .await
@@ -548,7 +575,12 @@ async fn run_request(
         return Err(Failure::Canceled);
     }
     if from_files && done.span.is_none() {
-        // The downloaded files had no readable audio in the day.
+        // The downloaded files had no readable audio in the day (or span).
+        lock(&h.sound.work.no_audio).span_lacks(
+            &req.device,
+            req.camera.channel,
+            req.span.unwrap_or((req.day, req.day + 86_399)),
+        );
         return Err(Failure::Reason("no_audio"));
     }
     store_analysis(h, req, done)
@@ -717,6 +749,20 @@ mod tests {
             l.start - first
         );
         assert!(l.end > l.start + 8 && l.end <= first + 21);
+    }
+
+    #[test]
+    fn a_span_cuts_the_audio_at_whole_seconds_and_stops_reading() {
+        let pcm = vec![0.1f32; 10 * RATE as usize];
+        let all = chunks(0, &pcm);
+        let got: Vec<AudioChunk> = clip_chunks(all.into_iter(), 3 * RATE, 5 * RATE).collect();
+        let first = got.first().expect("some");
+        assert_eq!(first.first_sample, 3 * RATE);
+        let n: usize = got.iter().map(|c| c.samples.len()).sum();
+        assert_eq!(n, 2 * RATE as usize);
+        let a = analyze(0, got.into_iter(), &AtomicBool::new(false));
+        assert_eq!(a.span, Some((3, 4)));
+        assert_eq!(a.seconds.len(), 2);
     }
 
     #[test]

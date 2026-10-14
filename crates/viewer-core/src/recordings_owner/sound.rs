@@ -24,6 +24,7 @@
 //!   the revisions of the stores it read, which grows with every second
 //!   stored. It is not the index revision, which labels do raise.
 
+use super::sound_gaps::lane_gaps;
 use super::sound_work::{self, DayAudioSource};
 use super::{Hub, RecError, State, camera_json, config, dir_name, lock};
 use crate::sound::{SoundHub, SoundSettings, SoundTap};
@@ -248,6 +249,7 @@ impl Hub {
         };
         let second = s.second as i64 + t.offset;
         let (peak, rms) = (s.peak, s.rms);
+        lock(&self.sound.work.no_audio).camera_heard(&t.key, channel);
         self.with_envelope(&t, |store| {
             store.put(DeviceCamera::first(channel), second, peak, rms);
         });
@@ -447,6 +449,17 @@ impl crate::Core {
     /// 60); `cameras` left out means every camera with loudness. A camera
     /// of a device that is not enabled gets a lane of `null`s.
     ///
+    /// With `"gaps": true` each lane of an enabled device also has
+    /// `"gaps": [{"start", "end", "reason", "analyzable"}]`: the runs of
+    /// empty buckets (inclusive device-local seconds, clipped to the
+    /// query), each with what the core knows about why. `reason` is
+    /// `not_recorded` (the device has no recording of the camera there),
+    /// `no_audio` (the camera's live stream or the downloaded video of
+    /// that span was read and has no sound), or `not_analyzed` (recorded,
+    /// sound not measured yet); `analyzable` is true when a finished
+    /// download covers the gap, so `sound_analyze_day` with its `start` and
+    /// `end` can measure it now. See [`split_gap`].
+    ///
     /// # Errors
     /// [`RecError::InvalidArgument`], [`RecError::Limit`] for more than
     /// 100000 buckets in a lane or an answer over 2 million values,
@@ -471,6 +484,11 @@ impl crate::Core {
             return Err(RecError::Limit);
         }
         let cams = config::cameras(&m)?;
+        let want_gaps = match m.get("gaps") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(RecError::InvalidArgument),
+        };
         let st = lock(&h.state);
         let stores = st.stores.as_ref().ok_or(RecError::NotConfigured)?;
         let cfg: EnvelopeConfig = stores.settings.index.into();
@@ -492,7 +510,7 @@ impl crate::Core {
             return Err(RecError::Limit);
         }
         let mut revision = 0u64;
-        let mut lanes = Vec::new();
+        let mut raw = Vec::new();
         for (key, cam) in wanted {
             open_envelope(&mut envs, &st, &key, persistent, cfg);
             let lane = match envs.get_mut(&key) {
@@ -503,10 +521,20 @@ impl crate::Core {
                 None => EnvelopeStore::in_memory(cfg).lane(cam, start, end, bucket_s),
             }
             .ok_or(RecError::Limit)?;
-            lanes.push(json!({
+            raw.push((key, cam, lane));
+        }
+        drop(envs);
+        drop(st);
+        let mut lanes = Vec::new();
+        for (key, cam, lane) in raw {
+            let mut v = json!({
                 "camera": camera_json(&key, cam), "bucket_s": lane.bucket_s,
                 "start": lane.start, "peak_db": lane.peak_db, "rms_db": lane.rms_db,
-            }));
+            });
+            if want_gaps && let Some(g) = lane_gaps(h, &key, cam, &lane, end) {
+                v["gaps"] = g;
+            }
+            lanes.push(v);
         }
         Ok(json!({"revision": revision, "lanes": lanes}).to_string())
     }
@@ -617,7 +645,10 @@ impl crate::Core {
 
     /// Asks for the sound of one camera's day to be analyzed (Decision 13:
     /// only on request, never in the background): `{"camera": {...},
-    /// "day": S}` (any second of the day; device-local). Returns
+    /// "day": S}` (any second of the day; device-local), with optional
+    /// `"start"` and `"end"` (both, inclusive, inside the day) to analyze
+    /// only that span (a loudness gap): the source is read no further than
+    /// `end`, and only that span's seconds and alarm labels are stored. Returns
     /// `{"request": N, "state": "queued"}`, or the existing request for the
     /// same camera-day. At most one analysis runs per device at a time (one
     /// stream per device); `sound_analyze` events report `running`, `done`
@@ -640,11 +671,22 @@ impl crate::Core {
         let m = config::request(json)?;
         let (key, cam) = config::camera(m.get("camera").ok_or(RecError::InvalidArgument)?)?;
         let day = recordings::day_start(config::secs(&m, "day")?);
+        let span = match (m.get("start"), m.get("end")) {
+            (None | Some(Value::Null), None | Some(Value::Null)) => None,
+            (Some(_), Some(_)) => {
+                let (s, e) = (config::secs(&m, "start")?, config::secs(&m, "end")?);
+                if e < s || s < day || e >= day + 86_400 {
+                    return Err(RecError::InvalidArgument);
+                }
+                Some((s, e))
+            }
+            _ => return Err(RecError::InvalidArgument),
+        };
         {
             let st = lock(&h.state);
             check_camera(&st, &key, cam)?;
         }
-        sound_work::analyze_day(h, &key, cam, day)
+        sound_work::analyze_day(h, &key, cam, day, span)
     }
 
     /// Cancels an analysis request that is queued or running; a running

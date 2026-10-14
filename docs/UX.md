@@ -1576,11 +1576,26 @@ grids on both (M3 and W3); exports on both (M4 and W4).
   an event of another camera selects its incident; anywhere else that
   camera plays alone from there.
 - **Sound** ([PLAYBACK.md](PLAYBACK.md) "Sound"; FFI-RECORDINGS.md
-  section 2a). Under each lane a **loudness strip** (10 points) shows the
+  section 2a). Under each lane a **loudness strip** (28 points by default; drag the
+  lower edge of a strip, the first one on Windows, to make every strip 12 to 96 points tall,
+  kept across launches) shows the
   camera's loudness for the day from `nv_recordings_loudness`: per bucket
   the loudest second light and the average dark, from -80 dBFS (nothing)
   to 0 dBFS (full height), blank where no audio was analyzed, which is not
-  silence. A legend under the lanes says so. The bucket follows the zoom,
+  silence. A legend under the lanes says so. **A blank stretch says why**,
+  from what the core knows (`gaps` of `nv_recordings_loudness`): "Not
+  recorded" (the device has no recording of the camera there), "No audio"
+  (the camera's live stream, or the downloaded video of that stretch, was
+  read and has no sound), or "Not analyzed yet" (recorded, not measured);
+  the label is drawn where it fits and the reason is the hover text. On a
+  "not analyzed" stretch that a finished download covers, the strip is
+  tinted and its menu (right click on Windows, context menu on macOS) has
+  **Analyze this gap**: the core reads the downloaded video for only that
+  stretch (`nv_sound_analyze_day` with `start` and `end`; the same progress
+  and Cancel beside the lane's name as Analyze Sounds, one analysis per
+  device at a time). A stretch that is recorded on the device but not
+  downloaded says "download this time first, then analyze its sound": no
+  download is started and nothing is replayed from the device for it. The bucket follows the zoom,
   about one value per two points (60 to 300 s for the whole day, down to a
   few seconds at 48×); the strip of a camera's second lens shows the first
   lens's microphone. Today's strips are read again every 10 s (live seconds

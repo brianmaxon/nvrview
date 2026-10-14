@@ -461,6 +461,54 @@ internal sealed partial class SelfTest
             b.ReloadLoudness(force: true);
             Expect(b.LoudnessOf(lane0)?.Heard != true, "recordings: loudness appeared without audio");
 
+            // parity: recordings-loudness-gaps
+            // Empty stretches of a loudness lane say why, from what the core knows: nothing downloaded is "not analyzed
+            // yet" and cannot be analyzed; a camera found without sound says "no audio"; the words are the label and the
+            // hover text.
+            {
+                b.Timeline = new TimelineViewport();
+                b.ReloadLoudness(force: true);
+                List<LoudnessGap> gaps = [.. b.LoudnessOf(lane0)?.GapList ?? []];
+                Say($"recordings: {gaps.Count} loudness gaps on the first lane: {string.Join(", ", gaps.Select(g => g.Reason))}");
+                Expect(gaps.Count > 0, "recordings: the loudness lane has no gaps with reasons");
+                foreach (LoudnessGap g in gaps.Where(g => g.Reason != "not_analyzed" || g.Analyzable || g.Label != "Not analyzed yet"))
+                {
+                    _problems.Add($"recordings: a gap with nothing downloaded says {g.Reason}, analyzable {g.Analyzable}");
+                }
+                if (gaps.Count > 0)
+                {
+                    Expect(gaps[0].Help == new LoudnessGap(gaps[0].Start, gaps[0].End, "not_analyzed").Help, $"recordings: the gap's hover text is {gaps[0].Help}");
+                    // Not analyzable: the action does nothing, so no analysis is queued.
+                    b.AnalyzeGap(gaps[0], lane0);
+                    Expect(!service.IsAnalyzing(LoudnessScale.Microphone(lane0), b.Day), "recordings: Analyze this gap queued an analysis for a gap that has no video");
+                }
+                fake.SetLacksSound(lane0);
+                b.ReloadLoudness(force: true);
+                List<string> reasons = [.. (b.LoudnessOf(lane0)?.GapList ?? []).Select(g => g.Reason).Distinct()];
+                Expect(reasons.SequenceEqual(["no_audio"]), $"recordings: a camera without sound has gaps {string.Join(", ", reasons)}");
+                fake.SetLacksSound(lane0, false);
+                b.ReloadLoudness(force: true);
+            }
+
+            // parity: recordings-loudness-height
+            // The loudness strips' height: 28 points by default, dragged within 12 to 96, kept (ExportTests pins the settings
+            // file), and the lanes' pane follows it.
+            {
+                double tall = RecordingsPanes.LanesHeight(900, 3, b.LoudnessHeight);
+                b.LoudnessHeight = 500;
+                Expect(b.LoudnessHeight == RecordingsPanes.LoudnessMax, $"recordings: a strip of 500 points is {b.LoudnessHeight}");
+                b.LoudnessHeight = 3;
+                Expect(b.LoudnessHeight == RecordingsPanes.LoudnessMin, $"recordings: a strip of 3 points is {b.LoudnessHeight}");
+                b.LoudnessHeight = 40;
+                b.KeepLoudnessHeight();
+                Say($"recordings: strip height {b.LoudnessHeight}, lanes {tall} -> {RecordingsPanes.LanesHeight(900, 3, 40)}");
+                Expect(b.LoudnessHeight == 40, $"recordings: the strip height is {b.LoudnessHeight}");
+                Expect(RecordingsPanes.LanesHeight(900, 3, 40) > tall, "recordings: a taller strip did not grow the lanes");
+                b.LoudnessHeight = RecordingsPanes.LoudnessHeight;
+                b.KeepLoudnessHeight();
+                w.Refresh();
+            }
+
             // parity: recordings-analyze-day
             // After a download: progress, then loudness and a sound label on the lane, and the done message.
             Incident? toDownload = b.DayIncidents.FirstOrDefault(i => i.Kinds.SequenceEqual(["vehicle"])) ?? b.DayIncidents.FirstOrDefault(i => i.Cameras.Count > 0);
@@ -470,6 +518,41 @@ internal sealed partial class SelfTest
                 b.Download(toDownload.Key);
                 bool downloaded = await Until(() => { fake.CompleteRecordingWork(); return service.Downloads.Any(d => d.State == "done"); }, 5);
                 Expect(downloaded, "recordings: the download for the analysis did not finish");
+
+                // parity: recordings-analyze-gap
+                // "Analyze this gap" on a gap the downloaded video covers: only that stretch is measured (progress,
+                // then loudness inside it and nowhere else).
+                {
+                    RecordingCamera mic = LoudnessScale.Microphone(analyzed);
+                    b.Timeline = new TimelineViewport();
+                    b.ReloadLoudness(force: true);
+                    LoudnessGap? gap = b.LoudnessOf(analyzed)?.GapList.FirstOrDefault(g => g.CanAnalyze);
+                    Expect(gap is not null, "recordings: no analyzable gap after the download");
+                    if (gap is not null)
+                    {
+                        long spanEnd = Math.Min(gap.End, gap.Start + 59);
+                        Expect(gap.Help.Contains("Analyze this gap"), $"recordings: the analyzable gap's hover text is {gap.Help}");
+                        b.AnalyzeGap(gap with { End = spanEnd }, analyzed);
+                        Expect(service.IsAnalyzing(mic, b.Day), "recordings: Analyze this gap shows no progress");
+                        bool gapDone = await Until(() => { fake.CompleteRecordingWork(); return service.Analysis(mic, b.Day)?.State == AnalysisState.Done; }, 5);
+                        AnalysisEntry? gapEntry = service.Analysis(mic, b.Day);
+                        Say($"recordings: analyzed the gap {gap.Start}-{spanEnd}: {gapEntry?.Seconds ?? 0} s");
+                        Expect(gapDone && gapEntry is { Seconds: > 0 } && gapEntry.Seconds <= spanEnd - gap.Start + 1, $"recordings: the gap analysis measured {gapEntry?.Seconds} s of {spanEnd - gap.Start + 1}");
+                        LoudnessLane? fine = service.Loudness(gap.Start - 600, spanEnd + 600, 1, [mic])?.Lanes.FirstOrDefault();
+                        int outside = 0;
+                        for (int i = 0; fine is not null && i < fine.Peak.Count; i++)
+                        {
+                            long t = fine.Start + i;
+                            if (fine.Peak[i] is not null && (t < gap.Start || t > spanEnd))
+                            {
+                                outside++;
+                            }
+                        }
+                        Expect(fine?.Heard == true, "recordings: no loudness inside the analyzed gap");
+                        Expect(outside == 0, $"recordings: {outside} seconds of loudness outside the analyzed gap");
+                        Expect(b.AnalysisOf(analyzed) is null, "recordings: a finished gap analysis still shows progress");
+                    }
+                }
                 b.AnalyzeSound(analyzed);
                 Expect(service.IsAnalyzing(analyzed, b.Day), "recordings: Analyze Sounds shows no progress");
                 bool done = await Until(() => { fake.CompleteRecordingWork(); return service.Analysis(analyzed, b.Day)?.State == AnalysisState.Done; }, 5);

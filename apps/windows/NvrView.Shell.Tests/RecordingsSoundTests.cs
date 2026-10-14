@@ -57,6 +57,36 @@ internal static class RecordingsSoundTests
             T.Check(answer.Lanes[0].Peak.SequenceEqual([-48, null, -12]) && answer.Lanes[0].Rms.SequenceEqual([-60, null, -30]));
             T.Check(answer.Lanes[0].Bucket == 60 && answer.Lanes[0].Heard);
             T.Check(!new LoudnessLane(a, 60, 0, [null], [null]).Heard);
+            T.Check(answer.Lanes[0].GapList.Count == 0);
+            T.Equal("""{"start":0,"end":59,"bucket_s":60,"cameras":[{"device":"d-example","channel":3,"lens":0}],"gaps":true}""",
+                LoudnessScale.Query(0, 59, 60, [a], gaps: true));
+        });
+
+        T.Run("sound: loudness gaps", () =>
+        {
+            LoudnessAnswer answer = T.NotNull(LoudnessAnswer.Parse("""
+                {"revision":1,"lanes":[{"camera":{"device":"d-example","channel":3,"lens":0},"bucket_s":60,"start":0,
+                 "peak_db":[null,null,-12],"rms_db":[null,null,-30],
+                 "gaps":[{"start":0,"end":59,"reason":"not_recorded","analyzable":false},
+                         {"start":60,"end":119,"reason":"not_analyzed","analyzable":true}]}]}
+                """));
+            LoudnessLane lane = answer.Lanes[0];
+            T.Equal(2, lane.GapList.Count);
+            T.Check(lane.GapAt(59)?.Reason == "not_recorded" && lane.GapAt(60)?.Reason == "not_analyzed");
+            T.Check(lane.GapAt(120) is null);
+            // The words on a gap, and which ones offer "Analyze this gap".
+            T.Equal("Not recorded", new LoudnessGap(0, 1, "not_recorded").Label);
+            T.Equal("No audio", new LoudnessGap(0, 1, "no_audio").Label);
+            T.Equal("Not analyzed yet", new LoudnessGap(0, 1, "not_analyzed").Label);
+            T.Equal("No sound analyzed", new LoudnessGap(0, 1, "other").Label);
+            T.Check(lane.GapList[1].CanAnalyze && !lane.GapList[0].CanAnalyze);
+            T.Check(!new LoudnessGap(0, 1, "not_analyzed", false).CanAnalyze);
+            T.Check(!new LoudnessGap(0, 1, "no_audio", true).CanAnalyze);
+            T.Check(lane.GapList[1].Help.Contains("Analyze this gap", StringComparison.Ordinal));
+            T.Check(new LoudnessGap(0, 1, "not_analyzed").Help.Contains("download", StringComparison.Ordinal));
+            var cam = new RecordingCamera(D, 3);
+            T.Equal("""{"camera":{"device":"d-example","channel":3,"lens":0},"day":86400,"start":86460,"end":86519}""",
+                SoundAnalysis.Query(cam, 86_400, 86_460, 86_519));
         });
 
         T.Run("sound: analyzing a day", () =>

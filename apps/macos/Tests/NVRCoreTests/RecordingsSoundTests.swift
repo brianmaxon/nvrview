@@ -52,6 +52,36 @@ import Testing
         #expect(answer.lanes[0].peak == [-48, nil, -12] && answer.lanes[0].rms == [-60, nil, -30])
         #expect(answer.lanes[0].bucket == 60 && answer.lanes[0].heard)
         #expect(!LoudnessLane(camera: a, bucket: 60, start: 0, peak: [nil], rms: [nil]).heard)
+        #expect(answer.lanes[0].gaps.isEmpty)
+        #expect(
+            LoudnessScale.query(start: 0, end: 59, bucket: 60, cameras: [a], gaps: true)
+                == #"{"start":0,"end":59,"bucket_s":60,"cameras":[{"device":"d-example","channel":3,"lens":0}],"gaps":true}"#)
+    }
+
+    @Test func loudnessGaps() throws {
+        let answer = try #require(LoudnessAnswer.parse(answer: #"""
+            {"revision":1,"lanes":[{"camera":{"device":"d-example","channel":3,"lens":0},"bucket_s":60,"start":0,
+             "peak_db":[null,null,-12],"rms_db":[null,null,-30],
+             "gaps":[{"start":0,"end":59,"reason":"not_recorded","analyzable":false},
+                     {"start":60,"end":119,"reason":"not_analyzed","analyzable":true}]}]}
+            """#))
+        let lane = answer.lanes[0]
+        #expect(lane.gaps.count == 2)
+        #expect(lane.gap(at: 59)?.reason == "not_recorded" && lane.gap(at: 60)?.reason == "not_analyzed")
+        #expect(lane.gap(at: 120) == nil)
+        // The words on a gap, and which ones offer "Analyze this gap".
+        let names = [("not_recorded", "Not recorded"), ("no_audio", "No audio"), ("not_analyzed", "Not analyzed yet")]
+        for (reason, label) in names { #expect(LoudnessGap(start: 0, end: 1, reason: reason).label == label) }
+        #expect(LoudnessGap(start: 0, end: 1, reason: "other").label == "No sound analyzed")
+        #expect(lane.gaps[1].canAnalyze && !lane.gaps[0].canAnalyze)
+        #expect(!LoudnessGap(start: 0, end: 1, reason: "not_analyzed", analyzable: false).canAnalyze)
+        #expect(!LoudnessGap(start: 0, end: 1, reason: "no_audio", analyzable: true).canAnalyze)
+        #expect(lane.gaps[1].help.contains("Analyze this gap"))
+        #expect(LoudnessGap(start: 0, end: 1, reason: "not_analyzed").help.contains("download"))
+        let cam = RecordingCamera(device: d, channel: 3)
+        #expect(
+            SoundAnalysis.query(camera: cam, day: 86_400, start: 86_460, end: 86_519)
+                == #"{"camera":{"device":"d-example","channel":3,"lens":0},"day":86400,"start":86460,"end":86519}"#)
     }
 
     @Test func listening() {

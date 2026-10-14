@@ -52,7 +52,7 @@ public sealed record TimelineLane(
     RecordingCamera Camera, string Name, IReadOnlyList<RecordingSpan> Spans, IReadOnlyList<RecordedEvent> Events, bool Failed);
 
 /// <summary>One recordings window's state (see the file comment).</summary>
-public sealed class RecordingsBrowser
+public sealed partial class RecordingsBrowser
 {
     private readonly Guid _token;
     private (long Day, HashSet<RecordingCamera> Cameras)? _asked;
@@ -62,6 +62,7 @@ public sealed class RecordingsBrowser
     private IncidentScope _scope = IncidentScope.Everything;
     private bool _lockedOnly;
     private HashSet<string> _selection = [];
+    private readonly ExportSettings _layout;
 
     /// <param name="model">The shared recordings model.</param>
     /// <param name="files">Opens the files of a follow cut or grid (none: they cannot be opened).</param>
@@ -74,7 +75,8 @@ public sealed class RecordingsBrowser
         HoldId = model.NewHold();
         Player = new RecordingsPlayer(model);
         EditPlayer = new EditPlayer(model, Player, files ?? new NoEditFiles(), audio ?? new NoEditAudio());
-        Export = new ExportController(this, exportSettings);
+        _layout = exportSettings ?? new ExportSettings(null);
+        Export = new ExportController(this, _layout);
         long today = model.Today;
         Day = today;
         Month = DeviceTime.Month(today).Start;
@@ -182,7 +184,8 @@ public sealed class RecordingsBrowser
     public void CancelAnalysis(RecordingCamera camera) => Model.CancelAnalysis(camera, Day);
 
     /// <summary>A lane's sound analysis while it waits or runs.</summary>
-    public AnalysisEntry? AnalysisOf(RecordingCamera camera) => Model.Analysis(camera, Day) is { Active: true } e ? e : null;
+    public AnalysisEntry? AnalysisOf(RecordingCamera camera) =>
+        (Model.Analysis(camera, Day) ?? Model.Analysis(LoudnessScale.Microphone(camera), Day)) is { Active: true } e ? e : null;
 
     /// <summary>Whether any lane can still be asked to analyze.</summary>
     public bool CanAnalyze => Lanes.Any(l => !Model.IsAnalyzing(l.Camera, Day));

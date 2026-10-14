@@ -84,7 +84,10 @@ final class FakeRecordingsState: @unchecked Sendable {
         /// Sound labels the app put: camera, kind, span, analyzer.
         var labels: [(camera: RecordingCamera, kind: String, start: Int64, end: Int64, analyzer: String)] = []
         /// Sound analysis requests that have not finished: request, camera.
-        var analyses: [(request: UInt64, camera: RecordingCamera, day: Int64)] = []
+        var analyses: [(request: UInt64, camera: RecordingCamera, day: Int64, span: ClosedRange<Int64>?)] = []
+        /// Cameras whose recordings were found to have no sound (a
+        /// loudness gap says `no_audio` there); a test sets it.
+        var lacksSound: Set<RecordingCamera> = []
         /// Seconds of audio analyzed from downloads: first-lens camera, span.
         var analyzed: [(camera: RecordingCamera, start: Int64, end: Int64)] = []
         var nextAnalysis: UInt64 = 1
@@ -1350,6 +1353,35 @@ extension FakeCore {
         }
     }
 
+    /// Marks a camera's recordings as having no sound: its loudness gaps
+    /// say `no_audio` (what the core learns from a measurement).
+    public func setLacksSound(_ camera: RecordingCamera, _ lacks: Bool = true) {
+        recordings.locked {
+            let mic = LoudnessScale.microphone(of: camera)
+            if lacks { $0.lacksSound.insert(mic) } else { $0.lacksSound.remove(mic) }
+        }
+    }
+
+    /// The gap `[a, b]` split like the core does for a camera that
+    /// recorded all of it: `no_audio` throughout, or not analyzed with the
+    /// downloaded spans analyzable.
+    static func splitGap(
+        _ a: Int64, _ b: Int64, noAudio: Bool, downloaded: [(Int64, Int64)]
+    ) -> [(start: Int64, end: Int64, reason: String, analyzable: Bool)] {
+        if noAudio { return [(a, b, "no_audio", false)] }
+        var out: [(start: Int64, end: Int64, reason: String, analyzable: Bool)] = []
+        var from = a
+        for (s, e) in downloaded.sorted(by: { $0.0 < $1.0 }) where e >= from && s <= b {
+            if s > from { out.append((from, s - 1, "not_analyzed", false)) }
+            let hi = min(e, b)
+            out.append((max(s, from), hi, "not_analyzed", true))
+            from = hi + 1
+            if from > b { break }
+        }
+        if from <= b { out.append((from, b, "not_analyzed", false)) }
+        return out
+    }
+
     public func soundWatch(camera: String, enabled: Bool) throws(CoreStatus) {
         let c = try Self.camera(try Self.object(camera))
         let changed = try configuredWorld { w throws(CoreStatus) -> Bool in
@@ -1396,10 +1428,32 @@ extension FakeCore {
                 }
                 let peak: [Any] = heard.map { $0 ? -40 as Any : NSNull() }
                 let rms: [Any] = heard.map { $0 ? -50 as Any : NSNull() }
-                return [
+                var lane: [String: Any] = [
                     "camera": Self.cameraObject(c), "bucket_s": bucket, "start": start,
                     "peak_db": peak, "rms_db": rms,
                 ]
+                if o["gaps"] as? Bool == true {
+                    // Every camera recorded all day (see above): an empty
+                    // stretch is `no_audio` for a camera found without
+                    // sound, else not analyzed, analyzable where a finished
+                    // download of the camera covers it.
+                    let downloaded = w.downloads.filter { $0.state == "done" }
+                        .filter { d in d.cameras.contains { LoudnessScale.microphone(of: $0) == c } }
+                        .map { ($0.start, $0.end) }
+                    var gaps: [[String: Any]] = []
+                    var i = 0
+                    while i < count {
+                        if heard[i] { i += 1; continue }
+                        let from = i
+                        while i < count && !heard[i] { i += 1 }
+                        let a = start + Int64(from * bucket), b = min(start + Int64(i * bucket) - 1, end)
+                        for g in Self.splitGap(a, b, noAudio: w.lacksSound.contains(c), downloaded: downloaded) {
+                            gaps.append(["start": g.start, "end": g.end, "reason": g.reason, "analyzable": g.analyzable])
+                        }
+                    }
+                    lane["gaps"] = gaps
+                }
+                return lane
             }
             return Self.json(["revision": w.revision, "lanes": lanes])
         }
@@ -1445,15 +1499,23 @@ extension FakeCore {
         let o = try Self.object(json)
         let c = try Self.camera(o["camera"])
         guard let day = (o["day"] as? NSNumber)?.int64Value, day >= 0 else { throw .invalidArgument }
+        var span: ClosedRange<Int64>?
+        if o["start"] != nil || o["end"] != nil {
+            let first = DeviceTime.dayStart(day)
+            guard let s = (o["start"] as? NSNumber)?.int64Value, let e = (o["end"] as? NSNumber)?.int64Value,
+                s >= first, e >= s, e < first + Self.day
+            else { throw .invalidArgument }
+            span = s...e
+        }
         let request = try configuredWorld { w throws(CoreStatus) -> UInt64 in
             try Self.requireKnownCamera(w, c)
             guard w.analyses.count < 32 else { throw .limit }
             let id = w.nextAnalysis
             w.nextAnalysis += 1
-            w.analyses.append((id, c, day))
+            w.analyses.append((id, c, day, span))
             return id
         }
-        emit(event: Self.json(Self.analysisEvent(request, c, day, "queued")))
+        emit(event: Self.json(Self.analysisEvent(request, c, day, "queued", span: span)))
         scheduleRecordingWork()
         return Self.json(["request": request, "state": "queued"])
     }
@@ -1468,9 +1530,14 @@ extension FakeCore {
     }
 
     private static func analysisEvent(
-        _ request: UInt64, _ c: RecordingCamera, _ day: Int64, _ state: String
+        _ request: UInt64, _ c: RecordingCamera, _ day: Int64, _ state: String, span: ClosedRange<Int64>? = nil
     ) -> [String: Any] {
-        ["type": "sound_analyze", "request": request, "camera": cameraObject(c), "day": day, "state": state]
+        var v: [String: Any] = ["type": "sound_analyze", "request": request, "camera": cameraObject(c), "day": day, "state": state]
+        if let span {
+            v["start"] = span.lowerBound
+            v["end"] = span.upperBound
+        }
+        return v
     }
 
     /// Finishes every queued sound analysis from the synthetic downloads, as
@@ -1481,19 +1548,25 @@ extension FakeCore {
     /// label per download (the pattern detector's, replacing its earlier
     /// ones over that audio).
     func completeSoundAnalyses() {
-        typealias Outcome = (request: UInt64, camera: RecordingCamera, day: Int64, failure: String?, seconds: Int, labels: Int)
+        typealias Outcome = (
+            request: UInt64, camera: RecordingCamera, day: Int64, span: ClosedRange<Int64>?, failure: String?, seconds: Int,
+            labels: Int
+        )
         let pending = recordings.locked { w -> [Outcome] in
             let p = w.analyses
             w.analyses.removeAll()
             return p.map { a -> Outcome in
-                guard w.downloadsDir != nil else { return (a.request, a.camera, a.day, "no_source", 0, 0) }
+                guard w.downloadsDir != nil else { return (a.request, a.camera, a.day, a.span, "no_source", 0, 0) }
                 let dayStart = DeviceTime.dayStart(a.day)
+                // A span asked for limits what is read.
+                let lo = max(a.span?.lowerBound ?? dayStart, dayStart)
+                let hi = min(a.span?.upperBound ?? dayStart + Self.day - 1, dayStart + Self.day - 1)
                 var spans: [(start: Int64, end: Int64)] = []
                 for d in w.downloads where d.state == "done" && d.cameras.contains(a.camera) {
-                    let s = max(d.start, dayStart), e = min(d.end, dayStart + Self.day - 1)
+                    let s = max(d.start, lo), e = min(d.end, hi)
                     if s <= e { spans.append((s, e)) }
                 }
-                guard !spans.isEmpty else { return (a.request, a.camera, a.day, "no_audio", 0, 0) }
+                guard !spans.isEmpty else { return (a.request, a.camera, a.day, a.span, "no_audio", 0, 0) }
                 let mic = RecordingCamera(device: a.camera.device, channel: a.camera.channel, lens: 0)
                 var seconds: Int64 = 0
                 for s in spans {
@@ -1505,12 +1578,12 @@ extension FakeCore {
                 }
                 w.revision += 1
                 w.incidentsRevision += 1
-                return (a.request, a.camera, a.day, nil, Int(seconds), spans.count)
+                return (a.request, a.camera, a.day, a.span, nil, Int(seconds), spans.count)
             }
         }
         for a in pending {
-            if a.failure == nil { emit(event: Self.json(Self.analysisEvent(a.request, a.camera, a.day, "running"))) }
-            var last = Self.analysisEvent(a.request, a.camera, a.day, a.failure == nil ? "done" : "failed")
+            if a.failure == nil { emit(event: Self.json(Self.analysisEvent(a.request, a.camera, a.day, "running", span: a.span))) }
+            var last = Self.analysisEvent(a.request, a.camera, a.day, a.failure == nil ? "done" : "failed", span: a.span)
             if let reason = a.failure {
                 last["reason"] = reason
             } else {

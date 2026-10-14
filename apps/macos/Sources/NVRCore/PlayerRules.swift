@@ -270,11 +270,25 @@ public enum RecordingsPanes {
     /// One timeline lane, and the hour ruler above them.
     public static let laneHeight: CGFloat = 26
     public static let rulerHeight: CGFloat = 18
-    /// The loudness strip under each lane, a lane with its strip, and the
+    /// The loudness strip under each lane: its default height, and the
+    /// range the user can drag it to (remembered across launches; the
+    /// Windows app uses the same numbers). A lane with its strip, and the
     /// strips' legend under the lanes.
-    public static let loudnessHeight: CGFloat = 10
+    public static let loudnessHeight: CGFloat = 28
+    public static let loudnessMin: CGFloat = 12
+    public static let loudnessMax: CGFloat = 96
     public static let rowHeight: CGFloat = laneHeight + loudnessHeight
     public static let legendHeight: CGFloat = 14
+
+    /// A dragged or stored strip height, kept in range (the default for
+    /// nothing or garbage).
+    public static func clampLoudness(_ h: Double?) -> CGFloat {
+        guard let h, h.isFinite else { return loudnessHeight }
+        return min(max(CGFloat(h), loudnessMin), loudnessMax)
+    }
+
+    /// A lane with a strip `loudness` points tall.
+    public static func rowHeight(loudness: CGFloat) -> CGFloat { laneHeight + loudness }
     /// The least height of the player.
     public static let playerMin: CGFloat = 200
 
@@ -291,9 +305,10 @@ public enum RecordingsPanes {
     /// The timeline lanes' height in a center column `height` points tall:
     /// every lane if they fit in a third of it, else a third (they scroll),
     /// never less than two lanes.
-    public static func lanesHeight(height: CGFloat, lanes: Int) -> CGFloat {
-        let want = rulerHeight + CGFloat(max(lanes, 1)) * rowHeight + legendHeight + 8
-        let cap = max((height - transportHeight) / 3, rulerHeight + 2 * rowHeight + legendHeight + 8)
+    public static func lanesHeight(height: CGFloat, lanes: Int, loudness: CGFloat = loudnessHeight) -> CGFloat {
+        let row = rowHeight(loudness: loudness)
+        let want = rulerHeight + CGFloat(max(lanes, 1)) * row + legendHeight + 8
+        let cap = max((height - transportHeight) / 3, rulerHeight + 2 * row + legendHeight + 8)
         return min(want, cap)
     }
 }

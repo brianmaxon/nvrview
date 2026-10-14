@@ -295,7 +295,8 @@ package final class RecordingsBrowser {
 
     /// A lane's sound analysis while it waits or runs.
     package func analysis(of camera: RecordingCamera) -> SoundAnalysis.Entry? {
-        model.analysis(camera, day: day).flatMap { $0.active ? $0 : nil }
+        (model.analysis(camera, day: day) ?? model.analysis(LoudnessScale.microphone(of: camera), day: day))
+            .flatMap { $0.active ? $0 : nil }
     }
 
     /// Whether any lane can still be asked to analyze.
@@ -303,6 +304,28 @@ package final class RecordingsBrowser {
 
     /// The loudness a lane shows (its camera's microphone).
     package func loudness(of camera: RecordingCamera) -> LoudnessLane? { loudness[LoudnessScale.microphone(of: camera)] }
+
+    /// "Analyze this gap": measures one empty stretch of a lane's loudness
+    /// from the downloaded video. Only a gap the core said is analyzable.
+    package func analyzeGap(_ gap: LoudnessGap, of camera: RecordingCamera) {
+        guard gap.canAnalyze else { return }
+        let mic = LoudnessScale.microphone(of: camera)
+        guard !model.isAnalyzing(mic, day: day) else { return }
+        model.analyzeSound(of: mic, day: day, span: gap.start...gap.end)
+    }
+
+    /// The height of the loudness strips (the user drags it; kept across
+    /// launches).
+    package var loudnessHeight: CGFloat = RecordingsPanes.clampLoudness(
+        UserDefaults.standard.object(forKey: RecordingsBrowser.loudnessHeightKey) as? Double)
+    {
+        didSet {
+            let h = RecordingsPanes.clampLoudness(Double(loudnessHeight))
+            if h != loudnessHeight { loudnessHeight = h }
+            UserDefaults.standard.set(Double(h), forKey: Self.loudnessHeightKey)
+        }
+    }
+    package static let loudnessHeightKey = "recordings.loudnessHeight"
 
     /// Holds today (for the enabled cameras) while today is shown; the core
     /// is told only when that changes.

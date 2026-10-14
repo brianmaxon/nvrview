@@ -58,6 +58,52 @@ extension String {
     fileprivate var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }
 
+/// A run of empty loudness buckets and why they are empty, as the core
+/// knows it (`gaps` of `nv_recordings_loudness`, minor 15): inclusive
+/// device-local seconds; `reason` is `not_recorded`, `no_audio`, or
+/// `not_analyzed`; `analyzable` means a finished download covers the gap, so
+/// "Analyze this gap" can measure it now. The Windows app has the same
+/// words in `LoudnessGap`.
+public struct LoudnessGap: Sendable, Equatable, Decodable {
+    public var start: Int64
+    public var end: Int64
+    public var reason: String
+    public var analyzable: Bool
+
+    public init(start: Int64, end: Int64, reason: String, analyzable: Bool = false) {
+        self.start = start
+        self.end = end
+        self.reason = reason
+        self.analyzable = analyzable
+    }
+
+    /// The short label drawn on the gap.
+    public var label: String {
+        switch reason {
+        case "not_recorded": "Not recorded"
+        case "no_audio": "No audio"
+        case "not_analyzed": "Not analyzed yet"
+        default: "No sound analyzed"
+        }
+    }
+
+    /// What hovering the gap says.
+    public var help: String {
+        switch reason {
+        case "not_recorded": "Not recorded: the device has no recording of this camera here"
+        case "no_audio": "No audio: this camera's recording here has no sound"
+        case "not_analyzed":
+            analyzable
+                ? "Not analyzed yet: the downloaded video here can be analyzed (right-click, Analyze this gap)"
+                : "Not analyzed yet: download this time first, then analyze its sound"
+        default: "No sound analyzed here"
+        }
+    }
+
+    /// Whether the action "Analyze this gap" applies.
+    public var canAnalyze: Bool { reason == "not_analyzed" && analyzable }
+}
+
 /// One camera's loudness lane (`nv_recordings_loudness`): whole dBFS per
 /// bucket, nil where no audio was analyzed (not silence).
 public struct LoudnessLane: Sendable, Equatable, Decodable {
@@ -67,20 +113,40 @@ public struct LoudnessLane: Sendable, Equatable, Decodable {
     public var start: Int64
     public var peak: [Int?]
     public var rms: [Int?]
+    /// Why the empty stretches are empty (asked for with `gaps`).
+    public var gaps: [LoudnessGap]
 
     private enum CodingKeys: String, CodingKey {
-        case camera, start
+        case camera, start, gaps
         case bucket = "bucket_s"
         case peak = "peak_db"
         case rms = "rms_db"
     }
 
-    public init(camera: RecordingCamera, bucket: Int64, start: Int64, peak: [Int?], rms: [Int?]) {
+    public init(
+        camera: RecordingCamera, bucket: Int64, start: Int64, peak: [Int?], rms: [Int?], gaps: [LoudnessGap] = []
+    ) {
         self.camera = camera
         self.bucket = bucket
         self.start = start
         self.peak = peak
         self.rms = rms
+        self.gaps = gaps
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        camera = try c.decode(RecordingCamera.self, forKey: .camera)
+        bucket = try c.decode(Int64.self, forKey: .bucket)
+        start = try c.decode(Int64.self, forKey: .start)
+        peak = try c.decode([Int?].self, forKey: .peak)
+        rms = try c.decode([Int?].self, forKey: .rms)
+        gaps = try c.decodeIfPresent([LoudnessGap].self, forKey: .gaps) ?? []
+    }
+
+    /// The gap that holds a device-local second.
+    public func gap(at second: Int64) -> LoudnessGap? {
+        gaps.first { $0.start <= second && second <= $0.end }
     }
 
     /// Whether any bucket has audio.
@@ -126,9 +192,13 @@ public enum LoudnessScale {
         return out
     }
 
-    /// `nv_recordings_loudness` for `cameras` over `[start, end]`.
-    public static func query(start: Int64, end: Int64, bucket: Int64, cameras: [RecordingCamera]) -> String {
-        #"{"start":\#(start),"end":\#(end),"bucket_s":\#(bucket),"cameras":\#(RecordingsRequest.cameras(cameras))}"#
+    /// `nv_recordings_loudness` for `cameras` over `[start, end]`, with the
+    /// reasons for empty stretches when `gaps`.
+    public static func query(
+        start: Int64, end: Int64, bucket: Int64, cameras: [RecordingCamera], gaps: Bool = false
+    ) -> String {
+        let more = gaps ? #","gaps":true"# : ""
+        return #"{"start":\#(start),"end":\#(end),"bucket_s":\#(bucket),"cameras":\#(RecordingsRequest.cameras(cameras))\#(more)}"#
     }
 }
 

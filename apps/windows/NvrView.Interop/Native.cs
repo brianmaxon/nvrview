@@ -407,7 +407,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 14;
+    public const uint AbiMinor = 15;
 
     /// <summary>NV_ASC_MAX: most bytes of an AudioSpecificConfig an encoder's open may write (minor 9).</summary>
     public const int AscMax = 64;

@@ -403,7 +403,15 @@ public sealed partial class RecordingsService
     /// Asks for the sound of these cameras' day to be analyzed from the downloaded video (<c>nv_sound_analyze_day</c>);
     /// progress and the outcome come back as <c>sound_analyze</c> events. Sets <see cref="Notice"/> when nothing can be asked.
     /// </summary>
-    public void AnalyzeSound(IEnumerable<RecordingCamera> cameras, long day)
+    public void AnalyzeSound(IEnumerable<RecordingCamera> cameras, long day) => AnalyzeSound(cameras, day, null);
+
+    /// <summary>
+    /// The same for one stretch of a day (a loudness gap, inclusive device-local seconds): the core reads the downloaded
+    /// video only there, one analysis per device at a time.
+    /// </summary>
+    public void AnalyzeSound(RecordingCamera camera, long day, (long Start, long End) span) => AnalyzeSound([camera], day, span);
+
+    private void AnalyzeSound(IEnumerable<RecordingCamera> cameras, long day, (long Start, long End)? span)
     {
         if (!Usable || _core is not IEditSound sound)
         {
@@ -423,7 +431,8 @@ public sealed partial class RecordingsService
             }
             try
             {
-                string answer = sound.SoundAnalyzeDay(SoundAnalysis.Query(camera, day));
+                string answer = sound.SoundAnalyzeDay(
+                    span is { } sp ? SoundAnalysis.Query(camera, day, sp.Start, sp.End) : SoundAnalysis.Query(camera, day));
                 var key = (camera, DeviceTime.DayStart(day));
                 if (!SoundAnalyses.TryGetValue(key, out AnalysisEntry? now) || !now.Active)
                 {
@@ -563,7 +572,7 @@ public sealed partial class RecordingsService
     /// <summary>Loudness lanes for <paramref name="cameras"/> over [start, end] (memory only).</summary>
     public LoudnessAnswer? Loudness(long start, long end, long bucket, IReadOnlyList<RecordingCamera> cameras) =>
         cameras.Count == 0 || _core is not IEditSound sound ? null
-            : Query(() => sound.RecordingsLoudness(LoudnessScale.Query(start, end, bucket, cameras)), LoudnessAnswer.Parse);
+            : Query(() => sound.RecordingsLoudness(LoudnessScale.Query(start, end, bucket, cameras, gaps: true)), LoudnessAnswer.Parse);
 
     /// <summary>An incident's finished download (the newest), whose files a follow cut, a grid, or an export is made from.</summary>
     public DownloadProgress? FinishedDownload(string incident) =>

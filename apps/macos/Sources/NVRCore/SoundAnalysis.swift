@@ -35,6 +35,12 @@ public enum SoundAnalysis {
         #"{"camera":\#(camera.json),"day":\#(day)}"#
     }
 
+    /// `nv_sound_analyze_day`'s input for one span of a day (a loudness
+    /// gap), inclusive device-local seconds inside the day.
+    public static func query(camera: RecordingCamera, day: Int64, start: Int64, end: Int64) -> String {
+        #"{"camera":\#(camera.json),"day":\#(day),"start":\#(start),"end":\#(end)}"#
+    }
+
     /// Folds an event into a camera-day's entry. A late `queued` or
     /// `running` never takes back a finished state of the same request.
     public static func fold(

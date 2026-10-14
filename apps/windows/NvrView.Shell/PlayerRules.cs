@@ -293,11 +293,21 @@ public static class RecordingsPanes
     public const double LaneHeight = 26;
     public const double RulerHeight = 18;
 
-    /// <summary>The loudness strip under each lane.</summary>
-    public const double LoudnessHeight = 10;
+    /// <summary>The loudness strip under each lane: its default height (the user drags it within <see cref="LoudnessMin"/> to <see cref="LoudnessMax"/>; kept across launches; the macOS app uses the same numbers).</summary>
+    public const double LoudnessHeight = 28;
+
+    public const double LoudnessMin = 12;
+    public const double LoudnessMax = 96;
 
     /// <summary>A lane with its loudness strip.</summary>
     public const double RowHeight = LaneHeight + LoudnessHeight;
+
+    /// <summary>A dragged or stored strip height, kept in range (the default for nothing or garbage).</summary>
+    public static double ClampLoudness(double? h) =>
+        h is { } v && double.IsFinite(v) ? Math.Clamp(v, LoudnessMin, LoudnessMax) : LoudnessHeight;
+
+    /// <summary>A lane with a strip <paramref name="loudness"/> tall.</summary>
+    public static double RowHeightFor(double loudness) => LaneHeight + loudness;
 
     /// <summary>The loudness strips' legend under the lanes.</summary>
     public const double LegendHeight = 14;
@@ -329,10 +339,11 @@ public static class RecordingsPanes
     /// every lane if they fit in a third of it, else a third (they scroll),
     /// never less than two lanes.
     /// </summary>
-    public static double LanesHeight(double height, int lanes)
+    public static double LanesHeight(double height, int lanes, double loudness = LoudnessHeight)
     {
-        double want = RulerHeight + Math.Max(lanes, 1) * RowHeight + LegendHeight + 8;
-        double cap = Math.Max((height - TransportHeight) / 3, RulerHeight + 2 * RowHeight + LegendHeight + 8);
+        double row = RowHeightFor(loudness);
+        double want = RulerHeight + Math.Max(lanes, 1) * row + LegendHeight + 8;
+        double cap = Math.Max((height - TransportHeight) / 3, RulerHeight + 2 * row + LegendHeight + 8);
         return Math.Min(want, cap);
     }
 }
