@@ -132,8 +132,13 @@ struct SmartAlertsGeneralView: View {
                         Text(m < 60 ? "\(m) minutes" : m == 60 ? "1 hour" : "\(m / 60) hours").tag(m)
                     }
                 }
+                Picker("Keep night pictures until", selection: setting(alerts, \.evidenceNightHoldHours)) {
+                    ForEach([0, 1, 2, 4, 6, 8, 12], id: \.self) { h in
+                        Text(h == 0 ? "the night ends" : h == 1 ? "1 hour after the night ends" : "\(h) hours after the night ends").tag(h)
+                    }
+                }
                 caption(
-                    "For checks of an outdoor person, animal or vehicle, the pictures and what each method found are kept on this computer so you can see in Smart Alert Events why an alert was or was not raised. They are never sent anywhere and are deleted when this time is up (at most 300 sets or 200 MB). Keep in the Events window saves one for 7 days."
+                    "For checks of an outdoor person, animal or vehicle, the pictures and what each method found are kept on this computer so you can see in Smart Alert Events why an alert was or was not raised. They are never sent anywhere. Pictures made during the night are kept until the time above (so the night can be reviewed in the morning, if that is later than the first setting); the rest are deleted when the first time is up. Every detection is kept, including those inside a cooldown that did not notify you. At most 600 sets or 400 MB are kept, oldest first. Keep in the Events window saves one for 7 days."
                 )
             }
             Section("Alerting") {
