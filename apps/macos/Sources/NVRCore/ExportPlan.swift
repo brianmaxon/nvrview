@@ -144,10 +144,11 @@ public enum ExportRequest {
 
     /// `nv_download_range`: whole seconds, the start rounded down and the end up.
     public static func range(
-        startMs: Int64, endMs: Int64, cameras: [RecordingCamera], name: String?, options: ExportOptions
+        startMs: Int64, endMs: Int64, cameras: [RecordingCamera], name: String?, options: ExportOptions,
+        quality: ExportQuality = .main
     ) -> String {
         let start = Int64((Double(startMs) / 1000).rounded(.down)), end = Int64((Double(endMs) / 1000).rounded(.up))
-        let list = cameras.map { #"{"camera":\#($0.json),"tier":"main"}"# }.joined(separator: ",")
+        let list = cameras.map { #"{"camera":\#($0.json),"tier":"\#(quality.tier)"}"# }.joined(separator: ",")
         let n = name.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }.map { #","name":\#(id($0))"# } ?? ""
         return #"{"start":\#(start),"end":\#(end),"cameras":[\#(list)]\#(n)\#(options.members)}"#
     }

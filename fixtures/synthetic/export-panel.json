@@ -1,0 +1,79 @@
+{
+  "kinds": [
+    {"note": "an incident playing, not downloaded, three cameras",
+     "context": {"hasRange": true, "hasPictures": true, "editable": false, "sourceCameras": 3, "checkedCameras": 3},
+     "kinds": ["trim-copy", "trim-exact", "download", "still-current", "still-each"]},
+    {"note": "downloaded: the follow cut and grids join",
+     "context": {"hasRange": true, "hasPictures": true, "editable": true, "sourceCameras": 3, "checkedCameras": 3},
+     "kinds": ["trim-copy", "trim-exact", "follow-cut", "grid-2", "grid-4", "download", "still-current", "still-each"]},
+    {"note": "one camera: no grids, no picture of each",
+     "context": {"hasRange": true, "hasPictures": true, "editable": true, "sourceCameras": 1, "checkedCameras": 1},
+     "kinds": ["trim-copy", "trim-exact", "follow-cut", "download", "still-current"]},
+    {"note": "an app that cannot write an edit",
+     "context": {"hasRange": true, "hasPictures": true, "editable": true, "canWriteEdit": false, "sourceCameras": 2, "checkedCameras": 2},
+     "kinds": ["trim-copy", "trim-exact", "download", "still-current", "still-each"]},
+    {"note": "nothing playing",
+     "context": {"hasRange": false, "hasPictures": false, "editable": false, "sourceCameras": 0, "checkedCameras": 0},
+     "kinds": []}
+  ],
+  "defaults": [
+    {"available": ["trim-copy", "download"], "current": null, "kind": "trim-copy"},
+    {"available": ["trim-copy", "download"], "current": "download", "kind": "download"},
+    {"available": ["trim-copy", "download"], "current": "grid-4", "kind": "trim-copy"},
+    {"available": [], "current": "download", "kind": null}
+  ],
+  "applies": [
+    {"kind": "trim-copy", "editable": false, "cameras": true, "sound": false, "quality": true},
+    {"kind": "trim-exact", "editable": true, "cameras": true, "sound": false, "quality": false},
+    {"kind": "follow-cut", "editable": true, "cameras": false, "sound": true, "quality": false},
+    {"kind": "grid-4", "editable": true, "cameras": false, "sound": true, "quality": false},
+    {"kind": "download", "editable": true, "cameras": true, "sound": false, "quality": true},
+    {"kind": "still-current", "editable": false, "cameras": false, "sound": false, "quality": false},
+    {"kind": "still-each", "editable": false, "cameras": true, "sound": false, "quality": false}
+  ],
+  "problems": [
+    {"kind": "trim-copy", "start": 1000, "end": 6000, "cameras": 2, "busy": false, "problem": null},
+    {"kind": "trim-copy", "start": 1000, "end": 6000, "cameras": 2, "busy": true, "problem": "Wait for the export in progress, or cancel it"},
+    {"kind": "download", "start": 1000, "end": 6000, "cameras": 0, "busy": false, "problem": "Choose at least one camera"},
+    {"kind": "trim-exact", "start": 1000, "end": 1050, "cameras": 1, "busy": false, "problem": "Set an in point and an out point first (I and O)"},
+    {"kind": "follow-cut", "start": 1000, "end": 1000, "cameras": 0, "busy": false, "problem": "Set an in point and an out point first (I and O)"},
+    {"kind": "still-current", "start": 0, "end": 0, "cameras": 0, "busy": false, "problem": null},
+    {"kind": "still-each", "start": 0, "end": 0, "cameras": 0, "busy": false, "problem": "Choose at least one camera"}
+  ],
+  "summaries": [
+    {"kind": "trim-copy", "durationMs": 65000, "cameras": 2, "bytes": null, "text": "2 cameras, 1:05"},
+    {"kind": "trim-exact", "durationMs": 3725000, "cameras": 1, "bytes": 25000000, "text": "1 camera, 1:02:05, about 25 MB"},
+    {"kind": "download", "durationMs": 59000, "cameras": 3, "bytes": 1500000000, "text": "3 cameras, 0:59, about 1.5 GB"},
+    {"kind": "download", "durationMs": 9000, "cameras": 1, "bytes": 300000, "text": "1 camera, 0:09, about 300 KB"},
+    {"kind": "follow-cut", "durationMs": 12000, "cameras": 3, "bytes": null, "text": "One video, 0:12"},
+    {"kind": "grid-2", "durationMs": 12000, "cameras": 2, "bytes": 5, "text": "One video, 0:12"},
+    {"kind": "still-current", "durationMs": 0, "cameras": 3, "bytes": null, "text": "1 picture"},
+    {"kind": "still-each", "durationMs": 0, "cameras": 3, "bytes": null, "text": "3 pictures"}
+  ],
+  "estimates": [
+    {"spans": [[100, 200, 1000], [200, 300, 3000]], "start": 150, "end": 250, "bytes": 2000},
+    {"spans": [[100, 200, 1000]], "start": 300, "end": 400, "bytes": null},
+    {"spans": [[100, 200, 0]], "start": 100, "end": 200, "bytes": null}
+  ],
+  "times": [
+    {"text": "07:42:05", "dayStartMs": 86400000, "ms": 114125000},
+    {"text": "7:42", "dayStartMs": 86400000, "ms": 114120000},
+    {"text": "07:42:05.25", "dayStartMs": 0, "ms": 27725250},
+    {"text": " 00:00:00 ", "dayStartMs": 0, "ms": 0},
+    {"text": "24:00:00", "dayStartMs": 0, "ms": null},
+    {"text": "07:61", "dayStartMs": 0, "ms": null},
+    {"text": "07:42:60", "dayStartMs": 0, "ms": null},
+    {"text": "noon", "dayStartMs": 0, "ms": null},
+    {"text": "7", "dayStartMs": 0, "ms": null},
+    {"text": "-1:00", "dayStartMs": 0, "ms": null}
+  ],
+  "timeText": [
+    {"ms": 114125000, "text": "07:42:05"},
+    {"ms": 27725250, "text": "07:42:05.250"},
+    {"ms": 86400000, "text": "00:00:00"}
+  ],
+  "quality": [
+    {"quality": "main", "tier": "main"},
+    {"quality": "sub", "tier": "sub"}
+  ]
+}
