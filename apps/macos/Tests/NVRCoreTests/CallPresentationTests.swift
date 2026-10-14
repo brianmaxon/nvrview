@@ -239,11 +239,12 @@ import Testing
             board.started(.detection("person"), camera: c, visible: false, now: Double(i), at: t0)
         }
         board.started(.doorbell, camera: door, visible: false, now: 9, at: t0, detached: true)
-        #expect(board.shown.map(\.camera) == Array(others.reversed().prefix(3)))
+        // The fourth waits: the three drawn have not been up 10 s.
+        #expect(board.shown.map(\.camera) == [others[2], others[1], others[0]])
         #expect(board.more == 1)
         // Esc takes the top drawn inset, not the call.
         let escaped = board.dismissTop()
-        #expect(escaped?.camera == others[3])
+        #expect(escaped?.camera == others[2])
         #expect(board.detachedCameras == [door])
     }
 

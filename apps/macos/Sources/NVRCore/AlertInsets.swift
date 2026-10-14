@@ -87,6 +87,10 @@ public struct InsetItem: Sendable, Equatable, Identifiable {
     /// The view the stage showed before a swap (its camera in the inset),
     /// rather than an event.
     public var isReturn = false
+    /// A return inset of a stage that showed several tiles: it draws the
+    /// whole layout in miniature (`camera` is only its identity), not one
+    /// camera.
+    public var showsLayout = false
     /// The call is shown in its own window (docs/UX.md "Doorbell calls"):
     /// the item is kept for the call's whole life but not drawn, counted,
     /// leased, swapped or closed by the clock here.
@@ -111,12 +115,50 @@ public struct InsetItem: Sendable, Equatable, Identifiable {
     }
 }
 
+/// How many insets a window draws at once, as a grid (docs/UX.md "Alert
+/// insets"): `rows` insets stacked in a column, up to `columns` columns. The
+/// rest wait in "+N more". The default, 3 rows in 1 column, is the original
+/// stack of three.
+public struct InsetGridSetting: Sendable, Equatable, Hashable, Codable {
+    public static let rowRange = 1...4
+    public static let columnRange = 1...6
+    public static let standard = InsetGridSetting(rows: 3, columns: 1)
+
+    public let rows: Int
+    public let columns: Int
+
+    /// Clamped to the ranges.
+    public init(rows: Int, columns: Int) {
+        self.rows = min(max(rows, Self.rowRange.lowerBound), Self.rowRange.upperBound)
+        self.columns = min(max(columns, Self.columnRange.lowerBound), Self.columnRange.upperBound)
+    }
+
+    /// How many insets are drawn at most.
+    public var capacity: Int { rows * columns }
+
+    private enum CodingKeys: String, CodingKey { case rows, columns }
+
+    /// A saved value goes through the clamping initializer.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(rows: try c.decode(Int.self, forKey: .rows), columns: try c.decode(Int.self, forKey: .columns))
+    }
+}
+
 /// A window's insets, newest first, and the swap: clicking an inset puts its
 /// camera on the whole stage and the view that was there into an inset
 /// (`InsetItem.isReturn`), so one more click swaps back.
+///
+/// The order is stable: an event on a camera that has an inset refreshes it
+/// where it is; a new camera takes the top. At most `capacity` insets are
+/// drawn; a newer one pushes an older one into "+N more" only once the older
+/// has been on screen `minimumShownTime`, otherwise it waits its turn.
 public struct InsetBoard: Sendable, Equatable {
-    /// How many insets are drawn; the rest show as "+N more".
-    public static let maxShown = 3
+    /// How many insets are drawn by default; the rest show as "+N more".
+    public static let maxShown = InsetGridSetting.standard.capacity
+    /// An inset stays on screen at least this long (viewer clock, seconds)
+    /// before a newer one can push it out.
+    public static let minimumShownTime = 10.0
     /// Doorbell and detection insets close this long after the event ended
     /// and they were last used, unless hovered.
     public static let autoCloseDelay = 60.0
@@ -130,21 +172,32 @@ public struct InsetBoard: Sendable, Equatable {
         /// The camera of the view that was on the stage (shown in the return
         /// inset), if it had one.
         public var displaced: CameraRef?
+        /// The stage showed a layout (several tiles, nothing focused): the
+        /// return inset draws all of it, not just `displaced`.
+        public var displacedLayout = false
         public var shown: CameraRef { item.camera }
     }
 
     /// Newest first; a return inset included.
     public private(set) var items: [InsetItem] = []
     public private(set) var swap: Swap?
+    /// How many insets may be drawn at once.
+    public private(set) var capacity = InsetBoard.maxShown
+    /// The cameras drawn now, and since when (viewer clock).
+    private var drawn: [CameraRef: Double] = [:]
+    /// The latest time any call gave (for changes that carry none).
+    private var lastNow = 0.0
 
-    public init() {}
+    public init(capacity: Int = InsetBoard.maxShown) { self.capacity = max(capacity, 1) }
 
     /// The items drawn in this window (all but the detached ones).
     public var attached: [InsetItem] { items.filter { !$0.detached } }
     /// The insets drawn, top of the stack first.
-    public var shown: [InsetItem] { Array(attached.prefix(Self.maxShown)) }
+    public var shown: [InsetItem] { attached.filter { drawn[$0.camera] != nil } }
+    /// The insets waiting for room ("+N more"), top of the stack first.
+    public var waiting: [InsetItem] { attached.filter { drawn[$0.camera] == nil } }
     /// How many more there are than are drawn.
-    public var more: Int { max(attached.count - Self.maxShown, 0) }
+    public var more: Int { waiting.count }
     /// Nothing on screen: no inset drawn and no swap (detached items do not
     /// count).
     public var isEmpty: Bool { attached.isEmpty && swap == nil }
@@ -177,15 +230,15 @@ public struct InsetBoard: Sendable, Equatable {
             return true
         }
         if let i = items.firstIndex(where: { $0.camera == camera && !$0.isReturn }) {
-            var item = items.remove(at: i)
-            item.count += 1
-            item.lastAt = date
-            item.active = true
-            item.startedAt = now
-            item.endedAt = nil
+            // Refreshed where it is: no churn among the insets.
+            items[i].count += 1
+            items[i].lastAt = date
+            items[i].active = true
+            items[i].startedAt = now
+            items[i].endedAt = nil
             // A sound alarm outranks the rest on the same camera.
-            if kind.isCritical || !item.kind.isCritical { item.kind = kind }
-            items.insert(item, at: 0)
+            if kind.isCritical || !items[i].kind.isCritical { items[i].kind = kind }
+            settle(now: now)
             return true
         }
         guard !visible || detached else { return false }
@@ -194,7 +247,78 @@ public struct InsetBoard: Sendable, Equatable {
                 camera: camera, kind: kind, firstAt: date, lastAt: date, count: 1, active: true, startedAt: now,
                 endedAt: nil, usedAt: now, detached: detached),
             at: 0)
+        settle(now: now)
         return true
+    }
+
+    /// A camera waiting in "+N more" was chosen: it takes the top and a
+    /// place among the drawn ones; the lowest drawn inset goes to the
+    /// waiting list. Returns whether anything changed.
+    @discardableResult
+    public mutating func bringIn(_ camera: CameraRef, now: Double) -> Bool {
+        guard drawn[camera] == nil,
+            let i = items.firstIndex(where: { $0.camera == camera && !$0.isReturn && !$0.detached })
+        else { return false }
+        var item = items.remove(at: i)
+        item.usedAt = max(item.usedAt, now)
+        items.insert(item, at: 0)
+        settle(now: now, force: camera)
+        return true
+    }
+
+    /// Changes how many insets are drawn; those over the new capacity go to
+    /// the waiting list (lowest first), regardless of how long they were up.
+    public mutating func setCapacity(_ capacity: Int, now: Double? = nil) {
+        self.capacity = max(capacity, 1)
+        settle(now: now)
+    }
+
+    /// Decides which items are drawn. Kept ones stay; free places go to the
+    /// waiting items, newest first; a waiting item newer than a drawn one
+    /// takes its place only if that has been up `minimumShownTime`. A return
+    /// inset is always drawn, and `force` (a chip click) too.
+    private mutating func settle(now: Double?, force: CameraRef? = nil) {
+        if let now { lastNow = max(lastNow, now) }
+        let t = lastNow
+        let order = attached.map(\.camera)
+        drawn = drawn.filter { order.contains($0.key) }
+        func rank(_ c: CameraRef) -> Int { order.firstIndex(of: c) ?? Int.max }
+        func isReturn(_ c: CameraRef) -> Bool { items.contains { $0.camera == c && $0.isReturn } }
+        /// The drawn item to give up: the lowest in the stack that may go.
+        func victim(ignoringTime: Bool, below: Int) -> CameraRef? {
+            drawn.filter { c, since in
+                !isReturn(c) && rank(c) > below && (ignoringTime || t - since >= Self.minimumShownTime)
+            }.max { rank($0.key) < rank($1.key) }?.key
+        }
+        // Over capacity (it was reduced): the lowest ones go.
+        while drawn.count > capacity, let out = victim(ignoringTime: true, below: -1) { drawn[out] = nil }
+        for camera in order {
+            guard drawn[camera] == nil else { continue }
+            let must = isReturn(camera) || camera == force
+            if drawn.count < capacity {
+                drawn[camera] = t
+            } else if must, let out = victim(ignoringTime: true, below: -1) {
+                drawn[out] = nil
+                drawn[camera] = t
+            } else if let out = victim(ignoringTime: false, below: rank(camera)) {
+                drawn[out] = nil
+                drawn[camera] = t
+            }
+        }
+    }
+
+    /// The first time something waiting may take a place: when the lowest
+    /// drawn inset below a waiting one has been up long enough.
+    private var settleDeadline: Double? {
+        let order = attached.map(\.camera)
+        guard let firstWaiting = order.firstIndex(where: { drawn[$0] == nil }) else { return nil }
+        var earliest: Double?
+        for (c, since) in drawn {
+            guard let r = order.firstIndex(of: c), r > firstWaiting, !items.contains(where: { $0.camera == c && $0.isReturn })
+            else { continue }
+            earliest = min(earliest ?? .infinity, since + Self.minimumShownTime)
+        }
+        return earliest
     }
 
     /// Pop Out (`true`) or Pop In (`false`) a call's item. Popping out the
@@ -213,6 +337,7 @@ public struct InsetBoard: Sendable, Equatable {
         item.hovered = false
         item.usedAt = max(item.usedAt, now)
         items.insert(item, at: 0)
+        settle(now: now)
         return true
     }
 
@@ -251,12 +376,13 @@ public struct InsetBoard: Sendable, Equatable {
         }
         let due = items.filter { item in Self.closesAt(item).map { now >= $0 } ?? false }
         items.removeAll { item in due.contains(item) }
+        settle(now: now)
         return closed + due
     }
 
     /// The next time `tick` has something to do.
     public var deadline: Double? {
-        (items + [swap?.item].compactMap(\.self)).compactMap(Self.closesAt).min()
+        ((items + [swap?.item].compactMap(\.self)).compactMap(Self.closesAt) + [settleDeadline].compactMap(\.self)).min()
     }
 
     /// Esc or the close control: the inset goes. Dismissing the swapped-in
@@ -264,6 +390,7 @@ public struct InsetBoard: Sendable, Equatable {
     /// the dismissed event's inset (nil for a return inset).
     @discardableResult
     public mutating func dismiss(_ camera: CameraRef) -> InsetItem? {
+        defer { settle(now: nil) }
         if let s = swap, s.shown == camera {
             endSwap()
             return s.item
@@ -278,8 +405,9 @@ public struct InsetBoard: Sendable, Equatable {
     /// Esc: the swapped-in camera if there is one, else the top inset.
     @discardableResult
     public mutating func dismissTop() -> InsetItem? {
+        defer { settle(now: nil) }
         if let s = swap { return dismiss(s.shown) }
-        guard let top = attached.first else { return nil }
+        guard let top = shown.first else { return nil }
         if top.isReturn {
             swapBack(now: nil)
             return nil
@@ -291,8 +419,13 @@ public struct InsetBoard: Sendable, Equatable {
     /// stage and `displaced` (the camera the stage showed, if any) goes into
     /// the return inset. A click on the return inset swaps back. Clicking
     /// another event's inset while swapped puts that one on the stage and
-    /// the swapped-in one back into its inset.
-    public mutating func swap(_ camera: CameraRef, displaced: CameraRef?, now: Double) {
+    /// the swapped-in one back into its inset. `displacedLayout`: the stage
+    /// showed a layout (several tiles, nothing focused), so the return inset
+    /// draws all of it.
+    public mutating func swap(
+        _ camera: CameraRef, displaced: CameraRef?, displacedLayout: Bool = false, now: Double
+    ) {
+        defer { settle(now: now) }
         if items.contains(where: { $0.camera == camera && $0.isReturn }) {
             swapBack(now: now)
             return
@@ -309,28 +442,30 @@ public struct InsetBoard: Sendable, Equatable {
             swap = s
             return
         }
-        swap = Swap(item: item, displaced: displaced)
+        swap = Swap(item: item, displaced: displaced, displacedLayout: displacedLayout && displaced != nil)
         if let displaced {
             items.insert(
                 InsetItem(
                     camera: displaced, kind: .view, firstAt: item.firstAt, lastAt: item.lastAt, count: 0,
-                    active: false, startedAt: now, endedAt: now, usedAt: now, isReturn: true),
+                    active: false, startedAt: now, endedAt: now, usedAt: now, isReturn: true,
+                    showsLayout: displacedLayout),
                 at: 0)
         }
     }
 
     /// Tab: swaps the top inset in, or back when swapped.
-    public mutating func swapTop(displaced: CameraRef?, now: Double) {
+    public mutating func swapTop(displaced: CameraRef?, displacedLayout: Bool = false, now: Double) {
         if swap != nil {
             swapBack(now: now)
-        } else if let top = attached.first {
-            swap(top.camera, displaced: displaced, now: now)
+        } else if let top = shown.first {
+            swap(top.camera, displaced: displaced, displacedLayout: displacedLayout, now: now)
         }
     }
 
     /// Back to the stage's own view; the swapped-in camera returns to the
     /// top of the stack (when `now` is given; nil drops it).
     public mutating func swapBack(now: Double?) {
+        defer { settle(now: now) }
         guard let s = swap else { return }
         endSwap()
         if let now {
@@ -374,6 +509,7 @@ public struct InsetBoard: Sendable, Equatable {
     /// window's tile header) go too. Returns what went.
     @discardableResult
     public mutating func dropSoundAlarms(where gone: (CameraRef) -> Bool) -> [InsetItem] {
+        defer { settle(now: nil) }
         var dropped: [InsetItem] = []
         if let s = swap, s.item.kind.isCritical, gone(s.shown) {
             dropped.append(s.item)
@@ -387,6 +523,7 @@ public struct InsetBoard: Sendable, Equatable {
     /// A camera's inset that is not an event's (the return inset) or a
     /// camera the window no longer may show (its device was removed).
     public mutating func remove(where condition: (InsetItem) -> Bool) {
+        defer { settle(now: nil) }
         if let s = swap, condition(s.item) { endSwap() }
         items.removeAll(where: condition)
     }
@@ -435,31 +572,79 @@ public enum InsetGeometry {
     public static func frames(
         count: Int, width: Double, heights: [Double], anchor: InsetAnchor, stage: (width: Double, height: Double)
     ) -> [(x: Double, y: Double, width: Double, height: Double)] {
-        var fitting: [Double] = []
-        var used = margin
-        for h in heights.prefix(count) {
-            guard used + h + margin <= stage.height || fitting.isEmpty else { break }
-            fitting.append(h)
-            used += h + gap
-        }
-        guard !fitting.isEmpty else { return [] }
-        let column = fitting.reduce(0, +) + gap * Double(fitting.count - 1)
-        let x = margin + anchor.x * (stage.width - 2 * margin - width)
-        let top = margin + anchor.y * (stage.height - 2 * margin - column)
-        let upward = anchor.growsUpward
-        var out: [(x: Double, y: Double, width: Double, height: Double)] = []
-        var offset = 0.0
-        for h in fitting {
-            let y = upward ? top + column - offset - h : top + offset
-            out.append((x, y, width, h))
-            offset += h + gap
-        }
-        return out
+        grid(
+            heights: Array(heights.prefix(count)), width: width, rows: max(count, 1), columns: 1, anchor: anchor,
+            stage: stage)
     }
 
     /// The inset width for a stage width.
-    public static func width(stage: Double) -> Double {
-        min(max(stage * widthFraction, minWidth), max(stage - 2 * margin, 0))
+    public static func width(stage: Double) -> Double { width(stage: stage, columns: 1) }
+
+    /// How many columns of insets fit side by side (at least one, at most
+    /// `columns`), each at least `minWidth` wide.
+    public static func fittingColumns(stage: Double, columns: Int) -> Int {
+        let fit = Int(((stage - 2 * margin + gap) / (minWidth + gap)).rounded(.down))
+        return max(1, min(columns, fit))
+    }
+
+    /// The inset width for a grid of up to `columns` columns: about 30% of
+    /// the stage's width, narrower when the columns need the room, never
+    /// under `minWidth` (columns that do not fit are dropped instead; see
+    /// `fittingColumns`). One column is the original single stack.
+    public static func width(stage: Double, columns: Int) -> Double {
+        let used = fittingColumns(stage: stage, columns: columns)
+        let available = max((stage - 2 * margin - gap * Double(used - 1)) / Double(used), 0)
+        return min(max(min(stage * widthFraction, available), minWidth), available)
+    }
+
+    /// The frames of insets of the given heights in a grid of up to `rows`
+    /// insets per column and `columns` columns: column by column, the
+    /// first column at the anchor's horizontal edge (the right edge when the
+    /// anchor is right of the middle, so the grid grows leftward). In each
+    /// column the order is as in `frames(count:...anchor:...)`. Returns the
+    /// frames of the insets that fit, a prefix of `heights`: an inset that
+    /// does not fit the stage's height starts the next column, and one that
+    /// finds no column left ends the grid (the caller counts the rest in
+    /// "+N more"). The first inset is always drawn, even when it alone is
+    /// taller than the stage.
+    public static func grid(
+        heights: [Double], width: Double, rows: Int, columns: Int, anchor: InsetAnchor,
+        stage: (width: Double, height: Double)
+    ) -> [(x: Double, y: Double, width: Double, height: Double)] {
+        let maxColumns = fittingColumns(stage: stage.width, columns: columns)
+        var perColumn: [[Double]] = []
+        var used = margin
+        for h in heights {
+            if let last = perColumn.last, last.count < max(rows, 1), used + h + margin <= stage.height {
+                perColumn[perColumn.count - 1].append(h)
+                used += h + gap
+            } else if perColumn.count < maxColumns {
+                perColumn.append([h])
+                used = margin + h + gap
+            } else {
+                break
+            }
+        }
+        guard !perColumn.isEmpty else { return [] }
+        func height(_ column: [Double]) -> Double { column.reduce(0, +) + gap * Double(column.count - 1) }
+        let tallest = perColumn.map(height).max() ?? 0
+        let gridWidth = Double(perColumn.count) * width + gap * Double(perColumn.count - 1)
+        let left = margin + anchor.x * (stage.width - 2 * margin - gridWidth)
+        let top = margin + anchor.y * (stage.height - 2 * margin - tallest)
+        let upward = anchor.growsUpward
+        let fromRight = anchor.x > 0.5
+        var out: [(x: Double, y: Double, width: Double, height: Double)] = []
+        for (j, column) in perColumn.enumerated() {
+            let step = Double(j) * (width + gap)
+            let x = fromRight ? left + gridWidth - width - step : left + step
+            var offset = 0.0
+            for h in column {
+                let y = upward ? top + tallest - offset - h : top + offset
+                out.append((x, y, width, h))
+                offset += h + gap
+            }
+        }
+        return out
     }
 }
 

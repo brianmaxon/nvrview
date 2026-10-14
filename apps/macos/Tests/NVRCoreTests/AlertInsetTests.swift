@@ -48,18 +48,147 @@ import Testing
 
     @Test func newestOnTopUpToThreeThenMore() {
         var board = InsetBoard()
+        // Spaced past the minimum on-screen time, so the oldest gives way.
         for (i, c) in [door, yard, hall, side].enumerated() {
-            board.started(.detection("people"), camera: c, visible: false, now: Double(i), at: t0 + Double(i))
+            let t = Double(i) * 11
+            board.started(.detection("people"), camera: c, visible: false, now: t, at: t0 + t)
         }
         #expect(board.shown.map(\.camera) == [side, hall, yard])
         #expect(board.more == 1)
-        // A repeat updates that camera's inset and brings it to the top.
-        board.started(.detection("people"), camera: door, visible: false, now: 10, at: t0 + 10)
+        #expect(board.waiting.map(\.camera) == [door])
+        // A repeat refreshes that camera's inset where it is (here: waiting).
+        board.started(.detection("people"), camera: door, visible: false, now: 40, at: t0 + 40)
         #expect(board.items.count == 4)
-        #expect(board.shown.first?.camera == door)
-        #expect(board.shown.first?.count == 2)
-        #expect(board.shown.first?.lastAt == t0 + 10)
-        #expect(board.shown.first?.firstAt == t0)
+        #expect(board.items.map(\.camera) == [side, hall, yard, door])
+        #expect(board.item(for: door)?.count == 2)
+        #expect(board.item(for: door)?.lastAt == t0 + 40)
+        #expect(board.item(for: door)?.firstAt == t0)
+    }
+
+    @Test func aRepeatOnADrawnCameraKeepsItsPlace() {
+        var board = InsetBoard()
+        for (i, c) in [door, yard, hall].enumerated() {
+            board.started(.detection("people"), camera: c, visible: false, now: Double(i), at: t0 + Double(i))
+        }
+        #expect(board.shown.map(\.camera) == [hall, yard, door])
+        board.started(.detection("people"), camera: door, visible: false, now: 5, at: t0 + 5)
+        #expect(board.shown.map(\.camera) == [hall, yard, door])
+        #expect(board.shown.last?.count == 2)
+    }
+
+    @Test func aNewerInsetWaitsUntilTheOlderHasBeenUpTenSeconds() {
+        var board = InsetBoard()
+        for (i, c) in [door, yard, hall].enumerated() {
+            board.started(.detection("people"), camera: c, visible: false, now: Double(i), at: t0 + Double(i))
+        }
+        board.started(.detection("people"), camera: side, visible: false, now: 5, at: t0 + 5)
+        // All three are younger than 10 s: the newcomer waits.
+        #expect(board.shown.map(\.camera) == [hall, yard, door])
+        #expect(board.waiting.map(\.camera) == [side])
+        // The lowest one (the oldest) gives way at its tenth second.
+        #expect(board.deadline == InsetBoard.minimumShownTime)
+        let early = board.tick(now: 9)
+        #expect(early.isEmpty)
+        #expect(board.waiting.map(\.camera) == [side])
+        let due = board.tick(now: 10)
+        #expect(due.isEmpty)
+        #expect(board.shown.map(\.camera) == [side, hall, yard])
+        #expect(board.waiting.map(\.camera) == [door])
+    }
+
+    @Test func interleavedEventsOnFourCamerasCauseNoChurn() {
+        var board = InsetBoard()
+        var changes = 0
+        var previous: [CameraRef] = []
+        let cameras = [door, yard, hall, side]
+        for step in 0..<40 {
+            let t = Double(step)
+            board.started(.detection("people"), camera: cameras[step % 4], visible: false, now: t, at: t0 + t)
+            _ = board.tick(now: t)
+            let now = board.shown.map(\.camera)
+            if now != previous { changes += 1 }
+            previous = now
+        }
+        // Three arrive, the fourth waits; the lowest makes room for it once
+        // it has been up 10 s, and the order then holds: far fewer changes
+        // than the forty events (the old behavior moved a camera on every
+        // event).
+        #expect(changes <= 6)
+        #expect(board.items.count == 4)
+    }
+
+    @Test func aWaitingCameraCanBeBroughtIn() {
+        var board = InsetBoard()
+        for (i, c) in [door, yard, hall, side].enumerated() {
+            board.started(.detection("people"), camera: c, visible: false, now: Double(i), at: t0 + Double(i))
+        }
+        #expect(board.waiting.map(\.camera) == [door] || board.waiting.map(\.camera) == [side])
+        let waiting = board.waiting[0].camera
+        let alreadyDrawn = board.bringIn(board.shown[0].camera, now: 4)
+        #expect(!alreadyDrawn)
+        let brought = board.bringIn(waiting, now: 4)
+        #expect(brought)
+        #expect(board.shown.first?.camera == waiting)
+        #expect(board.shown.count == 3)
+        #expect(board.more == 1)
+    }
+
+    @Test func theGridSettingSetsHowManyAreDrawn() {
+        let grid = InsetGridSetting(rows: 2, columns: 3)
+        #expect(grid.capacity == 6)
+        #expect(InsetGridSetting.standard == InsetGridSetting(rows: 3, columns: 1))
+        #expect(InsetGridSetting(rows: 0, columns: 99) == InsetGridSetting(rows: 1, columns: 6))
+        var board = InsetBoard(capacity: grid.capacity)
+        let cameras = (0..<7).map { CameraRef(device: "d-9", channel: $0) }
+        for (i, c) in cameras.enumerated() {
+            board.started(.detection("people"), camera: c, visible: false, now: Double(i), at: t0 + Double(i))
+        }
+        #expect(board.shown.count == 6)
+        #expect(board.more == 1)
+        // Shrinking it moves the lowest ones to the waiting list at once.
+        board.setCapacity(InsetGridSetting(rows: 1, columns: 2).capacity)
+        #expect(board.shown.count == 2)
+        #expect(board.more == 5)
+        board.setCapacity(6)
+        #expect(board.shown.count == 6)
+    }
+
+    // MARK: Return inset
+
+    @Test func theReturnInsetShowsTheLayoutWhenTheStageShowedOne() {
+        var board = InsetBoard()
+        board.started(.doorbell, camera: door, visible: false, now: 0, at: t0)
+        board.swap(door, displaced: shown, displacedLayout: true, now: 1)
+        #expect(board.swap?.displacedLayout == true)
+        #expect(board.items.first?.isReturn == true && board.items.first?.showsLayout == true)
+        #expect(board.shown.first?.showsLayout == true)
+        // A click on it restores the stage; nothing of the layout was kept here.
+        board.swap(shown, displaced: nil, now: 2)
+        #expect(board.swap == nil)
+        #expect(board.shown.map(\.camera) == [door])
+    }
+
+    @Test func aSingleCameraStageKeepsTheOneCameraReturnInset() {
+        var board = InsetBoard()
+        board.started(.doorbell, camera: door, visible: false, now: 0, at: t0)
+        board.swap(door, displaced: shown, now: 1)
+        #expect(board.swap?.displacedLayout == false)
+        #expect(board.items.first?.showsLayout == false)
+        board.swapBack(now: 2)
+        board.swapTop(displaced: shown, displacedLayout: true, now: 3)
+        #expect(board.swap?.displacedLayout == true)
+        board.swapTop(displaced: nil, now: 4)
+        #expect(board.swap == nil)
+    }
+
+    @Test func theReturnInsetAlwaysGetsAPlace() {
+        var board = InsetBoard()
+        for (i, c) in [door, yard, hall].enumerated() {
+            board.started(.detection("people"), camera: c, visible: false, now: Double(i), at: t0 + Double(i))
+        }
+        board.swap(hall, displaced: shown, displacedLayout: true, now: 3)
+        // Two others plus the return inset, though neither has been up 10 s.
+        #expect(Set(board.shown.map(\.camera)) == [shown, yard, door])
     }
 
     @Test func aSoundAlarmOutranksADetectionOnTheSameCamera() {
@@ -290,6 +419,56 @@ import Testing
         let top = InsetGeometry.frames(count: 1, width: width, heights: [200], corner: .topRight, stage: (1000, 600))
         #expect(top[0].x == 1000 - 12 - 300 && top[0].y == 12)
         #expect(InsetGeometry.width(stage: 400) == 220)
+    }
+
+    @Test func theGridFillsColumnsFromTheAnchoredEdge() {
+        let stage = (width: 1600.0, height: 900.0)
+        let width = InsetGeometry.width(stage: stage.width, columns: 3)
+        #expect(width == 480)  // 30% of the width; three columns fit
+        let heights = [150.0, 150, 150, 150, 150, 150, 150]
+        let right = InsetGeometry.grid(
+            heights: heights, width: width, rows: 2, columns: 3, anchor: InsetAnchor(corner: .topRight), stage: stage)
+        #expect(right.count == 6)
+        // The first column is at the right edge; the next ones grow leftward.
+        #expect(right[0].x == 1600 - 12 - 480 && right[1].x == right[0].x)
+        #expect(right[2].x == right[0].x - 8 - 480)
+        #expect(right[4].x == right[0].x - 2 * (8 + 480))
+        #expect(right[0].y == 12 && right[1].y == 12 + 150 + 8)
+        let left = InsetGeometry.grid(
+            heights: heights, width: width, rows: 2, columns: 3, anchor: InsetAnchor(corner: .bottomLeft), stage: stage)
+        #expect(left[0].x == 12 && left[2].x == 12 + 480 + 8)
+        // Bottom anchored: the first inset is at the bottom of its column.
+        #expect(left[0].y == 900 - 12 - 150 && left[1].y == left[0].y - 8 - 150)
+    }
+
+    @Test func oneColumnOfThreeIsTheOriginalStack() {
+        let width = InsetGeometry.width(stage: 1000, columns: 1)
+        #expect(width == InsetGeometry.width(stage: 1000))
+        for corner in [ChromeCorner.topLeft, .topRight, .bottomLeft, .bottomRight] {
+            let anchor = InsetAnchor(corner: corner)
+            let grid = InsetGeometry.grid(
+                heights: [200, 200, 200], width: width, rows: 3, columns: 1, anchor: anchor, stage: (1000, 900))
+            let old = InsetGeometry.frames(count: 3, width: width, heights: [200, 200, 200], anchor: anchor, stage: (1000, 900))
+            #expect(grid.count == 3 && old.count == 3)
+            #expect(zip(grid, old).allSatisfy { $0.x == $1.x && $0.y == $1.y })
+        }
+    }
+
+    @Test func columnsThatDoNotFitAreDroppedAndTheRestWait() {
+        // 500 pt wide: two 220 pt columns fit; of six requested, two are used.
+        #expect(InsetGeometry.fittingColumns(stage: 500, columns: 6) == 2)
+        #expect(InsetGeometry.fittingColumns(stage: 200, columns: 6) == 1)
+        let width = InsetGeometry.width(stage: 500, columns: 6)
+        #expect(width >= InsetGeometry.minWidth && width <= (500 - 24 - 8) / 2)
+        let frames = InsetGeometry.grid(
+            heights: Array(repeating: 100, count: 8), width: width, rows: 2, columns: 6, anchor: InsetAnchor(corner: .topLeft),
+            stage: (500, 900))
+        #expect(frames.count == 4)
+        // A short stage: the second inset does not fit under the first, so it starts the next column.
+        let short = InsetGeometry.grid(
+            heights: [150, 150, 150], width: 220, rows: 3, columns: 2, anchor: InsetAnchor(corner: .topLeft),
+            stage: (700, 200))
+        #expect(short.count == 2 && short[1].x > short[0].x)
     }
 
     // MARK: Keys
