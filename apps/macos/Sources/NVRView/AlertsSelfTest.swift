@@ -87,6 +87,7 @@ final class AlertsSelfTest {
         let camera = #"{"device_key":"\#(device.key)","channel":\#(channel)}"#
         let settings = """
             {"enabled":true,"cameras":[{"camera":\(camera)}],
+             "always_alert":{"night_outside_person":false,"doorbell_night":false},
              "sources":[{"key":"sensor-1","name":"Sensor 1","cameras":[{"camera":\(camera)}]}],
              "outputs":[{"kind":"desktop"},{"kind":"home_assistant","id":"ha","endpoint":"\(ha.url)",
                "min_severity":"low","pulse_gap_ms":0,"cooldown_ms":0,
