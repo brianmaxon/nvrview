@@ -79,8 +79,7 @@ internal static class WhatsNewSelfTest
                 problems.Add("whats-new: a \"- \" line is not shown as a bullet");
             }
             ScrollViewer view = UpdateNotesView.Notes(string.Concat(Enumerable.Repeat(list + "\n", 6)), UpdateNotesView.ListMaxHeight);
-            view.Measure(new Windows.Foundation.Size(UpdateNotesView.Width, double.PositiveInfinity));
-            if (view.DesiredSize.Height > UpdateNotesView.ListMaxHeight || view.VerticalScrollBarVisibility == ScrollBarVisibility.Disabled)
+            if (view.MaxHeight > UpdateNotesView.ListMaxHeight || view.VerticalScrollBarVisibility == ScrollBarVisibility.Disabled)
             {
                 problems.Add("whats-new: the list is not bounded and scrollable");
             }

@@ -1959,12 +1959,17 @@ section is left. A pane lists the sections, each in a scrolling page:
 ### Update prompt
 
 "NVRView X is available" shows the title, the "You have ..." line, and the
-release notes (plain text, up to 2000 characters) in a text area of bounded
-height (about 220 points) that wraps, is selectable, and scrolls with the
-mouse wheel and, once focused, the arrow, Page, Home, and End keys. Short notes
-get a short area. The title, the line, and the buttons (Download / Not Now)
-never scroll away. macOS: an alert sheet with the notes as its accessory
-view; Windows: a dialog with the same area.
+release notes (plain text, up to 2000 characters) in a text area that shows
+about 22 lines at once (more with a larger window), wraps, is selectable, and
+scrolls with the mouse wheel and, once focused, the arrow, Page, Home, and End
+keys. Headings (a short line that starts a block and does not end like a
+sentence) are bold and set apart; bullets are indented and wrapped lines hang
+under the text. Short notes get a shorter window. The title, the line, and
+the buttons (Download / Not Now) never scroll away. macOS: a sheet the user
+can resize (minimum 360 by 260 points; the notes area grows with the window;
+the size is remembered). Windows: a dialog with the same area, which the
+user cannot resize (a ContentDialog); the area is up to 440 points tall and
+shrinks to fit a small main window when it opens.
 
 ### Release notes
 
@@ -1973,14 +1978,14 @@ docs/UPDATES.md, "Bundled release notes"). Nothing here is fetched.
 
 - **What's New.** On the first launch of a version newer than the last one
   that ran, a small window titled "What's new in NVRView X" shows that
-  version's notes in the same bounded, selectable, scrolling text area as the
+  version's notes in the same selectable, scrolling text area as the
   update prompt, with a Close button. It shows once. No window on a first
   run, the same version, a downgrade, a version without notes, or a
-  development build. macOS: an alert sheet on the front window; Windows: a
+  development build. macOS: a resizable sheet on the front window; Windows: a
   dialog about two seconds after start (never in a background start).
 - **Release notes list.** macOS: Help > Release Notes. Windows: Settings,
   About, Release notes. Every version in the build, newest first, each under
-  "Version X", in a taller bounded area (about 360 points). A build without
+  "Version X", in the same area. A build without
   the file says "No release notes in this build."
 - Lines show as written; a line starting with "- " or "* " shows with a bullet
   character; runs of blank lines shrink to one.

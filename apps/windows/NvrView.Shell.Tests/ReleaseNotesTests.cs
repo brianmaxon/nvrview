@@ -88,6 +88,15 @@ internal static class ReleaseNotesTests
             T.Equal(new WhatsNew.Decision(null, null), WhatsNew.Decide("dev", "0.1.0", b));
         });
 
+        T.Run("release notes: line kinds separate headings, bullets, and text", () =>
+        {
+            string text = ReleaseNotesText.Format("Made-up summary sentence.\n\nFixes\n- one\n  - nested\n\nA long line that ends like a sentence, so it is text.\n\nTrailing heading");
+            string kinds = string.Join(",", ReleaseNotesLines.Classify(text).Select(l => l.Kind));
+            T.Equal("Text,Blank,Heading,Bullet,Bullet,Blank,Text,Blank,Heading", kinds);
+            T.Equal(1, ReleaseNotesLines.Classify(text)[4].Level);
+            T.Equal(NoteLineKind.Text, ReleaseNotesLines.Classify(new string('x', ReleaseNotesLines.MaxHeadingLength + 1))[0].Kind);
+        });
+
         T.Run("release notes: the last version that ran is stored with the update settings", () =>
         {
             string file = Path.Combine(Path.GetTempPath(), "nvrview-lastrun-" + Guid.NewGuid().ToString("N") + ".json");

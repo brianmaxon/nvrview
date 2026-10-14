@@ -265,32 +265,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The notes of the version that was just installed (docs/UX.md, "Release
     /// notes"): a sheet on the front window, dismissed with Close.
     private func showWhatsNew(_ note: ReleaseNote) {
-        let alert = NSAlert()
-        alert.messageText = "What's new in NVRView \(note.version)"
-        alert.accessoryView = UpdateNotesView.make(notes: ReleaseNotesText.format(note.notes))
-        alert.addButton(withTitle: "Close")
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
+        let dialog = NotesDialog(
+            title: "What's new in NVRView \(note.version)", line: nil, notes: ReleaseNotesText.format(note.notes), buttonTitles: ["Close"])
+        dialog.present(on: NSApp.keyWindow ?? NSApp.mainWindow) { _ in }
     }
 
     /// Help > Release Notes: every version in this build, newest first.
     @objc func showReleaseNotes(_ sender: Any?) {
-        let alert = NSAlert()
-        alert.messageText = "Release Notes"
-        if let notes = model?.updater?.releaseNotes, !notes.isEmpty {
-            alert.accessoryView = UpdateNotesView.make(notes: notes.displayText, maxHeight: UpdateNotesView.listMaxHeight)
-        } else {
-            alert.informativeText = "No release notes in this build."
-        }
-        alert.addButton(withTitle: "Close")
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
+        let notes = model?.updater?.releaseNotes
+        let has = notes?.isEmpty == false
+        let dialog = NotesDialog(
+            title: "Release Notes", line: has ? nil : "No release notes in this build.",
+            notes: has ? notes?.displayText : nil, buttonTitles: ["Close"])
+        dialog.present(on: NSApp.keyWindow ?? NSApp.mainWindow) { _ in }
     }
 
     @objc func checkForUpdates(_ sender: Any?) { model?.updater?.menuAction() }
@@ -299,13 +286,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// one, so live view keeps playing behind it.
     private func presentUpdate(_ prompt: Updater.Prompt) {
         guard options.selfTestSeconds == nil, let updater = model?.updater else { return }
+        if case .available(let v, let notes) = prompt, !notes.isEmpty {
+            // Notes need room: a resizable sheet, not an alert (docs/UX.md, "Update prompt").
+            let dialog = NotesDialog(
+                title: "NVRView \(v) is available", line: "You have \(updater.current).",
+                notes: ReleaseNotesText.format(notes), buttonTitles: ["Download", "Not Now"])
+            dialog.present(on: NSApp.keyWindow ?? NSApp.mainWindow) { if $0 == 0 { updater.download(v) } }
+            return
+        }
         let alert = NSAlert()
         var respond: (NSApplication.ModalResponse) -> Void = { _ in }
         switch prompt {
-        case .available(let v, let notes):
+        case .available(let v, _):
             alert.messageText = "NVRView \(v) is available"
             alert.informativeText = "You have \(updater.current)."
-            if !notes.isEmpty { alert.accessoryView = UpdateNotesView.make(notes: notes) }
             alert.addButton(withTitle: "Download")
             alert.addButton(withTitle: "Not Now")
             respond = { if $0 == .alertFirstButtonReturn { updater.download(v) } }

@@ -73,4 +73,13 @@ struct ReleaseNotesTests {
         #expect(back.lastRunVersion == "0.3.0")
         #expect(try JSONDecoder().decode(UpdateSettings.self, from: Data("{}".utf8)).lastRunVersion == nil)
     }
+
+    @Test func lineKindsSeparateHeadingsBulletsAndText() {
+        let text = ReleaseNotesText.format("Made-up summary sentence.\n\nFixes\n- one\n  - nested\n\nA long line that ends like a sentence, so it is text.\n\nTrailing heading")
+        let kinds = ReleaseNotesText.lineKinds(text)
+        #expect(kinds == [.text, .blank, .heading, .bullet(level: 0), .bullet(level: 1), .blank, .text, .blank, .heading])
+        #expect(ReleaseNotesText.lineKinds(BundledReleaseNotes(releases: [ReleaseNote(version: "1.0.0", notes: "- a")]).displayText).first == .heading)
+        let tooLong = String(repeating: "x", count: ReleaseNotesText.maxHeadingLength + 1)
+        #expect(ReleaseNotesText.lineKinds(tooLong) == [.text])
+    }
 }
