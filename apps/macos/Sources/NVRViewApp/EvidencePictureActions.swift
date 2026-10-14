@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import UniformTypeIdentifiers
+import AppBase
 
 // A kept verification picture taken out of the Events window (docs/UX.md
 // "Events"): Open in Preview, Save Picture As…, Copy, Show in Finder, and a

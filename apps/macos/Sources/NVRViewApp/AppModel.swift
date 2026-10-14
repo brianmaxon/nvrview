@@ -9,6 +9,7 @@ import AppBase
 import AppUpdates
 import AppCalls
 import AppCapture
+import AppPTZ
 
 #if NVRVIEW_REAL_CORE
 import NVRCoreC

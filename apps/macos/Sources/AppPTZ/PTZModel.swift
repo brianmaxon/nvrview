@@ -1,5 +1,6 @@
 import AppKit
 import NVRCore
+import AppBase
 
 /// The app's camera motion (docs/UX.md "Pan, tilt, and zoom", docs/CAPTURE.md):
 /// what each camera can do (`nv_ptz_info`, read off the main thread), the
@@ -9,12 +10,12 @@ import NVRCore
 /// rate-limits and logs every command, and stops the camera by itself a
 /// second after the last renewal.
 @MainActor
-final class PTZModel {
-    private unowned let model: AppModel
-    static let speedKey = "ptzSpeed"
+package final class PTZModel {
+    private unowned let model: any AppHost
+    package static let speedKey = "ptzSpeed"
 
     /// The pad's speed (1 to 64), kept between runs.
-    var speed: Int {
+    package var speed: Int {
         didSet {
             speed = min(max(speed, 1), 64)
             UserDefaults.standard.set(speed, forKey: Self.speedKey)
@@ -22,29 +23,29 @@ final class PTZModel {
     }
 
     /// What each camera can do, as the core last read it.
-    private(set) var infos: [CameraRef: PTZInfo] = [:]
+    package private(set) var infos: [CameraRef: PTZInfo] = [:]
     /// The latest line to show for a camera (a refusal or a failure).
-    private(set) var problems: [CameraRef: String] = [:]
+    package private(set) var problems: [CameraRef: String] = [:]
     /// Reads of `nv_ptz_info` that finished (self-test).
-    private(set) var infoReads = 0
+    package private(set) var infoReads = 0
 
     private var loading: Set<CameraRef> = []
     private var waiting: [CameraRef: [(PTZInfo?) -> Void]] = [:]
     private var hold = PTZHold()
     /// The camera being moved, while a control is held.
-    private(set) var held: CameraRef?
+    package private(set) var held: CameraRef?
     /// The arrow key that holds the move, if a key does.
-    private(set) var keyHeld: PTZDirection?
+    package private(set) var keyHeld: PTZDirection?
     private var lensPositions: [CameraRef: [PTZLensAxis: Int]] = [:]
     private var throttles: [CameraRef: [PTZLensAxis: PTZLensThrottle]] = [:]
     /// The camera's positions are read again at this time (about 6 s after a
     /// zoom or a preset recall, when the camera has settled).
     private var rereadAt: [CameraRef: Double] = [:]
-    static let rereadDelay: Double = 6
+    package static let rereadDelay: Double = 6
     private var timer: Timer?
 
     /// What observers hear.
-    enum Change {
+    package enum Change {
         case state
         case problem(CameraRef, String)
     }
@@ -53,18 +54,18 @@ final class PTZModel {
 
     /// Listens for changes (popovers refresh; stages show a line over the
     /// tile). Returns the token to stop with.
-    func addObserver(_ f: @escaping (Change) -> Void) -> Int {
+    package func addObserver(_ f: @escaping (Change) -> Void) -> Int {
         nextObserver += 1
         observers[nextObserver] = f
         return nextObserver
     }
 
-    func removeObserver(_ token: Int) { observers[token] = nil }
+    package func removeObserver(_ token: Int) { observers[token] = nil }
 
     private func onChange() { for f in observers.values { f(.state) } }
     private func onProblem(_ camera: CameraRef, _ text: String) { for f in observers.values { f(.problem(camera, text)) } }
 
-    init(model: AppModel) {
+    package init(model: any AppHost) {
         self.model = model
         let saved = UserDefaults.standard.integer(forKey: Self.speedKey)
         speed = saved == 0 ? 20 : min(max(saved, 1), 64)
@@ -80,11 +81,11 @@ final class PTZModel {
     // MARK: What a camera can do
 
     /// The camera's capabilities if they are known.
-    func info(for camera: CameraRef) -> PTZInfo? { infos[camera] }
+    package func info(for camera: CameraRef) -> PTZInfo? { infos[camera] }
 
     /// Runs `body` with the camera's capabilities: at once when known, else
     /// after reading them (nil when the camera did not answer).
-    func withInfo(_ camera: CameraRef, _ body: @escaping (PTZInfo?) -> Void) {
+    package func withInfo(_ camera: CameraRef, _ body: @escaping (PTZInfo?) -> Void) {
         if let info = infos[camera] {
             body(info)
             return
@@ -95,7 +96,7 @@ final class PTZModel {
 
     /// Reads the camera's capabilities and lens positions (`nv_ptz_info`),
     /// which waits for the camera: off the main thread.
-    func load(_ camera: CameraRef, force: Bool = false) {
+    package func load(_ camera: CameraRef, force: Bool = false) {
         guard let tile = tile(camera), !loading.contains(camera), force || infos[camera] == nil else { return }
         loading.insert(camera)
         let bridge = model.bridge
@@ -134,7 +135,7 @@ final class PTZModel {
     }
 
     /// The lens position to show for an axis: the latest sent or read.
-    func lensPosition(_ camera: CameraRef, _ axis: PTZLensAxis) -> Int? {
+    package func lensPosition(_ camera: CameraRef, _ axis: PTZLensAxis) -> Int? {
         lensPositions[camera]?[axis] ?? infos[camera]?.range(axis)?.cur
     }
 
@@ -142,7 +143,7 @@ final class PTZModel {
 
     /// A direction control goes down: the move starts, and is renewed until
     /// `release`.
-    func press(_ direction: PTZDirection, camera: CameraRef) {
+    package func press(_ direction: PTZDirection, camera: CameraRef) {
         guard tile(camera) != nil else { return }
         if let h = held, h != camera { release() }
         let call = hold.press(direction, speed: speed, now: now)
@@ -153,7 +154,7 @@ final class PTZModel {
 
     /// The control comes up (or the window closes, the tile closes, the
     /// focus is lost): the camera is stopped.
-    func release() {
+    package func release() {
         keyHeld = nil
         timer?.invalidate()
         timer = nil
@@ -167,10 +168,10 @@ final class PTZModel {
     }
 
     /// Stops whatever is held, for any reason that is not a release.
-    func stopAll() { release() }
+    package func stopAll() { release() }
 
     /// A key holds the move (an arrow key; the last one pressed wins, as the core has no diagonals). Key repeats change nothing.
-    func keyDown(_ direction: PTZDirection, camera: CameraRef) {
+    package func keyDown(_ direction: PTZDirection, camera: CameraRef) {
         if keyHeld == direction, held == camera { return }
         keyHeld = direction
         press(direction, camera: camera)
@@ -178,13 +179,13 @@ final class PTZModel {
     }
 
     /// An arrow key came up: the move it held ends.
-    func keyUp(_ direction: PTZDirection) {
+    package func keyUp(_ direction: PTZDirection) {
         guard keyHeld == direction else { return }
         release()
     }
 
     /// The tile of a camera closed: its move, readings and positions go.
-    func cameraClosed(_ camera: CameraRef) {
+    package func cameraClosed(_ camera: CameraRef) {
         if held == camera { release() }
         infos[camera] = nil
         loading.remove(camera)
@@ -197,9 +198,9 @@ final class PTZModel {
     /// positions a drag is waiting to send, and reads the lens again when the
     /// camera has settled.
     /// A frozen app renews nothing (self-test of the dead-man stop).
-    var frozenForTest = false
+    package var frozenForTest = false
 
-    func tick(now: Double) {
+    package func tick(now: Double) {
         if frozenForTest { return }
         if let call = hold.tick(now: now), let camera = held {
             send(call, camera)
@@ -227,9 +228,9 @@ final class PTZModel {
     }
 
     /// Every move, renewal and stop the app asked for (self-test).
-    private(set) var calls: [(at: Double, text: String)] = []
+    package private(set) var calls: [(at: Double, text: String)] = []
     /// The `ptz` events heard (self-test).
-    private(set) var events: [PTZEvent] = []
+    package private(set) var events: [PTZEvent] = []
 
     private func send(_ call: PTZHold.Call, _ camera: CameraRef) {
         guard let tile = tile(camera) else { return }
@@ -257,7 +258,7 @@ final class PTZModel {
     // MARK: Presets and lens
 
     /// Recalls a preset of the camera's list.
-    func recall(_ id: Int, camera: CameraRef) {
+    package func recall(_ id: Int, camera: CameraRef) {
         guard let tile = tile(camera) else { return }
         do throws(CoreStatus) {
             try model.bridge.ptzPreset(tile, id: id)
@@ -270,25 +271,25 @@ final class PTZModel {
     /// Option with 1 to 9: the nth preset of the list (the order the camera
     /// gives). False when the camera has no such preset.
     @discardableResult
-    func recallNth(_ n: Int, camera: CameraRef) -> Bool {
+    package func recallNth(_ n: Int, camera: CameraRef) -> Bool {
         guard let info = infos[camera], (1...info.presets.count).contains(n) else { return false }
         recall(info.presets[n - 1].id, camera: camera)
         return true
     }
 
     /// Option with = or -: one step of zoom within the camera's range.
-    func zoomStep(_ direction: Int, camera: CameraRef) {
+    package func zoomStep(_ direction: Int, camera: CameraRef) {
         stepLens(.zoom, direction, camera: camera)
     }
 
-    func stepLens(_ axis: PTZLensAxis, _ direction: Int, camera: CameraRef) {
+    package func stepLens(_ axis: PTZLensAxis, _ direction: Int, camera: CameraRef) {
         guard let range = infos[camera]?.range(axis) else { return }
         let current = lensPosition(camera, axis) ?? range.cur
         sendLens(camera, axis, range.stepped(from: current, by: direction))
     }
 
     /// A slider drag reached `position`: sent at most five times a second.
-    func dragLens(_ axis: PTZLensAxis, to position: Int, camera: CameraRef) {
+    package func dragLens(_ axis: PTZLensAxis, to position: Int, camera: CameraRef) {
         guard let range = infos[camera]?.range(axis) else { return }
         let p = range.clamped(position)
         lensPositions[camera, default: [:]][axis] = p
@@ -298,7 +299,7 @@ final class PTZModel {
     }
 
     /// The drag ended: the last position goes out.
-    func endLensDrag(_ axis: PTZLensAxis, camera: CameraRef) {
+    package func endLensDrag(_ axis: PTZLensAxis, camera: CameraRef) {
         if let p = throttles[camera]?[axis]?.end() { sendLens(camera, axis, p) }
     }
 
@@ -319,7 +320,7 @@ final class PTZModel {
 
     /// A `ptz` event: refusals and failures become a line over the tile and
     /// in the popover; the core's own stops end the app's hold.
-    func handle(_ event: PTZEvent) {
+    package func handle(_ event: PTZEvent) {
         events.append(event)
         guard let camera = model.leases.camera(forTile: event.tile) else { return }
         if event.action == "stop", event.state == .sent, let reason = event.reason,
@@ -341,5 +342,5 @@ final class PTZModel {
     }
 
     /// Clears the line for a camera (a popover opening).
-    func clearProblem(_ camera: CameraRef) { problems[camera] = nil }
+    package func clearProblem(_ camera: CameraRef) { problems[camera] = nil }
 }

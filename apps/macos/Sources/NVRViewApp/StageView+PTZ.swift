@@ -1,5 +1,6 @@
 import AppKit
 import NVRCore
+import AppPTZ
 
 // Camera motion on the stage (docs/UX.md "Pan, tilt, and zoom", "Capture and
 // camera keys"): the pad and lens popovers under the header buttons and the

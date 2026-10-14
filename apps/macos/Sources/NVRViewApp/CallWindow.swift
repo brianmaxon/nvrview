@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import VideoKit
+import AppBase
 
 // A doorbell call in its own window (docs/UX.md "A call in its own window").
 // The call stays in the model (`DoorbellCalls`); its `presentation` says
@@ -466,10 +467,4 @@ final class CallPanel: NSPanel {
         }
         super.sendEvent(event)
     }
-}
-
-/// A plain view with a top-left origin.
-@MainActor
-class FlippedView: NSView {
-    override var isFlipped: Bool { true }
 }

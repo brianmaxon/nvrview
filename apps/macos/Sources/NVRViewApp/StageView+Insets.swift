@@ -1,5 +1,6 @@
 import AppKit
 import NVRCore
+import AppBase
 
 // Alert insets over the stage (docs/UX.md "Alert insets") and the doorbell
 // call's controls (docs/UX.md "Doorbell calls"). The model is `InsetBoard`;

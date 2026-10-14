@@ -6,6 +6,7 @@ import Foundation
 import FakeCore
 import NVRCore
 import VideoKit
+import AppPTZ
 
 // Camera motion: the self-test's "ptz" steps (scripts/macos-selftest-areas.txt).
 // Part of SelfTest (SelfTest.swift has the order of the steps and the shared helpers).

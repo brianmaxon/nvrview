@@ -1,5 +1,6 @@
 import AppKit
 import NVRCore
+import AppBase
 
 // The camera motion controls (docs/UX.md "Pan, tilt, and zoom"): a pad of
 // four directions with a speed slider and, when the camera reports lens
@@ -11,12 +12,12 @@ import NVRCore
 /// A control that is held: down on mouse down, up on mouse up (also when the
 /// pointer has left it), or when it goes away with its popover.
 @MainActor
-final class HoldButton: NSButton {
-    var onDown: () -> Void = {}
-    var onUp: () -> Void = {}
-    private(set) var isDown = false
+package final class HoldButton: NSButton {
+    package var onDown: () -> Void = {}
+    package var onUp: () -> Void = {}
+    package private(set) var isDown = false
 
-    init(symbol: String, label: String) {
+    package init(symbol: String, label: String) {
         super.init(frame: .zero)
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
         imagePosition = .imageOnly
@@ -26,10 +27,10 @@ final class HoldButton: NSButton {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     /// Presses the control, as a mouse down does.
-    func pressDown() {
+    package func pressDown() {
         guard !isDown else { return }
         isDown = true
         highlight(true)
@@ -37,17 +38,17 @@ final class HoldButton: NSButton {
     }
 
     /// Lets go of it, as a mouse up does.
-    func pressUp() {
+    package func pressUp() {
         guard isDown else { return }
         isDown = false
         highlight(false)
         onUp()
     }
 
-    override func mouseDown(with event: NSEvent) { pressDown() }
-    override func mouseUp(with event: NSEvent) { pressUp() }
+    package override func mouseDown(with event: NSEvent) { pressDown() }
+    package override func mouseUp(with event: NSEvent) { pressUp() }
 
-    override func viewWillMove(toWindow newWindow: NSWindow?) {
+    package override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil { pressUp() }
         super.viewWillMove(toWindow: newWindow)
     }
@@ -56,17 +57,17 @@ final class HoldButton: NSButton {
 /// A lens axis: label, a step down, a slider across the camera's range,
 /// and a step up.
 @MainActor
-final class PTZLensRow: NSView {
-    let axis: PTZLensAxis
-    let minus = NSButton()
-    let plus = NSButton()
-    let slider = NSSlider()
+package final class PTZLensRow: NSView {
+    package let axis: PTZLensAxis
+    package let minus = NSButton()
+    package let plus = NSButton()
+    package let slider = NSSlider()
     private let label: NSTextField
-    var onStep: (Int) -> Void = { _ in }
-    var onDrag: (Int) -> Void = { _ in }
-    var onEnd: () -> Void = {}
+    package var onStep: (Int) -> Void = { _ in }
+    package var onDrag: (Int) -> Void = { _ in }
+    package var onEnd: () -> Void = {}
 
-    init(axis: PTZLensAxis) {
+    package init(axis: PTZLensAxis) {
         self.axis = axis
         label = NSTextField(labelWithString: axis == .zoom ? "Zoom" : "Focus")
         super.init(frame: .zero)
@@ -88,9 +89,9 @@ final class PTZLensRow: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         label.frame = CGRect(x: 0, y: 4, width: 44, height: 16)
         minus.frame = CGRect(x: 46, y: 0, width: 24, height: 24)
@@ -98,7 +99,7 @@ final class PTZLensRow: NSView {
         slider.frame = CGRect(x: 74, y: 2, width: max(bounds.width - 74 - 28, 20), height: 20)
     }
 
-    func update(range: PTZRange, position: Int) {
+    package func update(range: PTZRange, position: Int) {
         slider.minValue = Double(range.min)
         slider.maxValue = Double(max(range.max, range.min + 1))
         slider.integerValue = range.clamped(position)
@@ -113,7 +114,7 @@ final class PTZLensRow: NSView {
 
     /// The slider dragged to `position` (and let go, when `ended`), as the
     /// pointer does.
-    func drag(to position: Int, ended: Bool) {
+    package func drag(to position: Int, ended: Bool) {
         slider.integerValue = position
         onDrag(slider.integerValue)
         if ended { onEnd() }
@@ -123,23 +124,23 @@ final class PTZLensRow: NSView {
 /// The popover's content: the pad (`.pad`) or the lens sliders (`.lens`) for
 /// one camera, with the camera's name and the latest refusal or failure.
 @MainActor
-final class PTZPopoverController: NSViewController {
-    enum Mode { case pad, lens }
+package final class PTZPopoverController: NSViewController {
+    package enum Mode { case pad, lens }
 
-    let camera: CameraRef
-    let mode: Mode
+    package let camera: CameraRef
+    package let mode: Mode
     private unowned let ptz: PTZModel
     private let name: String
-    private(set) var pad: [PTZDirection: HoldButton] = [:]
-    private(set) var lensRows: [PTZLensAxis: PTZLensRow] = [:]
-    private(set) var speedSlider: NSSlider?
+    package private(set) var pad: [PTZDirection: HoldButton] = [:]
+    package private(set) var lensRows: [PTZLensAxis: PTZLensRow] = [:]
+    package private(set) var speedSlider: NSSlider?
     private let status = NSTextField(wrappingLabelWithString: "")
     private let heading: NSTextField
     private let speedLabel = NSTextField(labelWithString: "")
     private var token: Int?
-    static let width: CGFloat = 240
+    package static let width: CGFloat = 240
 
-    init(camera: CameraRef, mode: Mode, name: String, ptz: PTZModel) {
+    package init(camera: CameraRef, mode: Mode, name: String, ptz: PTZModel) {
         self.camera = camera
         self.mode = mode
         self.ptz = ptz
@@ -149,9 +150,9 @@ final class PTZPopoverController: NSViewController {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    override func loadView() {
+    package override func loadView() {
         view = FlippedView(frame: CGRect(x: 0, y: 0, width: Self.width, height: 160))
         heading.font = .systemFont(ofSize: 12, weight: .semibold)
         status.font = .systemFont(ofSize: 11)
@@ -169,7 +170,7 @@ final class PTZPopoverController: NSViewController {
     }
 
     /// The popover goes away: nothing stays held.
-    func closed() {
+    package func closed() {
         for b in pad.values { b.pressUp() }
         ptz.release()
     }
@@ -287,7 +288,7 @@ final class PTZPopoverController: NSViewController {
     }
 
     /// The camera's state changed (capabilities read, a position, a refusal).
-    func refresh() {
+    package func refresh() {
         let haveRows = !lensRows.isEmpty || !pad.isEmpty
         if ptz.info(for: camera) != nil, !haveRows || shapeChanged() {
             build()
@@ -321,14 +322,14 @@ final class PTZPopoverController: NSViewController {
     }
 
     /// The speed slider moved to `value`, as the pointer does.
-    func setSpeed(_ value: Int) {
+    package func setSpeed(_ value: Int) {
         guard let slider = speedSlider else { return }
         slider.integerValue = value
         speedChanged(slider)
     }
 
     /// The line the popover shows for a refusal or failure (self-test).
-    var statusText: String { status.stringValue }
+    package var statusText: String { status.stringValue }
 }
 
 
@@ -336,7 +337,7 @@ final class PTZPopoverController: NSViewController {
 /// nine with their Option+digit hint; a choice recalls it. Recall only:
 /// saving or deleting presets is a device setting and is not offered.
 @MainActor
-func presetsMenu(info: PTZInfo, camera: CameraRef, ptz: PTZModel) -> NSMenu {
+package func presetsMenu(info: PTZInfo, camera: CameraRef, ptz: PTZModel) -> NSMenu {
     let menu = NSMenu(title: "Presets")
     menu.autoenablesItems = false
     for item in presetItems(info: info, camera: camera, ptz: ptz) { menu.addItem(item) }
@@ -345,7 +346,7 @@ func presetsMenu(info: PTZInfo, camera: CameraRef, ptz: PTZModel) -> NSMenu {
 
 /// The items of a presets menu: one per preset, or a disabled "No presets".
 @MainActor
-func presetItems(info: PTZInfo, camera: CameraRef, ptz: PTZModel) -> [NSMenuItem] {
+package func presetItems(info: PTZInfo, camera: CameraRef, ptz: PTZModel) -> [NSMenuItem] {
     if info.presets.isEmpty {
         let none = NSMenuItem(title: "No presets", action: nil, keyEquivalent: "")
         none.isEnabled = false

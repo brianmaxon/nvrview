@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import QuartzCore
+import AppBase
 
 /// What an alert inset shows; rebuilt from the model, applied cheaply.
 struct InsetContent: Equatable {

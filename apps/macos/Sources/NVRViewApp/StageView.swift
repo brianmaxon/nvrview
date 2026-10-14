@@ -3,6 +3,7 @@ import NVRCore
 import QuartzCore
 import VideoKit
 import AppBase
+import AppPTZ
 
 /// One window's arrangement and what the user is doing with it.
 @MainActor
@@ -1626,20 +1627,4 @@ private final class StageOverlay: NSView {
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         stage?.performDrop(at: convert(sender.draggingLocation, from: nil), camera: camera(sender)) ?? false
     }
-}
-
-/// A menu item that runs a closure.
-final class ClosureMenuItem: NSMenuItem {
-    private let run: () -> Void
-
-    init(title: String, action: @escaping () -> Void) {
-        run = action
-        super.init(title: title, action: #selector(fire), keyEquivalent: "")
-        target = self
-    }
-
-    @available(*, unavailable)
-    required init(coder: NSCoder) { fatalError("not used") }
-
-    @objc private func fire() { run() }
 }

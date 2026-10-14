@@ -42,6 +42,8 @@ let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     ("AppCalls", ["AppBase"]),
     // Capture: pictures and live recordings, and their settings page.
     ("AppCapture", ["AppBase"]),
+    // Camera motion: the pan, tilt, zoom, lens, and preset model and controls.
+    ("AppPTZ", ["AppBase"]),
 ]
 
 let appDependencies: [Target.Dependency] =
