@@ -1,7 +1,8 @@
 //! Sound analysis allocates nothing per record once a stream is running:
 //! the 16 kHz mono form (with and without resampling) and the analyzers,
-//! checked with a counting global allocator. One test only, so no other
-//! test thread allocates while it is armed.
+//! checked with a counting global allocator. Only the test thread's
+//! allocations count: under `cargo test` the other tests of this binary run
+//! on other threads of the same process.
 
 // A global allocator can only be written with `unsafe`; this test-only one
 // forwards to the system allocator and counts.
@@ -9,31 +10,35 @@
 
 use audio_pipeline::{PcmFormat, TileAudio, TileConfig};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use viewer_core::sound::{SoundOutput, SoundSettings, TileSound};
 
 struct Counting;
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // `const` with no destructor: reading it never allocates.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+}
 static EVENTS: AtomicU64 = AtomicU64::new(0);
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(Cell::get) {
             EVENTS.fetch_add(1, Ordering::Relaxed);
         }
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(Cell::get) {
             EVENTS.fetch_add(1, Ordering::Relaxed);
         }
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(Cell::get) {
             EVENTS.fetch_add(1, Ordering::Relaxed);
         }
         // SAFETY: forwarded unchanged to the system allocator.
@@ -77,7 +82,7 @@ fn count(format: PcmFormat, total: usize, warm: usize) -> (u64, usize) {
             Some(1_700_000_000_000_000 + t_us as i64),
         );
         if k >= warm {
-            ARMED.store(true, Ordering::SeqCst);
+            ARMED.with(|a| a.set(true));
         }
         // Only the analysis is counted here; `count_conversion` checks the
         // conversion inside `push_pcm`.
@@ -88,7 +93,7 @@ fn count(format: PcmFormat, total: usize, warm: usize) -> (u64, usize) {
                 }
             });
         }
-        ARMED.store(false, Ordering::SeqCst);
+        ARMED.with(|a| a.set(false));
         if k >= warm {
             events = EVENTS.load(Ordering::SeqCst) - base;
         }
@@ -114,7 +119,7 @@ fn count_conversion(format: PcmFormat) -> u64 {
         for k in 0..400u64 {
             let t_us = k * 64_000;
             let before = EVENTS.load(Ordering::SeqCst);
-            ARMED.store(k >= 200, Ordering::SeqCst);
+            ARMED.with(|a| a.set(k >= 200));
             tile.push_pcm(
                 format,
                 &pcm,
@@ -122,7 +127,7 @@ fn count_conversion(format: PcmFormat) -> u64 {
                 1_000_000 + t_us,
                 Some(t_us as i64),
             );
-            ARMED.store(false, Ordering::SeqCst);
+            ARMED.with(|a| a.set(false));
             *total += EVENTS.load(Ordering::SeqCst) - before;
         }
     }
