@@ -5,6 +5,9 @@
 //!
 //! Lock freedom is by construction (see the `output` module documentation):
 //! the renderer touches shared state only through atomics.
+//!
+//! Only the test thread's allocations count: under `cargo test` the other
+//! tests of this binary run on other threads of the same process.
 
 // A global allocator can only be written with `unsafe`; this test-only one
 // forwards to the system allocator and counts.
@@ -12,30 +15,34 @@
 
 use audio_pipeline::{OutputConfig, OutputFormat, PcmFormat, TileAudio, TileConfig, output};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Counting;
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // `const` with no destructor: reading it never allocates.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+}
 static EVENTS: AtomicU64 = AtomicU64::new(0);
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(Cell::get) {
             EVENTS.fetch_add(1, Ordering::Relaxed);
         }
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(Cell::get) {
             EVENTS.fetch_add(1, Ordering::Relaxed);
         }
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(Cell::get) {
             EVENTS.fetch_add(1, Ordering::Relaxed);
         }
         // SAFETY: forwarded unchanged to the system allocator.
@@ -110,9 +117,9 @@ fn render_never_allocates() {
         if step == 9_500 {
             tiles[3].set_audible(true);
         }
-        ARMED.store(true, Ordering::SeqCst);
+        ARMED.with(|a| a.set(true));
         renderer.render(&mut buf, ((host_us + 5_000.0) * 1e3) as u64);
-        ARMED.store(false, Ordering::SeqCst);
+        ARMED.with(|a| a.set(false));
         renders += 1;
     }
     let stats: Vec<_> = tiles.iter().map(|t| t.stats().playout).collect();
@@ -124,9 +131,9 @@ fn render_never_allocates() {
     assert!(p2.starts + p2.resyncs > 1, "skips exercised");
     assert_eq!(EVENTS.load(Ordering::SeqCst), 0, "allocations in render");
     // And the counter does count.
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     let v = std::hint::black_box(vec![1u8; 100]);
     drop(v);
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     assert!(EVENTS.load(Ordering::SeqCst) >= 2);
 }
