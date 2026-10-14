@@ -1,65 +1,89 @@
 # nvrview
 
-A lightweight, native live viewer for **Reolink** NVRs and cameras. It speaks
-the devices' own protocol (Baichuan, TCP 9000) directly, with hardware video
-decoding and no browser engine: a low-power alternative to the official
-Reolink desktop client. It runs on macOS (Apple Silicon) and Windows 11, from
-one shared Rust core.
-
-Status: in development. Both apps play live video from real NVRs and cameras
-(split-pane layouts and groups, several windows, focus with the main stream,
-listening, detections, digital zoom, fisheye dewarping, finding devices on
-the network) and doorbell calls with captions and talk-back, by voice or typed
-reply, that can also be started without a ring. Recordings and playback are
-designed but not built yet. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and milestones.
+A lightweight, native viewer for **Reolink** NVRs and cameras, for macOS and
+Windows. It talks to the devices directly over their own protocol (Baichuan,
+TCP port 9000) with hardware video decoding and no browser engine: a fast,
+low-power alternative to the official desktop client. Both apps share one
+Rust core.
 
 nvrview is an independent project. It is not affiliated with, endorsed by, or
 sponsored by Reolink. "Reolink" is a trademark of its owner and is used here
 only to describe compatibility.
 
-## Repository
+## Features
 
-| Path | What |
-| --- | --- |
-| `crates/` | The shared Rust core: protocol, sessions, live and recorded media, audio, the C interface (`viewer-ffi`) |
-| `apps/macos/` | The macOS app (Swift, AppKit/SwiftUI, Metal, VideoToolbox) |
-| `apps/windows/` | The Windows app (C#, Media Foundation, Direct3D 11, WinUI 3) |
-| `tools/` | `mock-nvr` (a fake device for tests and development), `bc-cli` (command-line client), `soak` |
-| `fixtures/synthetic/` | Generated test media (never real recordings) |
-| `docs/` | Design and contracts: architecture, protocol notes, C interface, rendering, audio, playback, interface |
-| `scripts/` | Checks, packaging, setup |
+- **Live view:** split-pane layouts and camera groups, several windows, a
+  full-screen tile on the main stream, digital zoom and pan, fisheye views,
+  multi-lens cameras, listening, and the cameras' own person, vehicle and
+  animal detections.
+- **Doorbells:** calls with live captions and two-way talk (by voice or a
+  typed reply), started by a ring or by you, and recorded if you choose.
+- **Pan, tilt and zoom:** a pad, presets, and lens zoom and focus, with
+  moves that always stop when you let go.
+- **Recordings:** a calendar and per-camera timeline with events and sound,
+  synchronized playback of up to four cameras at 0.25x to 16x, quality per
+  camera, and zoom and fisheye views on recorded video.
+- **Export:** trims, a follow cut or 2-up and 4-up videos with sound, time
+  ranges, and stills, with a share-safe option that leaves out names, times
+  and metadata.
+- **Recording live video** to MP4 on your computer.
+- **Smart alerts** (macOS): a motion sensor or other MQTT trigger wakes the
+  matching cameras, an on-device detector confirms a person, vehicle or
+  animal, and only then does it alert you (and, if you like, Home Assistant).
+  An Events window shows every decision with its pictures.
+- **Self-updates** from a folder or web server you host, signed with your
+  own key.
 
-## Building on macOS
+Both apps have these features except smart alerts and the alert insets
+(doorbell, smoke and entrance pictures over the layout), which are macOS-only
+for now; Windows shows doorbell calls as call cards. The details, feature by
+feature, are in [docs/PARITY.md](docs/PARITY.md).
 
-Requirements: an Apple silicon Mac with macOS 26, Xcode 26 (Swift 6.2), and
-Rust 1.88 or later through [rustup](https://rustup.rs). Optional:
-`cbindgen` (checks the generated C header: `cargo install cbindgen --locked`),
-Docker (Linux and C# test steps), `shellcheck`, `ffmpeg`, and `gitleaks`.
+**Status:** young and moving fast. It is used daily with real NVRs and
+cameras, but expect rough edges. There are no prebuilt downloads here yet;
+build from source as below.
+
+## Building and running
+
+### macOS
+
+Needs an Apple silicon Mac with macOS 26, Xcode 26, and Rust (through
+[rustup](https://rustup.rs)).
 
 ```sh
 git clone https://github.com/brianmaxon/nvrview.git
 cd nvrview
-scripts/setup-dev.sh        # commit hook, identity check
-scripts/check.sh            # everything CI runs, plus the macOS app tests
-scripts/package-macos.sh    # builds build/NVRView.app with the Rust core
+scripts/package-macos.sh        # builds build/NVRView.app with the Rust core
 open build/NVRView.app
-scripts/restart-macos-app.sh [--build]   # quit it cleanly and reopen it (optionally rebuilt)
+scripts/restart-macos-app.sh --build   # later: rebuild, then quit and reopen it
 ```
 
-Add your NVR or camera in **Settings**: the new-device form lists what answers
-on the network (macOS asks once to allow Local Network access; Windows may ask
-the firewall), and choosing one fills the address and port, or type them
-(port 9000), then the user and password;
-the password is kept in the macOS Keychain. `package-macos.sh` signs with an
-Apple Development identity from your keychain when there is one (otherwise ad
-hoc), so the Keychain keeps trusting the app across rebuilds;
-`NVRVIEW_SIGN_IDENTITY` picks another. The app is not notarized.
+The app is signed with your Apple Development identity when you have one
+(ad hoc otherwise) and is not notarized.
+
+### Windows
+
+Needs Windows 11 (x64). `scripts/setup-windows.ps1` installs the toolchain;
+then, in Git Bash from the repository root:
+
+```sh
+scripts/windows-app.sh build
+target/dotnet/bin/NvrView.App/release_win-x64/NvrView.App.exe
+```
+
+The result is a self-contained folder that runs from wherever you copy it.
+More in [apps/windows/README.md](apps/windows/README.md).
+
+### First run
+
+Add your NVR or camera in **Settings**: the form lists devices found on the
+network (or type the address, port 9000, user and password). Passwords are
+kept in the macOS Keychain or Windows Credential Manager.
 
 ### Without a camera
 
-`tools/mock-nvr` serves synthetic (or your own recorded) streams, so the app
-and the tests run without hardware:
+`tools/mock-nvr` serves synthetic streams, so you can try the app (and run
+the tests) without hardware:
 
 ```sh
 cargo run -p mock-nvr -- --port 9100 --channels 4
@@ -67,264 +91,33 @@ NVRVIEW_PASSWORD=example-password \
   build/NVRView.app/Contents/MacOS/NVRView --host 127.0.0.1 --port 9100 --user example-user
 ```
 
-`build/NVRView.app/Contents/MacOS/NVRView --fake fixtures/synthetic/*.h264`
-runs the app against a built-in fake core with no network at all.
+## Repository
 
-### Working on the app
-
-```sh
-cd apps/macos
-swift test                                  # app and bridge tests (fake core)
-swift run NVRView --fake ../../fixtures/synthetic/h264-basic.h264
-# the app's self-test on the fake core (about 20 s; --areas a,b runs some, see scripts/macos-selftest-areas.txt)
-swift run NVRView --fake --data-dir "$(mktemp -d)" --selftest 60 ../../fixtures/synthetic/h264-basic.h264 \
-  ../../fixtures/synthetic/h265-basic.h265 ../../fixtures/synthetic/fisheye/h264-fisheye.h264
-scripts/build-xcframework.sh                # from the repository root: the real core
-NVRVIEW_REAL_CORE=1 swift test              # against the real core (after copying the XCFramework, see Package.swift)
-scripts/macos-real-selftest.sh              # from the repository root: the self-test on the real core against mock-nvr
-```
-
-## Building on Windows
-
-Requirements: Windows 11 (x64) and the toolchain that
-`scripts/setup-windows.ps1` installs (Rust, Visual Studio build tools, .NET 10,
-LLVM, Python, Git Bash; optionally key-only SSH). In Git Bash, from the
-repository root:
-
-```sh
-scripts/windows-app.sh build
-target/dotnet/bin/NvrView.App/release_win-x64/NvrView.App.exe
-```
-
-The result is a self-contained folder (the .NET runtime and the Windows App
-SDK are inside); nothing is installed, and it runs from wherever it is copied.
-Add devices in **Settings** as on the Mac; passwords are kept in Windows
-Credential Manager, and layouts and settings in `%LOCALAPPDATA%\NvrView`, so
-replacing the app folder with a newer one keeps them. The details, options,
-and the Windows App SDK license terms are in
-[apps/windows/README.md](apps/windows/README.md).
-
-`scripts/windows-check.sh` runs the Windows checks on such a computer over SSH
-from a Mac, including uncommitted work:
-
-```sh
-NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh
-```
-
-The script takes a lock on the computer itself (`scripts/windows-lock.sh`:
-merges and releases go before agents), so parallel sessions queue without
-extra steps. Several computers can share the load:
-`NVRVIEW_WINDOWS_HOSTS="host-a host-b"` (see
-[apps/windows/README.md](apps/windows/README.md#adding-a-windows-test-computer)).
-Each run prints the computer's free disk space (and warns under 10 GB), then
-the seconds every step took. Parallel sessions give themselves a worker folder
-with `NVRVIEW_WINDOWS_WORKER=<name>` (default `main`); each keeps about 5 GB of
-build output, so delete a finished one with
-`NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh --clean <name>`.
-The worker builds without debug information (`NVRVIEW_WORKER_DEBUGINFO=1`
-keeps it) and builds the release library and the C# projects in the
-background while the Rust tests run. Optionally, in an administrator
-PowerShell on that computer, exclude its build folders from Microsoft
-Defender real-time scanning, which slows builds:
-
-```powershell
-Add-MpPreference -ExclusionPath "$env:USERPROFILE\nvrview", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", "$env:USERPROFILE\.nuget\packages", "$env:LOCALAPPDATA\Mozilla\sccache"
-```
-
-| folder | holds |
+| Path | What |
 | --- | --- |
-| `nvrview` | the check workers (source and `target`, several GB each) and the clone; most build traffic |
-| `.cargo`, `.rustup` | the Rust toolchain, crate sources, and installed tools |
-| `.nuget\packages` | the .NET packages |
-| `Mozilla\sccache` | the shared compile cache (sccache's default folder, which the workers use) |
+| `crates/` | The shared Rust core: protocol, sessions, live and recorded media, audio, alerts, the C interface |
+| `apps/macos/` | The macOS app (Swift, AppKit and SwiftUI, Metal, VideoToolbox) |
+| `apps/windows/` | The Windows app (C#, WinUI 3, Direct3D 11, Media Foundation) |
+| `tools/` | `mock-nvr` (a fake device), `bc-cli` (a command-line client), `soak` |
+| `docs/` | Design and contracts |
+| `scripts/` | Checks, packaging, setup |
 
-If Defender still scans heavily during builds, the build programs can be
-excluded too, so the files they open are not scanned. This is broader: what
-those programs touch anywhere goes unscanned.
+## Documentation
 
-```powershell
-Add-MpPreference -ExclusionProcess "cargo.exe", "rustc.exe", "link.exe", "sccache.exe", "dotnet.exe", "MSBuild.exe"
-```
-
-`Get-MpPreference | Select-Object -ExpandProperty ExclusionPath` lists the
-folder exclusions. That is your decision: it trades some protection for those
-folders (and programs) for speed.
-
-## Checks
-
-`scripts/check.sh` runs, in order and stopping at the first failure:
-sanitization and a full-history secret scan, `cargo fmt`, `clippy`, the Rust
-tests, the C header check, the C smoke test (plain and with AddressSanitizer),
-Windows and Linux compile checks, the C# smoke test in Docker, the macOS app
-tests, and the macOS GUI self-tests: the app's self-test on the fake core,
-by area, and the two renderer demos (their windows open behind other windows;
-with no desktop session they are skipped and the run writes no stamp). Full
-runs (`NVRVIEW_FULL_CHECK=1`, the release checks) add the app's self-test on
-the real core against `tools/mock-nvr` (`scripts/macos-real-selftest.sh`).
-Environment variables skip the slow or optional steps:
-`NVRVIEW_CSHARP_TESTS=0`, `NVRVIEW_GUI_TESTS=0`, `NVRVIEW_SECRET_SCAN=0`.
-`NVRVIEW_LINUX_TESTS=1` adds the full Linux tests in Docker (CI runs them on
-every push) and `NVRVIEW_BROWSER_TESTS=1` the browser playback check. `scripts/clean-docker.sh` removes what the Docker steps leave behind.
-
-### Test result cache
-
-`scripts/check.sh` and `scripts/windows-check.sh` skip a test suite whose
-inputs have not changed since a clean pass on the same platform in the last
-72 hours, and print it as `cached pass <suite> (<age>, key <short>)`; a table
-at the end shows each suite as ran or cached, with its time.
-`scripts/suite-cache.py` holds the rules:
-
-- **Inputs.** A suite's fingerprint covers its files as committed or staged
-  (unstaged edits and untracked files outside its inputs do not matter), the
-  tool versions, and the suite name. Each Rust crate's clippy, tests, and
-  doctests cover the crate, every workspace crate it depends on (from
-  `cargo metadata`; dev-dependencies count for the crate itself),
-  `Cargo.lock`, the workspace and Cargo settings, and `fixtures/synthetic/`.
-  Changing one crate reruns that crate and the crates above it, with
-  `-p` arguments. The C header and C smoke tests cover the `viewer-ffi` and
-  `mock-nvr` crates; the Swift tests and demo self-tests `apps/macos/`, the C
-  header, and the fixtures; the C# and Windows app suites `apps/windows/`, the
-  core crates they load, and the fixtures. The Windows app self-test is split
-  into areas (startup, viewer, tiles, layouts, header, settings, calls,
-  recordings, capture, ptz), each cached on its own for the debug build:
-  `scripts/windows-selftest-areas.txt` maps every `// parity:` step to one
-  area (`scripts/check-selftest-areas.py` fails otherwise), the app runs only
-  the areas asked for with `--areas a,b` (starting once), and an area's
-  fingerprint is everything under `apps/windows/` except the files that only
-  another area exercises (`WINDOWS_OWNED` in `scripts/suite-cache.py`), so
-  shared code reruns every area and a change to a recordings file reruns
-  recordings and the always-run startup smoke. A full run covers all areas.
-  The macOS app self-test (fake core) is cached by area the same way
-  (`mac-app.AREA`: startup, viewer, tiles, layouts, header, settings, calls,
-  recordings, capture, ptz, alerts): `scripts/macos-selftest-areas.txt` maps
-  its steps, `NVRView --selftest N --areas a,b` runs some, the larger areas'
-  steps live in `SelfTest+Area.swift` files, and `MAC_OWNED` in
-  `scripts/suite-cache.py` lists the files only one area exercises. Its
-  real-core run is not cached; it runs in full runs only.
-  The other Windows suites cover only the C# projects they build (and what
-  those reference): the video self-test the video demo project, the smoke test
-  the smoke project, the tile tests and the shell tests their own projects,
-  each with the shared build settings; the update test covers the updater and
-  start-up files, the packaging script, and the signing tool's crates (the
-  project table in `scripts/suite-cache.py` is checked against the project
-  files by `suite-cache.py check-projects`). Sanitization, self-test parity,
-  the secret scan, and `cargo fmt` always run.
-- **Trimmed build.** Trimming is checked statically on every build (the trim
-  analyzer, warnings as errors) and at publish (the app's own assemblies are
-  trimmer roots, kept whole). The trimmed publish with its plain start and a
-  short self-test (`app-publish`: `--smoke`, the startup area and one wiring
-  check per area; the whole self-test runs on the debug build) and the update
-  test run in full runs (releases) and when the last passing trimmed run on
-  Windows is more than 24 hours old (`NVRVIEW_TRIMMED_MAX_AGE_H`); other runs
-  print them as `deferred` and count them like cached suites (merge stamps,
-  never a release). The trade-off: a problem that only trimming causes at run
-  time shows at the daily run or the release, not at the merge that
-  introduced it.
-- **Secret scan.** Normal checks scan the commits not yet covered by a clean
-  scan (`scripts/secret-scan.sh` records them in the git directory) and the
-  staged and unstaged changes; the whole history is scanned when the last full
-  scan is a day old, with `NVRVIEW_FULL_CHECK=1` (releases), and when the
-  gitleaks ignore list changes. A failed scan records nothing.
-- **Timings.** Every check ends with a table of its step times; merges and
-  releases add the total and the slowest three steps. Each run appends a line
-  (JSON: time, kind, total, steps) to `check-timings.jsonl` in the git
-  directory, which keeps the last 500.
-- **Parallel merges.** `scripts/merge-branch.sh` and `scripts/merge-train.sh`
-  run the Mac check and the Windows check at the same time, each with its own
-  log; the merge reaches main only when both pass.
-- **A full check after every merge.** With two or more Windows computers
-  configured (`NVRVIEW_WINDOWS_HOSTS`), a merge ends by starting a full check
-  (`NVRVIEW_FULL_CHECK=1`, Mac and Windows) of the new main in the background
-  (`scripts/full-check-bg.sh`; `--full-check-after` / `--no-full-check-after`
-  or `NVRVIEW_BACKGROUND_FULL_CHECK=1|0` override the default). It runs in its
-  own worktree (`.worktrees/fullcheck`, build output kept between runs) with
-  its own Windows worker, at the lock priority `background`, below merges and
-  agents: it takes a computer only when none of them is waiting for it (one
-  that already started is not interrupted, so an agent waits at most one
-  check). A later merge supersedes it: the older check's process group is
-  stopped and its locks given back. A tree that already has full stamps starts
-  nothing. When it passes, `scripts/release.sh` (without `--full-check`) finds
-  full stamps for main and only packages. `scripts/full-check-bg.sh status`
-  shows it; a stopped or failed one leaves no stamps.
-- **Releases ship what was tested.** The full Mac check runs the real-core
-  self-test on the shipped app: the release build as the signed bundle
-  `build/NVRView.app` (`scripts/macos-real-selftest.sh --bundle`), with the
-  release's bundled files when `scripts/release.sh` runs the check. A pass on a
-  clean tree leaves `build/NVRView.app.tested` (tree hash and a hash of the
-  bundled files); `scripts/package-macos.sh` then zips that bundle, redoing only
-  the bundled files and the signature (`--rebuild` forces a build). The core
-  framework is built once per tree (`scripts/build-xcframework.sh`). On Windows
-  the stamp records the host that ran the app half (`; host NAME`), and
-  `scripts/windows-check.sh --package` builds the package on that host, where
-  the tested publish output is. Every Windows run prints a `split decision:`
-  line saying whether the check was split over two computers and why not.
-- **Named failures, narrow retries.** A failed Mac or Windows check (merges,
-  trains, `scripts/release-check.sh`, `scripts/windows-check.sh`) prints the
-  suite or self-test area that was running and the failing step's lines, for
-  example `playback pacing: shown pictures are uneven (...)`. The merge scripts
-  retry the Windows check (up to 3 tries) only after a known environmental
-  flake (a software H.264 fallback, the real microphone step, the playback
-  pacing jitter bound), and a retry runs only the suites and areas that did not
-  pass: the earlier tries' passes come from this cache (`NVRVIEW_RETRY_SINCE`,
-  set by the retry loop, makes that hold in a full run too). Any other failure
-  is not retried. Each flake is appended to `flakes.jsonl` in the git
-  directory (date, tree, suite, step, line; last 500); `scripts/flakes.sh`
-  prints the most frequent flaky steps.
-- **Never cached.** A suite with an unstaged or untracked input runs and is
-  not recorded. Failures are never recorded. A pass from a Windows run retried
-  after a known flake is recorded as retried and never skips a suite.
-- **Full runs.** Nothing is skipped with `NVRVIEW_FULL_CHECK=1`, in the release
-  scripts (`scripts/release.sh --full-check`, `scripts/release-check.sh`),
-  and when no full run on that platform passed in the last 72 hours
-  (`NVRVIEW_FULL_MAX_AGE_H`; `NVRVIEW_CACHE_MAX_AGE_H` sets how long a pass
-  stays valid). `NVRVIEW_FULL_EVERY=N` also makes every Nth run full.
-- **Stamps.** A check stamp from a run with cached suites says so and serves
-  `scripts/merge-branch.sh`, which prints the cached suites; a release needs a
-  full stamp.
-- **Where.** The cache lives in the git directory
-  (`.git/nvrview-checks/suite-cache/`), shared by all worktrees, and is
-  pruned after 14 days. On Windows the Mac decides which suites to run and
-  records the worker's results.
-- **One decision per run.** `scripts/suite-cache.py plan` decides every suite
-  once at the start of a check (the tree, tools, and store as they are then;
-  a pass recorded mid-run never changes a later decision) and writes the
-  answers to a plan file that `scripts/check.sh` and `scripts/windows-check.sh`
-  read with `awk` (`scripts/suite-cache-lib.sh`). The scripts append each
-  result to a run log with `printf`, and one `finish` call folds the log into
-  the store, also from the exit trap, so an interrupted run keeps the passes
-  of the suites that completed. Python runs twice per check, resolved once to
-  the real interpreter (not the pyenv shim).
-- **Tests.** `scripts/test_suite_cache.py` tests the decision rules in one
-  process; `scripts/test-suite-cache.sh` tests the shell wiring (plan file,
-  run log, finish, interrupted and retried runs). `scripts/run-script-tests.sh`
-  runs them with the stamp, merge-train, Windows split, macOS package and
-  background full check tests at the same time, printing
-  each file's output in order.
-
-## Versions
-
-The apps share one version, the `VERSION` file at the repository root. The
-macOS bundle (`scripts/package-macos.sh`) and the Windows app (its file and
-product version, and the first line of its log) both read it, so a build of
-either shows the same number. Change it there only. Tags and releases need the
-maintainer's approval.
-
-## Updates
-
-Both apps can update themselves from a folder or web server you host, with
-packages signed by your own Ed25519 key; it is off until you set a source and
-trust a key, and nothing is installed without your say. See
-[docs/UPDATES.md](docs/UPDATES.md), which also covers the release notes the builds carry (a What's New window after an update and a Release Notes item in Help on macOS or in About on Windows).
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the design
+- [docs/UX.md](docs/UX.md): how the apps behave
+- [docs/protocol.md](docs/protocol.md): what is known about the device protocol, and how
+- [docs/UPDATES.md](docs/UPDATES.md): self-hosted updates and releases
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): checks, test computers, and the test result cache
 
 ## Contributing
 
 This repository is public and the software talks to private security
-equipment. Before your first commit, read:
-
-- [docs/SANITIZATION.md](docs/SANITIZATION.md): what must never be committed
-- [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md): how protocol knowledge enters the code
-
-and run `scripts/setup-dev.sh`.
+equipment. Before your first commit, read
+[docs/SANITIZATION.md](docs/SANITIZATION.md) (what must never be committed)
+and [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md) (how protocol knowledge enters
+the code), run `scripts/setup-dev.sh`, and run `scripts/check.sh` before
+committing ([docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
 ## License
 

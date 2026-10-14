@@ -498,7 +498,7 @@ log, which the script prints. `scripts/windows-worker.sh` builds the app on
 every run and runs this self-test when `NVRVIEW_APP_SELFTEST=1` (passed
 through by `scripts/windows-check.sh`), since it needs a logged-in user.
 Worker run times, disk use, `--clean`, and the optional Microsoft Defender
-folder exclusions are described in the root README ("Building on Windows").
+folder exclusions are described in docs/DEVELOPMENT.md ("Windows test computers").
 
 ### The plain start test
 
