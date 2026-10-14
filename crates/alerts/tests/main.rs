@@ -11,3 +11,5 @@ mod engine;
 mod props;
 #[path = "scenario.rs"]
 mod scenario;
+#[path = "test_trigger.rs"]
+mod test_trigger;

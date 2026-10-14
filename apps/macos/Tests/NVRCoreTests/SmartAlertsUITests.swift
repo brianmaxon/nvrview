@@ -578,6 +578,15 @@ private func decision(_ trigger: UInt64, _ kind: String, alertID: UInt64? = nil,
         #expect(TraceText.line(gate, cameraName: { _ in "C" }, time: { "t\($0)" }).contains("not notified"))
     }
 
+    @Test func aTestTriggerSaysWhatARealOneWouldMeet() throws {
+        func line(_ json: String) -> String {
+            TraceText.line(TraceStep(step(json))!, cameraName: { _ in "C" }, time: { "t\($0)" })
+        }
+        #expect(line(#"{"at_ms":1,"step":"real_preview","cooldown_until_ms":60000,"admission":"cooldown","alert_id":1,"rev":1,"left_ms":5,"since_ms":5}"#)
+            == "A real trigger now would be in cooldown until t60000")
+        #expect(line(#"{"at_ms":1,"step":"real_preview","admission":"new","alert_id":2}"#) == "A real trigger now would alert normally")
+    }
+
     @Test func theNightHoldIsASettingFromZeroToTwelveHours() throws {
         var s = SmartAlertSettings()
         s.enabled = true

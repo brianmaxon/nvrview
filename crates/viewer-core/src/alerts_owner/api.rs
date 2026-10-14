@@ -510,9 +510,11 @@ impl crate::Core {
                 received_ms: now_ms,
                 catch_up: v["catch_up"].as_bool().unwrap_or(false),
                 only_camera: None,
+                test: false,
             }
         };
         trigger.only_camera = only_camera;
+        trigger.test = test;
         if test {
             let mut st = lock(&inner.state);
             st.tests.insert(id, to_ha);
