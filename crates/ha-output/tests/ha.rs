@@ -24,6 +24,9 @@ struct MockState {
     log: Vec<String>,
     bodies: Vec<(String, Value)>,
     expected_token: String,
+    /// Legacy notify services (`notify.<name>`), by bare name. Notify
+    /// entities are `notify.<name>` keys of `states`.
+    legacy: Vec<String>,
 }
 
 struct Mock {
@@ -60,6 +63,34 @@ impl Mock {
             .unwrap()
             .states
             .insert(entity.to_string(), state.to_string());
+    }
+
+    /// A notify entity `notify.<name>`.
+    fn add_notify_entity(&self, name: &str) {
+        self.set(&format!("notify.{name}"), "unknown");
+    }
+
+    /// A legacy notify service `notify.<name>`.
+    fn add_legacy(&self, name: &str) {
+        self.state.lock().unwrap().legacy.push(name.to_string());
+    }
+
+    /// Removes a notify entity or legacy service, as when an integration is
+    /// replaced.
+    fn remove_notify(&self, name: &str) {
+        let mut s = self.state.lock().unwrap();
+        s.states.remove(&format!("notify.{name}"));
+        s.legacy.retain(|n| n != name);
+    }
+
+    /// The request bodies seen for one path, in order.
+    fn bodies_for(&self, path: &str) -> Vec<Value> {
+        let s = self.state.lock().unwrap();
+        s.bodies
+            .iter()
+            .filter(|(p, _)| p == path)
+            .map(|(_, b)| b.clone())
+            .collect()
     }
 
     fn force(&self, statuses: &[u16]) {
@@ -121,6 +152,27 @@ fn serve(stream: std::net::TcpStream, st: Arc<Mutex<MockState>>) {
                 Some(v) => (200, json!({"entity_id": id, "state": v})),
                 None => (404, json!({"message": "Entity not found."})),
             }
+        } else if path == "/api/states" {
+            let list: Vec<Value> = s
+                .states
+                .iter()
+                .map(|(k, v)| json!({"entity_id": k, "state": v}))
+                .collect();
+            (200, json!(list))
+        } else if path == "/api/services" {
+            let mut notify = serde_json::Map::new();
+            notify.insert("send_message".into(), json!({}));
+            notify.insert("persistent_notification".into(), json!({}));
+            for n in &s.legacy {
+                notify.insert(n.clone(), json!({}));
+            }
+            (
+                200,
+                json!([
+                    {"domain": "light", "services": {"turn_on": {}}},
+                    {"domain": "notify", "services": notify}
+                ]),
+            )
         } else if let Some(svc) = path.strip_prefix("/api/services/") {
             let entity = json_body["entity_id"].as_str().unwrap_or("").to_string();
             match svc.rsplit_once('/') {
@@ -132,7 +184,19 @@ fn serve(stream: std::net::TcpStream, st: Arc<Mutex<MockState>>) {
                     s.states.insert(entity.clone(), "off".into());
                     (200, json!([{"entity_id": entity, "state": "off"}]))
                 }
-                Some(("script", "turn_on")) | Some(("notify", _)) => (200, json!([])),
+                Some(("script", "turn_on")) => (200, json!([])),
+                Some(("notify", "send_message")) if s.states.contains_key(&entity) => {
+                    (200, json!([]))
+                }
+                Some(("notify", "send_message")) => (
+                    400,
+                    json!({"message": format!("Entity {entity} not found.")}),
+                ),
+                Some(("notify", name)) if s.legacy.iter().any(|n| n == name) => (200, json!([])),
+                Some(("notify", name)) => (
+                    400,
+                    json!({"message": format!("Service notify.{name} not found.")}),
+                ),
                 _ => (404, json!({"message": "Service not found."})),
             }
         } else {
@@ -519,6 +583,7 @@ fn nothing_matching_and_updates_send_nothing() {
 #[test]
 fn notify_and_script_carry_only_cleaned_typed_facts() {
     let rig = Rig::new();
+    rig.mock.add_legacy("example_service");
     let out = rig.output(
         vec![
             rule(Action::Notify {
@@ -540,7 +605,9 @@ fn notify_and_script_carry_only_cleaned_typed_facts() {
     let r = out.deliver(&a);
     assert!(r.ok, "{r:?}");
     let bodies = rig.mock.state.lock().unwrap().bodies.clone();
-    let n = &bodies[0];
+    // The first request resolves the target; the notification follows.
+    assert_eq!(bodies[0].0, "/api/states/notify.example_service");
+    let n = &bodies[1];
     assert_eq!(n.0, "/api/services/notify/example_service");
     // 1718900000 s is 16:13:20 UTC.
     assert_eq!(
@@ -548,7 +615,7 @@ fn notify_and_script_carry_only_cleaned_typed_facts() {
         "person at 16:13 on Back {explanation} Door: Seen {camera}"
     );
     assert_eq!(n.1["title"], "Alert: Back {explanation} Door");
-    let s = &bodies[1];
+    let s = &bodies[2];
     assert_eq!(s.0, "/api/services/script/turn_on");
     assert_eq!(s.1["entity_id"], "script.example_alert");
     assert_eq!(s.1["variables"]["class"], "person");
@@ -708,4 +775,176 @@ fn a_failed_test_alert_reports_the_http_status() {
         r.entities[0].attempts.last().unwrap().http_status,
         Some(404)
     );
+}
+
+fn notify_rule(name: &str) -> Rule {
+    rule(Action::Notify {
+        service: name.into(),
+        title: Some("Alert".into()),
+    })
+}
+
+#[test]
+fn a_notify_entity_is_sent_with_notify_send_message() {
+    let rig = Rig::new();
+    rig.mock.add_notify_entity("example_phone");
+    let out = rig.output(vec![notify_rule("example_phone")], |c| c.cooldown_ms = 0);
+    let r = out.deliver(&alert(Class::Person));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        r.summary,
+        "Home Assistant: notify.example_phone sent to the notify entity (200)"
+    );
+    let sent = rig.mock.bodies_for("/api/services/notify/send_message");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["entity_id"], "notify.example_phone");
+    assert_eq!(sent[0]["title"], "Alert");
+    assert!(sent[0]["message"].as_str().unwrap().starts_with("person"));
+    assert!(
+        rig.mock
+            .bodies_for("/api/services/notify/example_phone")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_legacy_service_is_used_when_there_is_no_such_entity() {
+    let rig = Rig::new();
+    rig.mock.add_legacy("example_phone");
+    let out = rig.output(vec![notify_rule("example_phone")], |c| c.cooldown_ms = 0);
+    let r = out.deliver(&alert(Class::Person));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        r.summary,
+        "Home Assistant: notify.example_phone sent with the legacy notify service (200)"
+    );
+    assert_eq!(
+        rig.mock
+            .bodies_for("/api/services/notify/example_phone")
+            .len(),
+        1
+    );
+    assert!(
+        rig.mock
+            .bodies_for("/api/services/notify/send_message")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_pasted_full_name_is_accepted_and_stored_bare() {
+    let rig = Rig::new();
+    rig.mock.add_notify_entity("example_phone");
+    let out = rig.output(vec![notify_rule("notify.example_phone")], |_| {});
+    let r = out.deliver(&alert(Class::Person));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.entities[0].target, "notify.example_phone");
+    let mut c = Config::new(rig.mock.url());
+    c.rules = vec![notify_rule("notify.example_phone")];
+    assert!(c.validate().is_ok());
+    c.rules = vec![notify_rule("notify.a/b")];
+    assert!(c.validate().is_err());
+}
+
+#[test]
+fn the_route_is_resolved_once_and_again_after_the_cached_path_fails() {
+    let rig = Rig::new();
+    rig.mock.add_legacy("example_phone");
+    let out = rig.output(vec![notify_rule("example_phone")], |c| c.cooldown_ms = 0);
+    assert!(out.deliver(&alert(Class::Person)).ok);
+    assert!(out.deliver(&alert(Class::Person)).ok);
+    let resolves = |m: &Mock| {
+        m.log()
+            .iter()
+            .filter(|l| l.as_str() == "GET /api/states/notify.example_phone")
+            .count()
+    };
+    assert_eq!(resolves(&rig.mock), 1, "the decision is cached");
+    // The integration is replaced by a notify entity of the same name: the
+    // legacy path now answers 400, so the target is resolved once more.
+    rig.mock.remove_notify("example_phone");
+    rig.mock.add_notify_entity("example_phone");
+    let r = out.deliver(&alert(Class::Person));
+    assert!(r.ok, "{r:?}");
+    assert!(r.summary.contains("sent to the notify entity"), "{r:?}");
+    assert_eq!(resolves(&rig.mock), 2, "resolved again once");
+}
+
+#[test]
+fn a_target_that_disappears_fails_with_home_assistants_words() {
+    let rig = Rig::new();
+    rig.mock.add_notify_entity("example_phone");
+    let out = rig.output(vec![notify_rule("example_phone")], |c| c.cooldown_ms = 0);
+    assert!(out.deliver(&alert(Class::Person)).ok);
+    rig.mock.remove_notify("example_phone");
+    let r = out.deliver(&alert(Class::Person));
+    assert!(!r.ok);
+    assert!(
+        r.summary
+            .contains("(400): Service notify.example_phone not found."),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn home_assistants_error_text_is_kept_for_a_refused_request() {
+    let rig = Rig::new();
+    let out = rig.output(vec![notify_rule("example_phone")], |_| {});
+    let r = out.deliver(&alert(Class::Person));
+    assert!(!r.ok);
+    assert_eq!(
+        r.summary,
+        "Home Assistant: notify.example_phone failed: request refused (400): Service notify.example_phone not found."
+    );
+    // Another step: a pulse of an unknown entity names HA's reason too.
+    let r = rig
+        .output(vec![pulse_rule(E)], |_| {})
+        .deliver(&alert(Class::Person));
+    assert!(
+        r.summary
+            .contains("entity not found (404): Entity not found."),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn a_test_alert_says_which_way_it_sent() {
+    let rig = Rig::new();
+    rig.mock.add_notify_entity("example_phone");
+    rig.mock.add_legacy("example_old");
+    let out = rig.output(
+        vec![notify_rule("example_phone"), notify_rule("example_old")],
+        |_| {},
+    );
+    let r = out.deliver_test(&alert(Class::Person), None);
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.summary
+            .contains("notify.example_phone sent to the notify entity")
+    );
+    assert!(
+        r.summary
+            .contains("notify.example_old sent with the legacy notify service")
+    );
+}
+
+#[test]
+fn the_target_list_has_entities_then_legacy_services() {
+    let rig = Rig::new();
+    rig.mock.add_notify_entity("example_phone");
+    rig.mock.add_legacy("example_old");
+    rig.mock.set(E, "off");
+    let out = rig.output(vec![], |_| {});
+    let t = out.list_notify_targets().unwrap();
+    let names: Vec<_> = t.iter().map(|t| (t.name.as_str(), t.kind)).collect();
+    assert_eq!(
+        names,
+        vec![
+            ("example_phone", TargetKind::Entity),
+            ("example_old", TargetKind::Service)
+        ]
+    );
+    rig.mock.state.lock().unwrap().expected_token = "other".into();
+    let e = out.list_notify_targets().unwrap_err();
+    assert!(e.contains("token rejected (401)"), "{e}");
 }

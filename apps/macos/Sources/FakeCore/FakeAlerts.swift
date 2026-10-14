@@ -63,6 +63,8 @@ final class FakeAlertsState: @unchecked Sendable {
         var sensorSeq: [String: Int64] = [:]
         var sensorStates: [String: [String: Any]] = [:]
         var outputTestResult: (ok: Bool, status: Int?, summary: String) = (true, 200, "Home Assistant: helper pulsed (200)")
+        /// What the next "list targets" reports: names with `entity` or `service`.
+        var outputTargets: (ok: Bool, summary: String, targets: [(String, String)]) = (true, "Home Assistant: 0 notify targets", [])
         var evidence: [UInt64: FakeEvidence] = [:]
     }
 

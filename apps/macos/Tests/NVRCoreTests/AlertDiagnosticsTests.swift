@@ -86,6 +86,28 @@ import Testing
                 == #"{"after":3,"clear":true,"input":"s","limit":10}"#)
     }
 
+    @Test func theTargetListSeparatesEntitiesFromServices() throws {
+        let json = #"""
+            {"type":"alerts_output_targets","output":1,"ok":true,"summary":"","targets":[
+            {"name":"example_phone","kind":"entity"},{"name":"example_old","kind":"service"}]}
+            """#
+        let list = try #require(NotifyTargetList(json: json))
+        #expect(list.ok && list.entities.map(\.name) == ["example_phone"] && list.services.map(\.name) == ["example_old"])
+        let failed = try #require(
+            NotifyTargetList(json: #"{"output":1,"ok":false,"summary":"token rejected (401)","targets":[]}"#))
+        #expect(!failed.ok && failed.summary == "token rejected (401)" && failed.targets.isEmpty)
+        if case .outputTargets = SmartAlertEvent.parse(Data(json.utf8)) {} else { Issue.record("not parsed as an event") }
+    }
+
+    @Test func aSuccessfulTestSaysHowItWasSent() throws {
+        let ok = try #require(
+            OutputTestResult(
+                json: #"{"output":1,"ok":true,"http_status":200,"summary":"Home Assistant: notify.example_phone sent to the notify entity (200)","at_ms":0}"#))
+        #expect(
+            plain(ok.line(timeZone: zone, locale: locale))
+                == "Delivered (HTTP 200) at 12:00:00 AM: Home Assistant: notify.example_phone sent to the notify entity (200)")
+    }
+
     @Test func aTestResultReadsAsDeliveredOrNot() throws {
         let ok = try #require(
             OutputTestResult(json: #"{"type":"alerts_output_test","output":1,"ok":true,"http_status":200,"at_ms":0}"#))
@@ -311,5 +333,17 @@ import Testing
             if case .smartAlert(.outputTest(let j)) = $0 { OutputTestResult(json: j) } else { nil }
         }
         #expect(results.count == 1 && !results[0].ok && results[0].httpStatus == 404)
+
+        // The target list for the settings menu arrives the same way.
+        rig.fake.setOutputTargets(
+            ok: true, summary: "Home Assistant: 2 notify targets",
+            targets: [(name: "example_phone", kind: "entity"), (name: "example_old", kind: "service")])
+        try core.alertsOutputTargets(request: #"{"output":1}"#)
+        #expect(throws: CoreStatus.unknownID) { try core.alertsOutputTargets(request: #"{"output":5}"#) }
+        rig.fake.completeAlertWork()
+        let lists: [NotifyTargetList] = rig.events.get().compactMap {
+            if case .smartAlert(.outputTargets(let j)) = $0 { NotifyTargetList(json: j) } else { nil }
+        }
+        #expect(lists.count == 1 && lists[0].entities.count == 1 && lists[0].services.count == 1)
     }
 }

@@ -84,6 +84,23 @@ extension SmartAlertsModel {
         changed()
     }
 
+    /// Asks Home Assistant (with the stored token, through the core) which
+    /// notify targets it offers, for the rule target menu; the answer arrives
+    /// as an event.
+    package func loadNotifyTargets() {
+        notifyTargetsStatus = "Asking Home Assistant…"
+        do throws(CoreStatus) {
+            try bridge.smartAlertsAPI().alertsOutputTargets(request: #"{"output":\#(Self.homeAssistantOutputIndex)}"#)
+        } catch .notConfigured {
+            notifyTargetsStatus = "Smart alerts are off or not set up yet."
+        } catch .unknownID {
+            notifyTargetsStatus = "Home Assistant is not set up in the core (save the address and token first)."
+        } catch {
+            notifyTargetsStatus = "The target list was not fetched (\(error))."
+        }
+        changed()
+    }
+
     // MARK: Evidence
 
     package func evidenceList(sinceMs: Int64? = nil) -> EvidenceList? {

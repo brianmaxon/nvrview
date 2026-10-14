@@ -325,6 +325,28 @@ pub struct TestResult {
 /// Where [`AlertOutput::send_test`] reports; called once, from any thread.
 pub type TestDone = Box<dyn FnOnce(TestResult) + Send>;
 
+/// One target an output can send to (a Home Assistant notify entity or
+/// legacy notify service).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputTarget {
+    /// What goes in a rule's settings, without any domain prefix.
+    pub name: String,
+    /// `entity` or `service`.
+    pub kind: &'static str,
+}
+
+/// The result of [`AlertOutput::list_targets`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetsResult {
+    pub ok: bool,
+    /// A short generic line; no secrets. On failure, the reason.
+    pub summary: String,
+    pub targets: Vec<OutputTarget>,
+}
+
+/// Where [`AlertOutput::list_targets`] reports; called once, from any thread.
+pub type TargetsDone = Box<dyn FnOnce(TargetsResult) + Send>;
+
 /// An alert output (Home Assistant, ntfy, a webhook). Called on the
 /// service's task: [`AlertOutput::deliver`] must return at once and do
 /// its I/O elsewhere (on the runtime from [`OutputContext`]), reporting
@@ -346,6 +368,16 @@ pub trait AlertOutput: Send + Sync + 'static {
             ok: false,
             summary: "this output cannot send a test".to_owned(),
             http_status: None,
+        });
+    }
+    /// Asks the output's server which targets it offers (for a settings
+    /// menu) and reports through `done`. The default reports that the
+    /// output has none to list.
+    fn list_targets(&self, done: TargetsDone) {
+        done(TargetsResult {
+            ok: false,
+            summary: "this output has no targets to list".to_owned(),
+            targets: Vec::new(),
         });
     }
     /// The output is no longer used (settings changed, shutdown). Must not

@@ -691,6 +691,10 @@ public final class CCore: CoreAPI {
         try check(nv_alerts_output_test(try core(), request))
     }
 
+    public func alertsOutputTargets(request: String) throws(CoreStatus) {
+        try check(nv_alerts_output_targets(try core(), request))
+    }
+
     public func alertEvidencePut(json: String, data: Data?) throws(CoreStatus) {
         let c = try core()
         guard let data, !data.isEmpty else {

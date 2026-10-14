@@ -75,6 +75,9 @@ package final class SmartAlertsModel {
     /// The last "Send test alert" result, in words, and as the event gave it.
     package var homeAssistantSend: String?
     package private(set) var lastOutputTest: OutputTestResult?
+    /// The notify targets Home Assistant last offered, and how asking went.
+    package private(set) var notifyTargets: NotifyTargetList?
+    package var notifyTargetsStatus: String?
     /// The last "Simulate trigger", in words.
     package var simulateNote: String?
     /// Requests seen, by key (until done), for the detector and the boxes.
@@ -245,6 +248,11 @@ package final class SmartAlertsModel {
             configured = JSONValue.parse(json)
         case .triggerRejected:
             break
+        case .outputTargets(let json):
+            if let list = NotifyTargetList(json: json) {
+                notifyTargets = list.ok ? list : nil
+                notifyTargetsStatus = list.ok ? (list.targets.isEmpty ? "Home Assistant offers no notify targets." : nil) : list.summary
+            }
         case .outputTest(let json):
             if let r = OutputTestResult(json: json) {
                 lastOutputTest = r

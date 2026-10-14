@@ -407,7 +407,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 15;
+    public const uint AbiMinor = 16;
 
     /// <summary>NV_ASC_MAX: most bytes of an AudioSpecificConfig an encoder's open may write (minor 9).</summary>
     public const int AscMax = 64;
@@ -907,6 +907,11 @@ public static unsafe partial class NvNative
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_alerts_output_test(nint core, string request);
+
+    /// <summary>The targets an output offers (Home Assistant notify entities and services); the result is an event (minor 16).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alerts_output_targets(nint core, string request);
 
     /// <summary>A kept frame (JPEG, copied) and the methods' boxes for a check (JSON; minor 14).</summary>
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]

@@ -10,11 +10,13 @@
 //! under the entry's `id` (else `home_assistant`).
 
 use crate::alerts_owner::{
-    AlertNotice, AlertOutput, DeliveryDone, NoticeState, OutputContext, OutputFactory, TestDone,
-    TestResult,
+    AlertNotice, AlertOutput, DeliveryDone, NoticeState, OutputContext, OutputFactory,
+    OutputTarget, TargetsDone, TargetsResult, TestDone, TestResult,
 };
 use alerts::model::{CameraId, Severity};
-use ha_output::{Alert, Clock, Config, DecisionKind, HaOutput, Http, OutputResult, Token, Worker};
+use ha_output::{
+    Alert, Clock, Config, DecisionKind, HaOutput, Http, OutputResult, TargetKind, Token, Worker,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -198,6 +200,39 @@ impl AlertOutput for HomeAssistant {
             });
         if spawned.is_err() {
             tracing::warn!("could not start the Home Assistant test thread");
+        }
+    }
+
+    fn list_targets(&self, done: TargetsDone) {
+        let output = self.output.clone();
+        // Two requests: their own thread, like a test.
+        let spawned = std::thread::Builder::new()
+            .name("ha-output-targets".to_owned())
+            .spawn(move || {
+                done(match output.list_notify_targets() {
+                    Ok(list) => TargetsResult {
+                        ok: true,
+                        summary: format!("Home Assistant: {} notify targets", list.len()),
+                        targets: list
+                            .into_iter()
+                            .map(|t| OutputTarget {
+                                name: t.name,
+                                kind: match t.kind {
+                                    TargetKind::Entity => "entity",
+                                    TargetKind::Service => "service",
+                                },
+                            })
+                            .collect(),
+                    },
+                    Err(why) => TargetsResult {
+                        ok: false,
+                        summary: why,
+                        targets: Vec::new(),
+                    },
+                });
+            });
+        if spawned.is_err() {
+            tracing::warn!("could not start the Home Assistant target-list thread");
         }
     }
 

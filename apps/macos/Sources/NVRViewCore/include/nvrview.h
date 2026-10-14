@@ -36,8 +36,9 @@
  * review (nv_alerts_messages, nv_alerts_output_test, nv_alert_evidence_*).
  * Minor 15: loudness gaps with their reasons ("gaps" in
  * nv_recordings_loudness) and a span within the day for nv_sound_analyze_day.
+ * Minor 16: nv_alerts_output_targets and the alerts_output_targets event.
  */
-#define NV_ABI_MINOR 15
+#define NV_ABI_MINOR 16
 
 /**
  * Most bytes of an AudioSpecificConfig an encoder's `open` may write.
@@ -1930,6 +1931,20 @@ enum NvStatus nv_alerts_messages(struct NvCore *core,
  * `core` is a live handle; `request` is a NUL-terminated string.
  */
 enum NvStatus nv_alerts_output_test(struct NvCore *core, const char *request);
+
+/**
+ * Asks a configured output which targets it offers (minor 16): `request` is
+ * {"output":<index in outputs[]>}. Returns at once; the result arrives as an
+ * `alerts_output_targets` event {"type","output","kind","ok","summary",
+ * "targets":[{"name","kind":"entity"|"service"}],"at_ms"}. For Home
+ * Assistant the targets are its notify entities and legacy notify services.
+ * NV_ERR_UNKNOWN_ID for no such output, NV_ERR_NOT_CONFIGURED before the
+ * first nv_alerts_configure.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string.
+ */
+enum NvStatus nv_alerts_output_targets(struct NvCore *core, const char *request);
 
 /**
  * Stores evidence of a check (minor 14): `json` is {"trigger_id":N,

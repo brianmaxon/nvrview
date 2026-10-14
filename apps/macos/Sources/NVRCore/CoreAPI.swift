@@ -317,6 +317,10 @@ public protocol CoreAPI: Sendable {
     /// `nv_alerts_output_test` (minor 14): one test alert through a
     /// configured output; the result arrives as an `alerts_output_test` event.
     func alertsOutputTest(request: String) throws(CoreStatus)
+    /// `nv_alerts_output_targets` (minor 16): asks an output which targets it
+    /// offers (Home Assistant: notify entities and legacy notify services);
+    /// the result arrives as an `alerts_output_targets` event.
+    func alertsOutputTargets(request: String) throws(CoreStatus)
     /// `nv_alert_evidence_put` (minor 14): a kept frame (JPEG, or none) and
     /// the methods' boxes for a check (`EvidenceDocument.request`).
     func alertEvidencePut(json: String, data: Data?) throws(CoreStatus)

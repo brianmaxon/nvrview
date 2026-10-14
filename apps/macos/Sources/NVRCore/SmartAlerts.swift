@@ -168,10 +168,13 @@ public enum SmartAlertEvent: Sendable, Equatable {
     /// `alerts_output_test`: the result of a test alert through an output
     /// (`ok`, `summary`, `http_status`, `at_ms`).
     case outputTest(json: String)
+    /// `alerts_output_targets`: the targets an output offers
+    /// (`NotifyTargetList`).
+    case outputTargets(json: String)
 
     public static let types: Set<String> = [
         "verify_request", "verify_request_done", "verify_step", "alert", "alerts_configured",
-        "trigger_rejected", "alerts_output_test",
+        "trigger_rejected", "alerts_output_test", "alerts_output_targets",
     ]
 
     private struct Head: Decodable {
@@ -204,6 +207,8 @@ public enum SmartAlertEvent: Sendable, Equatable {
             return .triggerRejected(reason: h.reason ?? "")
         case "alerts_output_test":
             return .outputTest(json: text)
+        case "alerts_output_targets":
+            return .outputTargets(json: text)
         default:
             return nil
         }
@@ -226,6 +231,8 @@ extension CoreAPI {
     // Minor 14: debugging and review.
     public func alertsMessages(request: String) throws(CoreStatus) -> String { throw .unsupported }
     public func alertsOutputTest(request: String) throws(CoreStatus) { throw .unsupported }
+    // Minor 16: an output's target list.
+    public func alertsOutputTargets(request: String) throws(CoreStatus) { throw .unsupported }
     public func alertEvidencePut(json: String, data: Data?) throws(CoreStatus) { throw .unsupported }
     public func alertEvidenceGet(query: String?) throws(CoreStatus) -> String { throw .unsupported }
     public func alertEvidenceFrameGet(triggerID: UInt64, index: UInt32) throws(CoreStatus) -> Data { throw .unsupported }

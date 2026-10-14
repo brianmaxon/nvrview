@@ -1127,6 +1127,70 @@ fn a_test_alert_goes_through_home_assistant_and_reports_the_result() {
     drop(ha);
 }
 
+/// The settings menu's target list: notify entities and legacy services
+/// from Home Assistant, as an event; and a notify rule's test alert says
+/// which way it was sent.
+#[test]
+fn notify_targets_are_listed_and_a_notify_test_says_how_it_was_sent() {
+    let broker = broker_with_login();
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    ha.add_notify_entity("example_phone");
+    ha.add_legacy("example_old");
+    let h = Harness::new(1, NOON_S, false);
+    let mut settings = glue_settings(&h, broker.port, &ha.url());
+    settings["outputs"][1]["rules"] =
+        json!([{"action": {"kind": "notify", "service": "notify.example_phone"}}]);
+    h.configure(settings);
+    assert_eq!(
+        h.core.alerts_output_targets(r#"{"output":7}"#),
+        Err(AlertError::UnknownId)
+    );
+    h.core.alerts_output_targets(r#"{"output":1}"#).unwrap();
+    h.wait_real("the target list", |h| {
+        !h.rec.events_of("alerts_output_targets").is_empty()
+    });
+    let ev = h.rec.events_of("alerts_output_targets")[0].clone();
+    assert_eq!(ev["ok"], true, "{ev}");
+    assert_eq!(
+        ev["targets"],
+        json!([
+            {"name": "example_phone", "kind": "entity"},
+            {"name": "example_old", "kind": "service"}
+        ])
+    );
+    drop(h);
+
+    h_test_via_notify(&broker, &ha);
+}
+
+fn h_test_via_notify(broker: &mqtt_broker::Broker, ha: &mock_ha::MockHa) {
+    let h = Harness::new(1, NOON_S, false);
+    let mut settings = glue_settings(&h, broker.port, &ha.url());
+    settings["outputs"][1]["rules"] =
+        json!([{"action": {"kind": "notify", "service": "notify.example_phone"}}]);
+    h.configure(settings);
+    h.core.alerts_output_test(r#"{"output":1}"#).unwrap();
+    h.wait_real("the result", |h| {
+        !h.rec.events_of("alerts_output_test").is_empty()
+    });
+    let ev = h.rec.events_of("alerts_output_test")[0].clone();
+    assert_eq!(ev["ok"], true, "{ev}");
+    assert!(
+        ev["summary"]
+            .as_str()
+            .unwrap()
+            .contains("sent to the notify entity"),
+        "{ev}"
+    );
+    assert!(
+        ha.log()
+            .iter()
+            .any(|l| l == "POST /api/services/notify/send_message notify.example_phone"),
+        "{:?}",
+        ha.log()
+    );
+}
+
 /// Evidence is kept with the decision, expires on the (simulated) clock,
 /// and a pin keeps a set.
 #[test]

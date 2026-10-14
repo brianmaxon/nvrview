@@ -14,12 +14,15 @@
 
 mod config;
 mod http;
+mod notify;
 mod output;
+mod reply;
 mod template;
 mod worker;
 
 pub use config::{Action, Config, ConfigError, MatchMode, Rule};
 pub use http::{Http, HttpRequest, HttpResponse, Method, NetError, Token, UreqHttp, host_is_local};
+pub use notify::{NotifyTarget, TargetKind};
 pub use output::{
     Alert, Attempt, Clock, DecisionKind, EntityResult, EntityStatus, ErrorKind, HaOutput, LogSink,
     OutputResult, Step, SystemClock,

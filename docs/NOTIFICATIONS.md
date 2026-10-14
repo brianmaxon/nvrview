@@ -758,12 +758,36 @@ and records each result as a `delivery` step such as "Home Assistant:
   HTTP 200 with a JSON list. If the final turn-off fails, the result says the
   entity may be left on, and the next pulse resets it.
 - **Other actions:** plain `turn_on` (left on), `script.turn_on` with the facts
-  as script variables, and `notify.<service>` with a message from a template.
+  as script variables, and a notification with a message from a template
+  (see "Notify targets" below).
   Templates use only `{camera}`, `{class}`, `{time}`, `{severity}`, and
   `{explanation}`, filled in one pass from typed alert facts (control
   characters removed, 200 characters at most), so no trigger payload text is
   ever sent, spoken, or executed. Entity ids and service names are validated
   before they reach a request path.
+- **Notify targets.** A notify rule names a target such as `example_phone`
+  (a pasted `notify.example_phone` is accepted and stored without the prefix).
+  Home Assistant 2024.5 and later expose notifiers as entities, sent with the
+  `notify.send_message` action (`POST /api/services/notify/send_message` with
+  `entity_id`, `message`, and `title`); older setups register a legacy service
+  (`POST /api/services/notify/<name>` with `message` and `title`). The output
+  decides which by asking `GET /api/states/notify.<name>` once per
+  configuration: 200 is an entity, 404 is a legacy service. The decision is
+  cached; if the cached path then answers 400 or 404 (an integration was
+  replaced, an entity renamed), the target is resolved once more and the send
+  retried when the route changed. The result says which way it went: "sent to
+  the notify entity (200)" or "sent with the legacy notify service (200)",
+  and "Send Test Alert" shows that line.
+- **Home Assistant's reason.** On any non-200 reply the `message` of its JSON
+  error body is added to the failure, for every step, for example `request
+  refused (400): Service notify.example_phone not found.`. It is cut to 160
+  characters and control characters become spaces; it is shown, never
+  interpreted.
+- **Target list** (for a settings menu): `nv_alerts_output_targets` asks the
+  configured output with its stored token for `GET /api/states` (entity ids
+  starting `notify.`) and `GET /api/services` (domain `notify`, without
+  `send_message` and `persistent_notification`) and answers with an
+  `alerts_output_targets` event (docs/FFI.md). Typing a name stays possible.
 - **Mapping** (settings): rules match on class, trigger source id, camera,
   minimum severity, and decision (alerts only by default) and name an action.
   The mode is first match (default) or all matches (one call per distinct
