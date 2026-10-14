@@ -106,7 +106,7 @@ NVRVIEW_PASSWORD=example-password \
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the design
 - [docs/UX.md](docs/UX.md): how the apps behave
-- [docs/protocol.md](docs/protocol.md): what is known about the device protocol, and how
+- [docs/protocol.md](docs/protocol.md): what is known about the device protocol, with where each fact comes from
 - [docs/UPDATES.md](docs/UPDATES.md): self-hosted updates and releases
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): checks, test computers, and the test result cache
 
