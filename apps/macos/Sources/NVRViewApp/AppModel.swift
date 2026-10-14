@@ -12,21 +12,11 @@ import AppCapture
 import AppPTZ
 import AppAlerts
 import AppRecordings
+import AppStage
 
 #if NVRVIEW_REAL_CORE
 import NVRCoreC
 #endif
-
-/// What a window shows.
-enum WindowContent: Equatable {
-    /// A layout the core stores; edits are saved back to it.
-    case layout(id: String)
-    /// A group's cameras as an even grid; edits stay in the window until
-    /// saved as a layout.
-    case group(id: String)
-    /// An unsaved arrangement (the first window before any layout exists).
-    case scratch(name: String, root: LayoutNode)
-}
 
 /// The app's state, shared by every window: the core (through `CoreBridge`),
 /// the configured devices and what the core says about them, the layouts
@@ -1276,7 +1266,7 @@ final class FakeBox: @unchecked Sendable {
 }
 
 extension AppModel: AlertsHost {}
-extension AppModel: RecordingsHost {}
+extension AppModel: StageHost {}
 
 extension AppModel: CaptureHost {
     func activeCall(for camera: CameraRef) -> DoorbellCall? { calls.call(for: camera) }

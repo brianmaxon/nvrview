@@ -4,6 +4,7 @@ import NVRCore
 import Observation
 import VideoKit
 import AppBase
+import AppCapture
 
 /// Which cameras of a device the user lets the recordings screens search
 /// (`nv_recordings_enable`), saved between launches. The core does not keep
@@ -37,7 +38,7 @@ package final class RecordingsModel {
     @ObservationIgnored private let bridge: CoreBridge
     @ObservationIgnored private let enablementFile: JSONFileStore<RecordingsEnablement>
     /// The app, for device and camera names.
-    @ObservationIgnored package weak var app: (any RecordingsHost)?
+    @ObservationIgnored package weak var app: (any CaptureHost)?
 
     /// False until the core accepted the configuration (a core without
     /// recordings, minor < 5, never does; the screens then stay hidden).

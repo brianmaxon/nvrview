@@ -4,40 +4,40 @@ import QuartzCore
 import AppBase
 
 /// What an alert inset shows; rebuilt from the model, applied cheaply.
-struct InsetContent: Equatable {
+package struct InsetContent: Equatable {
     /// "Doorbell · 14:02:11 · 2 times, last 14:03:40".
-    var header: String
-    var cameraName: String
-    var critical: Bool
+    package var header: String
+    package var cameraName: String
+    package var critical: Bool
     /// The return inset after a swap ("Back to …").
-    var isReturn: Bool
-    var call: CallContent?
+    package var isReturn: Bool
+    package var call: CallContent?
     /// "● Recording 0:42" while the call is recorded (the call bar's pill).
-    var recording: String? = nil
+    package var recording: String? = nil
     /// The return inset draws the whole layout the stage showed.
-    var showsLayout = false
+    package var showsLayout = false
 }
 
 /// The doorbell call's part of an inset (or of the stage, when the doorbell
 /// fills it).
-struct CallContent: Equatable {
-    var showsUnmute: Bool
+package struct CallContent: Equatable {
+    package var showsUnmute: Bool
     /// Opened by Start Conversation rather than a press.
-    var isConversation: Bool
-    var talkText: String
-    var talking: Bool
+    package var isConversation: Bool
+    package var talkText: String
+    package var talking: Bool
     /// Talk is held or toggled on (the microphone runs).
-    var microphoneOn: Bool
-    var transcript: [String]
+    package var microphoneOn: Bool
+    package var transcript: [String]
     /// "Preparing speech recognition", or why there is no transcript.
-    var transcriptNote: String?
-    var note: String?
+    package var transcriptNote: String?
+    package var note: String?
     /// "Keep talking" is on (kept with the call, not the view).
-    var latched: Bool
+    package var latched: Bool
     /// The reply typed and not sent yet (kept with the call).
-    var draft: String
+    package var draft: String
 
-    init(call: DoorbellCall, microphoneOn: Bool, note: String?) {
+    package init(call: DoorbellCall, microphoneOn: Bool, note: String?) {
         latched = call.latched
         draft = call.draft
         showsUnmute = call.showsUnmute
@@ -57,7 +57,7 @@ struct CallContent: Equatable {
 
 /// What the call's controls ask for.
 @MainActor
-protocol CallControlsDelegate: AnyObject {
+package protocol CallControlsDelegate: AnyObject {
     func callUnmute()
     func callTalk(_ down: Bool)
     /// "Keep talking" turned on or off.
@@ -82,41 +82,41 @@ protocol CallControlsDelegate: AnyObject {
 /// header is the call bar with the pin (on top), Pop In and close, and the
 /// captions come before the Talk row.
 @MainActor
-final class InsetView: NSView, CallControlsDelegate {
-    static let callHeight: CGFloat = 118
+package final class InsetView: NSView, CallControlsDelegate {
+    package static let callHeight: CGFloat = 118
 
     /// Where the view lives.
-    enum Host {
+    package enum Host {
         /// Over a viewer window's stage.
         case stage
         /// Filling a call window.
         case window
     }
 
-    let host: Host
-    var onSwap: () -> Void = {}
-    var onClose: () -> Void = {}
-    var onHover: (Bool) -> Void = { _ in }
+    package let host: Host
+    package var onSwap: () -> Void = {}
+    package var onClose: () -> Void = {}
+    package var onHover: (Bool) -> Void = { _ in }
     /// Pop Out (stage) for a call's inset; nil hides the button and item.
-    var onPopOut: (() -> Void)?
+    package var onPopOut: (() -> Void)?
     /// Pop In (window).
-    var onPopIn: () -> Void = {}
+    package var onPopIn: () -> Void = {}
     /// The pin turned on or off (window).
-    var onPin: (Bool) -> Void = { _ in }
+    package var onPin: (Bool) -> Void = { _ in }
     /// A drag of the inset (stage): the whole column moves. The point is in
     /// the superview's coordinates; `.began` carries where the button went
     /// down.
-    var onDrag: ((DragPhase, CGPoint) -> Void)?
+    package var onDrag: ((DragPhase, CGPoint) -> Void)?
     /// "Reset Position" in the inset's menu (stage).
-    var onResetPosition: (() -> Void)?
+    package var onResetPosition: (() -> Void)?
     /// More menu items over the stage (the window's inset grid).
-    var extraMenuItems: (() -> [NSMenuItem])?
+    package var extraMenuItems: (() -> [NSMenuItem])?
 
-    enum DragPhase {
+    package enum DragPhase {
         case began, moved, ended
     }
     /// Holds the target strongly (it refers to the stage weakly).
-    var callDelegate: CallControlsDelegate?
+    package var callDelegate: CallControlsDelegate?
 
     private let border = CALayer()
     private let header = NSView()
@@ -124,7 +124,7 @@ final class InsetView: NSView, CallControlsDelegate {
     /// The call bar's "● Recording 0:42".
     private let recordingPill = NSTextField(labelWithString: "")
     /// The pill's text while it shows (self-test).
-    var recordingText: String? { recordingPill.isHidden ? nil : recordingPill.stringValue }
+    package var recordingText: String? { recordingPill.isHidden ? nil : recordingPill.stringValue }
     private let name = NSTextField(labelWithString: "")
     private let close = NSButton()
     /// Pop Out (stage) or Pop In (window).
@@ -132,7 +132,7 @@ final class InsetView: NSView, CallControlsDelegate {
     /// Keep the call window on top (window).
     private let pin = NSButton()
     private let unmute = NSButton()
-    let callPanel = CallPanelView()
+    package let callPanel = CallPanelView()
     private var content: InsetContent?
     private var downAt: CGPoint?
     /// Where the button went down, in the superview's coordinates.
@@ -141,11 +141,11 @@ final class InsetView: NSView, CallControlsDelegate {
     private var dragging = false
     private var tracking: NSTrackingArea?
 
-    override var isFlipped: Bool { true }
-    override var acceptsFirstResponder: Bool { false }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    package override var isFlipped: Bool { true }
+    package override var acceptsFirstResponder: Bool { false }
+    package override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    init(host: Host = .stage) {
+    package init(host: Host = .stage) {
         self.host = host
         super.init(frame: .zero)
         wantsLayer = true
@@ -228,16 +228,16 @@ final class InsetView: NSView, CallControlsDelegate {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     /// Where the picture goes, in this view's coordinates.
-    var videoRect: CGRect {
+    package var videoRect: CGRect {
         let top = CGFloat(InsetGeometry.headerHeight)
         let bottom = content?.call == nil ? 0 : Self.callHeight
         return CGRect(x: 0, y: top, width: bounds.width, height: max(bounds.height - top - bottom, 0))
     }
 
-    func apply(_ c: InsetContent) {
+    package func apply(_ c: InsetContent) {
         guard c != content else { return }
         content = c
         title.stringValue = c.isReturn ? (c.showsLayout ? "Back to the layout (click or Tab)" : "Back to the view (click or Tab)") : c.header
@@ -261,16 +261,16 @@ final class InsetView: NSView, CallControlsDelegate {
     }
 
     /// The pin's state (window): on top of other windows.
-    func setPinned(_ on: Bool) {
+    package func setPinned(_ on: Bool) {
         pin.state = on ? .on : .off
         pin.image = NSImage(
             systemSymbolName: on ? "pin.fill" : "pin.slash", accessibilityDescription: on ? "Keep on top: on" : "Keep on top: off")
         pin.toolTip = on ? "On top of other windows (click to let it go behind)" : "Not on top (click to keep it on top)"
     }
 
-    var isPinned: Bool { pin.state == .on }
+    package var isPinned: Bool { pin.state == .on }
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         let h = CGFloat(InsetGeometry.headerHeight)
         header.frame = CGRect(x: 0, y: 0, width: bounds.width, height: h)
@@ -301,7 +301,7 @@ final class InsetView: NSView, CallControlsDelegate {
     /// The header's labels take no clicks of their own: a press on them is
     /// a press on the inset (a click swaps, a drag moves the column). In a
     /// call window the picture area is the tile's, below this view.
-    override func hitTest(_ point: NSPoint) -> NSView? {
+    package override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
         if host == .window, hit === self { return nil }
         return hit === header || hit === title || hit === name ? self : hit
@@ -309,13 +309,13 @@ final class InsetView: NSView, CallControlsDelegate {
 
     /// Moving this far from where the button went down makes a press on the
     /// picture a drag instead of a click; on the header a drag starts sooner.
-    static let clickSlop: CGFloat = 6
-    static let headerSlop: CGFloat = 2
+    package static let clickSlop: CGFloat = 6
+    package static let headerSlop: CGFloat = 2
 
     // A click anywhere but the controls swaps the inset with the stage; a
     // drag on the header, or on the picture past the click's slop, moves
     // the column.
-    override func mouseDown(with event: NSEvent) {
+    package override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         downAt = p
         downInSuperview = superview?.convert(event.locationInWindow, from: nil)
@@ -323,7 +323,7 @@ final class InsetView: NSView, CallControlsDelegate {
         dragging = false
     }
 
-    override func mouseDragged(with event: NSEvent) {
+    package override func mouseDragged(with event: NSEvent) {
         guard host == .stage, let onDrag, let d = downAt, let start = downInSuperview,
             let p = superview?.convert(event.locationInWindow, from: nil)
         else { return }
@@ -336,7 +336,7 @@ final class InsetView: NSView, CallControlsDelegate {
         onDrag(.moved, p)
     }
 
-    override func mouseUp(with event: NSEvent) {
+    package override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         defer {
             downAt = nil
@@ -353,7 +353,7 @@ final class InsetView: NSView, CallControlsDelegate {
 
     /// The inset's menu: Pop Out Call for a call's inset and Reset Position
     /// over the stage, Pop In Call in a call window.
-    override func menu(for event: NSEvent) -> NSMenu? {
+    package override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
         switch host {
         case .stage:
@@ -371,7 +371,7 @@ final class InsetView: NSView, CallControlsDelegate {
         return menu
     }
 
-    override func updateTrackingAreas() {
+    package override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
         let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
@@ -379,8 +379,8 @@ final class InsetView: NSView, CallControlsDelegate {
         tracking = t
     }
 
-    override func mouseEntered(with event: NSEvent) { onHover(true) }
-    override func mouseExited(with event: NSEvent) { onHover(false) }
+    package override func mouseEntered(with event: NSEvent) { onHover(true) }
+    package override func mouseExited(with event: NSEvent) { onHover(false) }
 
     @objc private func closeClicked() { onClose() }
     @objc private func unmuteClicked() { callDelegate?.callUnmute() }
@@ -398,25 +398,25 @@ final class InsetView: NSView, CallControlsDelegate {
     }
 
     /// The self-test clicks the Unmute control.
-    var unmuteShown: Bool { !unmute.isHidden }
+    package var unmuteShown: Bool { !unmute.isHidden }
     /// The self-test reads whether the header offers Pop Out or Pop In.
-    var popShown: Bool { !pop.isHidden }
+    package var popShown: Bool { !pop.isHidden }
 
-    func callUnmute() { callDelegate?.callUnmute() }
-    func callTalk(_ down: Bool) { callDelegate?.callTalk(down) }
-    func callLatch(_ on: Bool) { callDelegate?.callLatch(on) }
-    func callDraft(_ text: String) { callDelegate?.callDraft(text) }
-    func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callDelegate?.callSend(text, accepted: accepted) }
+    package func callUnmute() { callDelegate?.callUnmute() }
+    package func callTalk(_ down: Bool) { callDelegate?.callTalk(down) }
+    package func callLatch(_ on: Bool) { callDelegate?.callLatch(on) }
+    package func callDraft(_ text: String) { callDelegate?.callDraft(text) }
+    package func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callDelegate?.callSend(text, accepted: accepted) }
 }
 
 /// The call's controls: Talk (held, or kept on with the toggle), the
 /// talk-back state, the live transcript, and a typed reply.
 @MainActor
-final class CallPanelView: NSView, NSTextFieldDelegate {
-    weak var delegate: CallControlsDelegate?
+package final class CallPanelView: NSView, NSTextFieldDelegate {
+    package weak var delegate: CallControlsDelegate?
     /// The captions above the Talk row (a call window: docs/CAPTURE.md);
     /// an inset keeps Talk first.
-    var captionsFirst = false {
+    package var captionsFirst = false {
         didSet { needsLayout = true }
     }
 
@@ -428,9 +428,9 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
     private let send = NSButton(title: "Send", target: nil, action: nil)
     private var content: CallContent?
 
-    override var isFlipped: Bool { true }
+    package override var isFlipped: Bool { true }
 
-    init() {
+    package init() {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.92).cgColor
@@ -470,9 +470,9 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    func apply(_ c: CallContent) {
+    package func apply(_ c: CallContent) {
         guard c != content else { return }
         content = c
         var line = c.talkText
@@ -488,17 +488,17 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
         if reply.currentEditor() == nil, reply.stringValue != c.draft { reply.stringValue = c.draft }
     }
 
-    func controlTextDidChange(_ obj: Notification) { delegate?.callDraft(reply.stringValue) }
+    package func controlTextDidChange(_ obj: Notification) { delegate?.callDraft(reply.stringValue) }
 
     /// "Keep talking" shows on (self-test).
-    var keepTalkingShown: Bool { keep.state == .on }
+    package var keepTalkingShown: Bool { keep.state == .on }
     /// What the reply field shows (self-test).
-    var replyText: String { reply.stringValue }
+    package var replyText: String { reply.stringValue }
     /// The reply field is being edited (Esc leaves it rather than ending
     /// the call).
-    var isEditingReply: Bool { reply.currentEditor() != nil }
+    package var isEditingReply: Bool { reply.currentEditor() != nil }
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         let w = bounds.width, pad: CGFloat = 8
         let talkY: CGFloat = captionsFirst ? 60 : 6
@@ -525,10 +525,10 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
 
 /// A button that reports press and release (push to talk).
 @MainActor
-final class PushToTalkButton: NSButton {
-    var onPress: (Bool) -> Void = { _ in }
+package final class PushToTalkButton: NSButton {
+    package var onPress: (Bool) -> Void = { _ in }
 
-    override func mouseDown(with event: NSEvent) {
+    package override func mouseDown(with event: NSEvent) {
         highlight(true)
         onPress(true)
         // Tracks until the button is released, wherever the pointer goes.

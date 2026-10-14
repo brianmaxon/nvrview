@@ -2,6 +2,7 @@ import AppKit
 import NVRCore
 import SwiftUI
 import AppBase
+import AppCapture
 
 /// The Recordings window (docs/UX.md "Recordings"): Window > Recordings
 /// (⌥⌘R). The player in the middle with its transport and the day's
@@ -285,7 +286,7 @@ package struct IndexStateText: View {
 
 package struct DeviceCameraToggles: View {
     package let model: RecordingsModel
-    package let app: any RecordingsHost
+    package let app: any CaptureHost
     package let device: DeviceRuntime
 
     package var body: some View {
@@ -314,7 +315,7 @@ package struct DeviceCameraToggles: View {
         .toggleStyle(.checkbox)
     }
 
-    package init(model: RecordingsModel, app: any RecordingsHost, device: DeviceRuntime) {
+    package init(model: RecordingsModel, app: any CaptureHost, device: DeviceRuntime) {
         self.model = model
         self.app = app
         self.device = device

@@ -8,23 +8,23 @@ import AppAlerts
 
 /// One window's arrangement and what the user is doing with it.
 @MainActor
-final class WindowState {
-    var content: WindowContent
-    var name: String
+package final class WindowState {
+    package var content: WindowContent
+    package var name: String
     /// The arrangement shown. Every leaf has a tile identity
     /// (`LayoutNode.withTileIDs`, given on every set), and the views of
     /// tiles no longer in it are forgotten.
-    var tree: LayoutNode {
+    package var tree: LayoutNode {
         didSet {
             let named = tree.withTileIDs
             if named != tree { tree = named }
             views.prune(layout: viewsKey, tree: tree)
         }
     }
-    var selected: NodePath?
+    package var selected: NodePath?
     /// The focused tile (also during the animations in and out).
-    var focused: NodePath?
-    var editing = false
+    package var focused: NodePath?
+    package var editing = false
     /// The window's Fill Tiles switch, and per tile its digital zoom (or
     /// at 1x its filled crop's position) and own Fill choice, in picture
     /// coordinates (docs/UX.md "Digital zoom", "Fill Tiles"). Keyed by
@@ -33,26 +33,26 @@ final class WindowState {
     /// the switch to the main stream, moves with its camera in a swap, and
     /// starts over when its tile is given another camera. Saved with the
     /// window.
-    var views = TileViews<TileKey>()
+    package var views = TileViews<TileKey>()
     /// Whether the window's switch is on (tiles without their own choice
     /// fill).
-    var fill: Bool { views.fill }
+    package var fill: Bool { views.fill }
 
-    init(content: WindowContent, name: String, tree: LayoutNode) {
+    package init(content: WindowContent, name: String, tree: LayoutNode) {
         self.content = content
         self.name = name
         self.tree = tree.withTileIDs
     }
 
     /// The name this content's tile views go by.
-    var viewsKey: String { content.viewsKey }
+    package var viewsKey: String { content.viewsKey }
 
     /// The view key of the tile at `path` (nil while it shows no camera).
-    func viewKey(_ path: NodePath) -> TileKey? { tree.tileKey(at: path, layout: viewsKey) }
+    package func viewKey(_ path: NodePath) -> TileKey? { tree.tileKey(at: path, layout: viewsKey) }
 
     /// The window shows `content` under another name (an unsaved
     /// arrangement saved, a group edited): the views go along.
-    func rename(to content: WindowContent) {
+    package func rename(to content: WindowContent) {
         views.rename(layout: viewsKey, to: content.viewsKey)
         self.content = content
     }
@@ -60,7 +60,7 @@ final class WindowState {
 
 extension WindowContent {
     /// The name the window's tile views go by for this content.
-    var viewsKey: String {
+    package var viewsKey: String {
         switch self {
         case .layout(let id): TileKey.layoutKey(layout: id)
         case .group(let id): TileKey.layoutKey(group: id)
@@ -71,7 +71,7 @@ extension WindowContent {
 
 /// What the stage asks its owner to do.
 @MainActor
-protocol StageDelegate: AnyObject {
+package protocol StageDelegate: AnyObject {
     /// The tree changed by a finished gesture (resize, swap, split, ...).
     func stage(_ stage: StageView, didEdit tree: LayoutNode)
     /// Selection, focus or hover state changed (menus, toolbar).
@@ -91,53 +91,53 @@ protocol StageDelegate: AnyObject {
 /// sub-stream back at once and shrinks the tile while the main stream keeps
 /// showing.
 @MainActor
-final class StageView: NSView {
-    static let focusDuration = FocusAnimation.defaultDuration
+package final class StageView: NSView {
+    package static let focusDuration = FocusAnimation.defaultDuration
 
-    let model: AppModel
-    let state: WindowState
-    weak var delegate: StageDelegate?
-    let grid: MetalGridView
+    package let model: any StageHost
+    package let state: WindowState
+    package weak var delegate: StageDelegate?
+    package let grid: MetalGridView
     private let overlay = StageOverlay()
     /// The view over the tiles that holds their chrome.
-    var tileOverlay: NSView { overlay }
-    private(set) var chromes: [NodePath: TileChromeView] = [:]
-    private(set) var frames = LayoutFrames(leaves: [], dividers: [])
+    package var tileOverlay: NSView { overlay }
+    package private(set) var chromes: [NodePath: TileChromeView] = [:]
+    package private(set) var frames = LayoutFrames(leaves: [], dividers: [])
     private var lastKey: RenderKey?
     /// The call window's stage (docs/CAPTURE.md, "The call window is a
     /// regular tile"): one leaf, no layout editing, split, swap, focus,
     /// Show Camera, Remove or Clear, no alert insets, and the selection is
     /// always that tile. Its owner holds the camera's lease.
-    let fixedTile: Bool
+    package let fixedTile: Bool
     /// The fixed tile asks for the main stream (Auto, by the drawn size
     /// and zoom: `CallWindowQuality`).
-    private(set) var fixedAsksMain = false
+    package private(set) var fixedAsksMain = false
     /// The fixed tile's sub-stream picture width, once it showed one.
     private var fixedSubWidth: Double?
     /// The short message over the stage ("… is coming soon").
-    let toast = ToastView()
+    package let toast = ToastView()
     /// When the toast goes, on the stage's clock.
-    var toastHideAt: Double?
+    package var toastHideAt: Double?
     /// The camera motion popover (pan pad or lens sliders) and what drives it.
-    var ptzPopover: NSPopover?
-    var ptzPopoverController: PTZPopoverController?
-    var ptzObserver: Int?
+    package var ptzPopover: NSPopover?
+    package var ptzPopoverController: PTZPopoverController?
+    package var ptzObserver: Int?
     /// The pictures this stage saved, the last one with what it was made
     /// from (self-test).
-    var pictureSaves = 0
-    var lastPictureSave: PictureSaveRecord?
+    package var pictureSaves = 0
+    package var lastPictureSave: PictureSaveRecord?
 
     /// Wired by the alert work (docs/UX.md "Alerts"): whether a camera has
     /// an active alert (its tile's header then stays shown, also in full
     /// screen while the other chrome hides), and how to dismiss it (Return
     /// on the selected tile).
-    var alertActive: (CameraRef) -> Bool = { _ in false }
-    var dismissAlert: (CameraRef) -> Void = { _ in }
+    package var alertActive: (CameraRef) -> Bool = { _ in false }
+    package var dismissAlert: (CameraRef) -> Void = { _ in }
 
     /// Whether the window is in full screen: there the chrome, including
     /// the pointer, hides after a few idle seconds (docs/UX.md "Full screen
     /// chrome"). Set by the window controller.
-    var fullScreen = false {
+    package var fullScreen = false {
         didSet {
             guard fullScreen != oldValue else { return }
             noteInteraction()
@@ -146,14 +146,14 @@ final class StageView: NSView {
     }
     /// Whether hiding the chrome in full screen also hides the pointer (the
     /// self-test turns it off: it never touches the user's pointer).
-    var hidesPointer = true
+    package var hidesPointer = true
     /// The clock every animation and timeout of the stage reads (the
     /// model's: the system clock in the app, a manual one in the self-test).
-    let clock: any ViewerClock
+    package let clock: any ViewerClock
     /// When the chrome hides; seconds of no interaction.
-    private(set) var idle: ChromeIdle
+    package private(set) var idle: ChromeIdle
     /// The overlay chrome is shown (not hidden for idleness).
-    var chromeVisible: Bool { idle.visible }
+    package var chromeVisible: Bool { idle.visible }
     private var insets: [NodePath: ZoomInsetView] = [:]
     /// Mouse-wheel zoom easing toward a target scale, per tile view, around
     /// a point of the shown picture.
@@ -164,78 +164,83 @@ final class StageView: NSView {
     /// layout (once it rests), on the stage's clock.
     private var fisheyeSaveDue: Double?
     /// The picture's layout size per camera, from the last refresh.
-    var pictureSizes: [CameraRef: CGSize] = [:]
+    package var pictureSizes: [CameraRef: CGSize] = [:]
 
     private var focusAnimation = FocusAnimation(duration: StageView.focusDuration)
     /// The camera this stage told the leases it focuses.
     private var focusedCamera: CameraRef?
     /// A tile of this stage as the leases know it (stream quality demands).
     private struct DemandOwner: Hashable {
-        let stage: ObjectIdentifier
-        let path: NodePath
+        package let stage: ObjectIdentifier
+        package let path: NodePath
+
+        package init(stage: ObjectIdentifier, path: NodePath) {
+            self.stage = stage
+            self.path = path
+        }
     }
     private var demandOwners: Set<DemandOwner> = []
 
     // Live smart-alert checks (docs/UX.md "Smart alerts"; StageView+Verify.swift):
     // a band in each tile showing a checked camera, an overlay on each
     // verification inset.
-    var verifyBands: [NodePath: VerificationOverlayView] = [:]
-    var verifyInsetOverlays: [CameraRef: VerificationOverlayView] = [:]
-    var verifyToken: UUID?
+    package var verifyBands: [NodePath: VerificationOverlayView] = [:]
+    package var verifyInsetOverlays: [CameraRef: VerificationOverlayView] = [:]
+    package var verifyToken: UUID?
     /// Where each live check was first placed in this window (tile or
     /// inset): it keeps that place until it ends, however the stage changes
     /// (focus, a swap, another layout), so it does not jump around.
-    var verifyPlaced: [UInt64: VerifyPlace] = [:]
+    package var verifyPlaced: [UInt64: VerifyPlace] = [:]
     /// The placement setting `verifyPlaced` was decided under (choosing another
     /// in Settings places the live checks again).
-    var verifyPlacedFor: VerifyPlacementSetting?
+    package var verifyPlacedFor: VerifyPlacementSetting?
 
     // Alert insets (docs/UX.md "Alert insets"; StageView+Insets.swift).
-    var insetBoard = InsetBoard()
-    var alertInsetViews: [CameraRef: InsetView] = [:]
+    package var insetBoard = InsetBoard()
+    package var alertInsetViews: [CameraRef: InsetView] = [:]
     /// Where each drawn inset's picture goes, in the overlay's coordinates.
-    var insetVideoRects: [CameraRef: CGRect] = [:]
-    let moreChip = MoreChipView(labelWithString: "")
+    package var insetVideoRects: [CameraRef: CGRect] = [:]
+    package let moreChip = MoreChipView(labelWithString: "")
     /// This window's own inset grid; nil: the Settings default
     /// (`effectiveInsetGrid`). Saved with the window.
-    var insetGridOverride: InsetGridSetting? {
+    package var insetGridOverride: InsetGridSetting? {
         didSet { if insetGridOverride != oldValue { syncInsets() } }
     }
     /// The grid the board and layout were last given.
-    var appliedInsetGrid = InsetGridSetting.standard
+    package var appliedInsetGrid = InsetGridSetting.standard
     /// The user chose the window's grid (save the window).
-    var onInsetGridChange: () -> Void = {}
+    package var onInsetGridChange: () -> Void = {}
     /// Whether the last layout left drawn insets out for lack of room.
-    var insetsTruncated = false
+    package var insetsTruncated = false
     /// Holds the insets above the tiles' chrome (top-left origin; clicks
     /// between insets reach the stage).
-    let insetLayer = PassThroughView()
+    package let insetLayer = PassThroughView()
     /// The swapped-in camera's header and a doorbell call over the stage.
-    let stageCall = StageCallView()
+    package let stageCall = StageCallView()
     /// The leases the insets and the swapped-in camera hold.
-    var insetHeld: [CameraRef: Int] = [:]
-    var detectionToken: UUID?
+    package var insetHeld: [CameraRef: Int] = [:]
+    package var detectionToken: UUID?
     /// The swapped-in camera, as the leases know its demand (main stream).
-    var takeoverCamera: CameraRef?
+    package var takeoverCamera: CameraRef?
     /// Each open call's presentation as this window last saw it (a call
     /// that pops in gets its inset here even if the window had no item).
-    var seenCallPresentations: [CameraRef: CallPresentation] = [:]
+    package var seenCallPresentations: [CameraRef: CallPresentation] = [:]
     /// Where the user moved this window's inset column (saved with the
     /// window); nil: the default corner.
-    var insetAnchor: InsetAnchor? {
+    package var insetAnchor: InsetAnchor? {
         didSet { if insetAnchor != oldValue { layoutInsetViews() } }
     }
     /// The column's position while it is being dragged.
-    var insetDragAnchor: InsetAnchor?
+    package var insetDragAnchor: InsetAnchor?
     /// Where a column drag started: the pointer and the column's frame.
-    var insetDragStart: (pointer: CGPoint, column: CGRect)?
+    package var insetDragStart: (pointer: CGPoint, column: CGRect)?
     /// The inset column's frame as last laid out (nil: no inset drawn).
-    var insetColumn: CGRect?
+    package var insetColumn: CGRect?
     /// The user moved the column or reset its position (save the window).
-    var onInsetAnchorChange: () -> Void = {}
+    package var onInsetAnchorChange: () -> Void = {}
     /// The window's picture settings changed (a zoom, a pan, a Fill
     /// choice): the owner saves the window (debounced there).
-    var onViewsChanged: () -> Void = {}
+    package var onViewsChanged: () -> Void = {}
 
     private enum Gesture {
         case divider(NodePath)
@@ -251,9 +256,9 @@ final class StageView: NSView {
     /// The leaf each of the renderer's tiles draws, in its order.
     private var renderedPaths: [NodePath] = []
 
-    var gap: CGFloat { state.editing ? 6 : 2 }
+    package var gap: CGFloat { state.editing ? 6 : 2 }
 
-    init(model: AppModel, state: WindowState, renderer: GridRenderer, fixedTile: Bool = false) {
+    package init(model: any StageHost, state: WindowState, renderer: GridRenderer, fixedTile: Bool = false) {
         self.model = model
         self.state = state
         self.fixedTile = fixedTile
@@ -312,9 +317,9 @@ final class StageView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
-    override var acceptsFirstResponder: Bool { true }
+    package override var acceptsFirstResponder: Bool { true }
 
     // MARK: Layout
 
@@ -326,7 +331,7 @@ final class StageView: NSView {
     }
 
     /// Recomputes the frames and rebuilds chrome for the current tree.
-    func reload() {
+    package func reload() {
         frames = state.tree.frames(in: overlay.bounds, gap: gap)
         if let s = state.selected, state.tree[s]?.isLeaf != true { state.selected = nil }
         if let f = state.focused, state.tree[f]?.isLeaf != true {
@@ -371,7 +376,7 @@ final class StageView: NSView {
         if verifyToken != nil { syncVerification() }
     }
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         frames = state.tree.frames(in: overlay.bounds, gap: gap)
         layoutChrome()
@@ -398,7 +403,7 @@ final class StageView: NSView {
     }
 
     /// Lays the tiles' chrome out again (the swap hides it).
-    func relayoutChrome() { layoutChrome() }
+    package func relayoutChrome() { layoutChrome() }
 
     /// Places and updates the zoom maps: shown while the tile is zoomed and
     /// the chrome is up.
@@ -425,7 +430,7 @@ final class StageView: NSView {
     }
 
     /// Re-reads names, badges, veils and listening from the model.
-    func refreshChrome() {
+    package func refreshChrome() {
         refreshInsets()
         for leaf in frames.leaves {
             guard let view = chromes[leaf.path] else { continue }
@@ -474,20 +479,20 @@ final class StageView: NSView {
 
     /// Whether the tile at `path` is zoomed past 1x, or shows a moved
     /// virtual camera (its Reset Zoom applies).
-    func isZoomed(_ path: NodePath) -> Bool {
+    package func isZoomed(_ path: NodePath) -> Bool {
         if fisheyeMode(path) != nil { return state.tree[path]?.fisheye.aim != nil }
         return state.viewKey(path).map { state.views.zoom($0).isZoomed } == true
     }
 
     /// Whether the tile at `path` shows a filled picture's crop moved off
     /// center at 1x (its Reset Position applies).
-    func isPanned(_ path: NodePath) -> Bool {
+    package func isPanned(_ path: NodePath) -> Bool {
         guard fisheyeMode(path) == nil, let key = state.viewKey(path) else { return false }
         return state.views.fills(key) && state.views.zoom(key).isPanned
     }
 
     /// The rate the first tile showing `camera` drew new pictures at.
-    func shownRate(of camera: CameraRef) -> Double? {
+    package func shownRate(of camera: CameraRef) -> Double? {
         guard let path = frames.leaves.first(where: { $0.camera == camera })?.path,
             let i = renderedPaths.firstIndex(of: path)
         else { return nil }
@@ -505,7 +510,7 @@ final class StageView: NSView {
         return FrameRateText.make(device: device, shown: shown, displayHz: hz, switchNote: note)
     }
 
-    static func color(for kind: String) -> NSColor {
+    package static func color(for kind: String) -> NSColor {
         switch kind {
         case "people", "face": NSColor(calibratedRed: 0.24, green: 0.48, blue: 1, alpha: 1)
         case "vehicle": NSColor(calibratedRed: 0.9, green: 0.54, blue: 0.18, alpha: 1)
@@ -520,12 +525,21 @@ final class StageView: NSView {
     // MARK: Drawing (every display refresh)
 
     private struct RenderKey: Equatable {
-        var tiles: [ObjectIdentifier]
-        var rects: [CGRect]
-        var versions: [UInt64]
-        var sizes: [CGSize]
-        var zooms: [TileZoom]
-        var dewarps: [DewarpConstants?]
+        package var tiles: [ObjectIdentifier]
+        package var rects: [CGRect]
+        package var versions: [UInt64]
+        package var sizes: [CGSize]
+        package var zooms: [TileZoom]
+        package var dewarps: [DewarpConstants?]
+
+        package init(tiles: [ObjectIdentifier], rects: [CGRect], versions: [UInt64], sizes: [CGSize], zooms: [TileZoom], dewarps: [DewarpConstants?]) {
+            self.tiles = tiles
+            self.rects = rects
+            self.versions = versions
+            self.sizes = sizes
+            self.zooms = zooms
+            self.dewarps = dewarps
+        }
     }
 
     /// Called by the Metal view on every refresh with the drawable size in
@@ -642,22 +656,22 @@ final class StageView: NSView {
 
     /// The source rectangles the renderer samples now, by leaf (tests and
     /// the self-test check them against the zoom).
-    func renderedSource(of path: NodePath) -> CGRect? {
+    package func renderedSource(of path: NodePath) -> CGRect? {
         guard let i = renderedPaths.firstIndex(of: path), i < grid.renderer.tiles.count else { return nil }
         return grid.renderer.tiles[i].source
     }
 
     // MARK: Focus
 
-    var isFocused: Bool { state.focused != nil }
+    package var isFocused: Bool { state.focused != nil }
 
     /// A pointer gesture (divider drag, tile drag, pan) is in progress: the
     /// tree on screen may differ from the stored layout until it ends.
-    var isInteracting: Bool { gesture != nil }
+    package var isInteracting: Bool { gesture != nil }
     /// A focus animation is running (self-test).
-    var isAnimatingFocus: Bool { focusAnimation.isRunning }
+    package var isAnimatingFocus: Bool { focusAnimation.isRunning }
     /// A mouse-wheel zoom is still easing (self-test).
-    var isEasingZoom: Bool { zoomEasing.isEasing }
+    package var isEasingZoom: Bool { zoomEasing.isEasing }
 
     // MARK: Time
 
@@ -667,7 +681,7 @@ final class StageView: NSView {
     /// timer now and then (a window behind others gets few refreshes, and
     /// what is time-based must still finish); the self-test calls it after
     /// advancing its clock.
-    func tick(now: Double) {
+    package func tick(now: Double) {
         stepFocus(now: now)
         stepZoom(now: now)
         stepFisheye(now: now)
@@ -680,9 +694,9 @@ final class StageView: NSView {
     }
 
     /// `tick(now:)` at the clock's time.
-    func tick() { tick(now: clock.now) }
+    package func tick() { tick(now: clock.now) }
 
-    func toggleFocus(_ path: NodePath? = nil) {
+    package func toggleFocus(_ path: NodePath? = nil) {
         guard !fixedTile else { return }
         if state.focused != nil {
             unfocus()
@@ -693,7 +707,7 @@ final class StageView: NSView {
         }
     }
 
-    func focus(_ path: NodePath) {
+    package func focus(_ path: NodePath) {
         guard !fixedTile, !state.editing, state.tree[path]?.camera != nil || frames.leaves.count > 1 else { return }
         state.selected = path
         state.focused = path
@@ -703,7 +717,7 @@ final class StageView: NSView {
         delegate?.stageDidChangeState(self)
     }
 
-    func unfocus() {
+    package func unfocus() {
         guard state.focused != nil else { return }
         // The grid's stream is asked for at once; the main stream keeps
         // showing until it is there, while the tile shrinks back.
@@ -763,7 +777,7 @@ final class StageView: NSView {
 
     /// Moves the selection to the tile in `direction` by position; in focus,
     /// focuses that tile instead.
-    func moveSelection(_ direction: MoveDirection) {
+    package func moveSelection(_ direction: MoveDirection) {
         guard !fixedTile else { return }
         if let f = state.focused {
             guard !focusAnimation.isRunning, let n = frames.neighbor(of: f, direction) else { return }
@@ -783,7 +797,7 @@ final class StageView: NSView {
 
     /// Return: dismisses the selected tile's alert if it has one, else
     /// toggles focus.
-    func confirm() {
+    package func confirm() {
         if let camera = selectedCamera, alertActive(camera) {
             dismissAlert(camera)
             refreshChrome()
@@ -795,7 +809,7 @@ final class StageView: NSView {
     // MARK: Chrome auto-hide (docs/UX.md "Full screen chrome")
 
     /// A pointer move, click, key or scroll in the window.
-    func noteInteraction() {
+    package func noteInteraction() {
         guard idle.interact(now: clock.now) else { return }
         // Back: the outline and maps fade in; in full screen, the header of
         // the tile under the pointer too (moving the pointer also does that).
@@ -808,7 +822,7 @@ final class StageView: NSView {
 
     /// The seconds of idleness before the chrome hides (the self-test
     /// shortens it).
-    var chromeHideDelay: Double {
+    package var chromeHideDelay: Double {
         get { idle.delay }
         set { idle.delay = newValue }
     }
@@ -827,19 +841,19 @@ final class StageView: NSView {
     }
 
     /// Shows a tile's header as hovering does (self-test).
-    func showHeader(_ path: NodePath) { chromes[path]?.showChrome() }
+    package func showHeader(_ path: NodePath) { chromes[path]?.showChrome() }
 
     /// Whether a tile's header is shown (self-test).
-    func headerShown(_ path: NodePath) -> Bool? { chromes[path]?.isHeaderShown }
+    package func headerShown(_ path: NodePath) -> Bool? { chromes[path]?.isHeaderShown }
 
     /// Whether a tile's veil shows its Retry button (self-test).
-    func retryShown(_ path: NodePath) -> Bool? { chromes[path]?.isRetryShown }
+    package func retryShown(_ path: NodePath) -> Bool? { chromes[path]?.isRetryShown }
 
     /// Presses a tile's Retry button, as a click would (self-test).
-    func pressRetry(_ path: NodePath) { chromes[path]?.pressRetry() }
+    package func pressRetry(_ path: NodePath) { chromes[path]?.pressRetry() }
 
     /// Whether a tile's zoom map is shown (self-test).
-    func zoomMapShown(_ path: NodePath) -> Bool? { insets[path]?.isShown }
+    package func zoomMapShown(_ path: NodePath) -> Bool? { insets[path]?.isShown }
 
     private var pointerInOverlay: CGPoint? {
         guard let window else { return nil }
@@ -900,13 +914,13 @@ final class StageView: NSView {
     }
 
     /// The zoom of the tile at `path` (1x if none, or without a camera).
-    func zoom(atTile path: NodePath) -> TileZoom { state.viewKey(path).map { state.views.zoom($0) } ?? .none }
+    package func zoom(atTile path: NodePath) -> TileZoom { state.viewKey(path).map { state.views.zoom($0) } ?? .none }
 
     /// Whether the tile at `path` fills (its own choice, else the window's).
-    func fills(atTile path: NodePath) -> Bool { state.viewKey(path).map { state.views.fills($0) } ?? state.fill }
+    package func fills(atTile path: NodePath) -> Bool { state.viewKey(path).map { state.views.fills($0) } ?? state.fill }
 
     /// Fill Tile for one tile (the tile menu): it fills or fits.
-    func setFill(_ fills: Bool, atTile path: NodePath) {
+    package func setFill(_ fills: Bool, atTile path: NodePath) {
         guard let key = state.viewKey(path), state.views.fills(key) != fills else { return }
         state.views.setFill(fills, for: key)
         fillChanged()
@@ -914,14 +928,14 @@ final class StageView: NSView {
 
     /// Fill Tiles for the window: every tile follows (the tiles' own
     /// choices are cleared).
-    func setWindowFill(_ fills: Bool) {
+    package func setWindowFill(_ fills: Bool) {
         state.views.setWindowFill(fills)
         fillChanged()
     }
 
     /// Whether a tile of the window's content has a Fill choice of its own
     /// (the menu's switch shows mixed).
-    var fillMixed: Bool { state.views.mixed(layout: state.viewsKey) }
+    package var fillMixed: Bool { state.views.mixed(layout: state.viewsKey) }
 
     private func fillChanged() {
         refreshChrome()
@@ -937,7 +951,7 @@ final class StageView: NSView {
     /// Whether a plain drag on the picture of the tile `leaf` moves the
     /// picture (zoomed in, or a filled picture with part hidden) instead of
     /// swapping the tile.
-    func picturePans(_ leaf: LeafFrame) -> Bool {
+    package func picturePans(_ leaf: LeafFrame) -> Bool {
         guard let camera = leaf.camera, let key = state.viewKey(leaf.path), fisheyeMode(leaf.path) == nil,
             let picture = pictureSizes[camera]
         else { return false }
@@ -946,7 +960,7 @@ final class StageView: NSView {
 
     /// Zooms the tile at `p` by `factor` around `p`: at once (pinch), or
     /// eased over the next refreshes (a mouse-wheel notch).
-    func zoom(at p: CGPoint, by factor: Double, eased: Bool) {
+    package func zoom(at p: CGPoint, by factor: Double, eased: Bool) {
         if let leaf = drawnLeaf(at: p), fisheyeMode(leaf.path) != nil {
             zoomFisheye(leaf.path, by: factor, eased: eased)
             return
@@ -964,7 +978,7 @@ final class StageView: NSView {
     }
 
     /// Pans the tile at `p` by `delta` points (the picture follows).
-    func pan(at p: CGPoint, by delta: CGVector) {
+    package func pan(at p: CGPoint, by delta: CGVector) {
         if let leaf = drawnLeaf(at: p), fisheyeMode(leaf.path) != nil {
             noteInteraction()
             turnFisheye(leaf.path, by: delta, size: leaf.rect.size)
@@ -983,7 +997,7 @@ final class StageView: NSView {
 
     /// Back to 1x for the tile at `path` (its reset control): eased, or at
     /// once (`eased` false: the self-test, which keeps its clock still).
-    func resetZoom(at path: NodePath, eased: Bool = true) {
+    package func resetZoom(at path: NodePath, eased: Bool = true) {
         if fisheyeMode(path) != nil {
             resetFisheye(path)
             return
@@ -994,7 +1008,7 @@ final class StageView: NSView {
 
     /// 0: back to 1x on the selected (or focused) tile; a dewarped fisheye
     /// tile back to its default view.
-    func resetSelectedZoom() {
+    package func resetSelectedZoom() {
         guard let path = selectedPath else { return }
         resetZoom(at: path)
     }
@@ -1035,7 +1049,7 @@ final class StageView: NSView {
     /// replaced (another layout, group, or camera). Unlike `tearDown` the
     /// stage keeps drawing: tearing it down here left the video surface
     /// showing the old arrangement under the new tiles.
-    func cancelFocus() {
+    package func cancelFocus() {
         guard state.focused != nil else { return }
         endFocusImmediately()
         syncDemands()
@@ -1043,7 +1057,7 @@ final class StageView: NSView {
 
     /// The window is closing: ends focus, withdraws every stream request,
     /// and stops the renderer asking this stage for frames.
-    func tearDown() {
+    package func tearDown() {
         tearDownVerification()
         tearDownInsets()
         endFocusImmediately()
@@ -1075,7 +1089,7 @@ final class StageView: NSView {
     }
 
     /// Sets the quality of the tile at `path`; saved with the layout.
-    func setQuality(_ quality: TileQuality, at path: NodePath) {
+    package func setQuality(_ quality: TileQuality, at path: NodePath) {
         edit { $0.settingQuality(quality, at: path) }
     }
 
@@ -1083,7 +1097,7 @@ final class StageView: NSView {
 
     /// The dewarped view of the tile at `path`, or nil when it shows its
     /// picture as is (not a fisheye camera, or Original).
-    func fisheyeMode(_ path: NodePath) -> FisheyeViewMode? {
+    package func fisheyeMode(_ path: NodePath) -> FisheyeViewMode? {
         guard let camera = state.tree[path]?.camera, model.isFisheye(camera) else { return nil }
         let mode = state.tree[path]?.fisheye.mode ?? .original
         return mode.dewarps ? mode : nil
@@ -1091,7 +1105,7 @@ final class StageView: NSView {
 
     /// The dewarp of the tile at `path` drawn `tileSize` pixels big, or nil
     /// when it draws its picture as is (also until the circle is known).
-    func fisheyeDewarp(camera: CameraRef, path: NodePath, picture: DecodedPicture?, tileSize: CGSize) -> FisheyeDewarp? {
+    package func fisheyeDewarp(camera: CameraRef, path: NodePath, picture: DecodedPicture?, tileSize: CGSize) -> FisheyeDewarp? {
         guard let mode = fisheyeMode(path), let lens = model.fisheyeLens(camera, picture: picture) else { return nil }
         let mount = model.cameraOptions(camera).fisheyeMount
         let setting = state.tree[path]?.fisheye ?? .original
@@ -1099,7 +1113,7 @@ final class StageView: NSView {
     }
 
     /// The dewarp a tile drew last, at its size then (self-test).
-    func fisheyeDewarp(of path: NodePath) -> FisheyeDewarp? {
+    package func fisheyeDewarp(of path: NodePath) -> FisheyeDewarp? {
         guard let i = renderedPaths.firstIndex(of: path), i < grid.renderer.tiles.count,
             grid.renderer.tiles[i].dewarp != nil,
             let camera = state.tree[path]?.camera, let tile = model.leases.tile(for: camera)
@@ -1109,7 +1123,7 @@ final class StageView: NSView {
     }
 
     /// Where a tile is drawn in the drawable's pixels (self-test).
-    func renderedDestination(of path: NodePath) -> CGRect? {
+    package func renderedDestination(of path: NodePath) -> CGRect? {
         guard let i = renderedPaths.firstIndex(of: path), i < grid.renderer.tiles.count else { return nil }
         return grid.renderer.tiles[i].destination
     }
@@ -1119,7 +1133,7 @@ final class StageView: NSView {
     }
 
     /// Sets the view of the tile at `path`; saved with the layout.
-    func setFisheyeMode(_ mode: FisheyeViewMode, at path: NodePath) {
+    package func setFisheyeMode(_ mode: FisheyeViewMode, at path: NodePath) {
         fisheyeEasing.cancel(path)
         let aim = state.tree[path]?.fisheye.aim
         edit { $0.settingFisheye(FisheyeTileSetting(mode: mode, aim: aim), at: path) }
@@ -1144,7 +1158,7 @@ final class StageView: NSView {
 
     /// A drag (or two-finger scroll) of `delta` points in a tile `size`
     /// points big turns its view; the picture follows the pointer.
-    func turnFisheye(_ path: NodePath, by delta: CGVector, size: CGSize) {
+    package func turnFisheye(_ path: NodePath, by delta: CGVector, size: CGSize) {
         guard let mode = fisheyeMode(path) else { return }
         let m = mount(path)
         let aim = (state.tree[path]?.fisheye ?? .original).aim(for: m)
@@ -1152,7 +1166,7 @@ final class StageView: NSView {
     }
 
     /// The wheel or a pinch: Virtual PTZ zooms (eased for a wheel notch).
-    func zoomFisheye(_ path: NodePath, by factor: Double, eased: Bool) {
+    package func zoomFisheye(_ path: NodePath, by factor: Double, eased: Bool) {
         guard fisheyeMode(path) == .ptz else { return }
         noteInteraction()
         let m = mount(path)
@@ -1190,10 +1204,10 @@ final class StageView: NSView {
     }
 
     /// Whether a fisheye zoom is still easing (self-test).
-    var isEasingFisheye: Bool { fisheyeEasing.isEasing }
+    package var isEasingFisheye: Bool { fisheyeEasing.isEasing }
 
     /// Fisheye View ▸ Original, Panorama, Double Panorama, Quad, Virtual PTZ.
-    func fisheyeMenuItem(path: NodePath) -> NSMenuItem {
+    package func fisheyeMenuItem(path: NodePath) -> NSMenuItem {
         let current = state.tree[path]?.fisheye.mode ?? .original
         let sub = NSMenu()
         for mode in FisheyeViewMode.allCases {
@@ -1214,7 +1228,7 @@ final class StageView: NSView {
     }
 
     /// Fisheye Mount ▸ Ceiling, Wall, Desk (per camera).
-    func mountMenuItem(camera: CameraRef) -> NSMenuItem {
+    package func mountMenuItem(camera: CameraRef) -> NSMenuItem {
         let current = model.cameraOptions(camera).fisheyeMount
         let sub = NSMenu()
         for m in FisheyeMount.allCases {
@@ -1233,14 +1247,14 @@ final class StageView: NSView {
 
     // MARK: Editing
 
-    func edit(_ change: (LayoutNode) -> LayoutNode?) {
+    package func edit(_ change: (LayoutNode) -> LayoutNode?) {
         guard let tree = change(state.tree) else { return }
         state.tree = tree
         reload()
         delegate?.stage(self, didEdit: state.tree)
     }
 
-    func split(_ axis: SplitAxis) {
+    package func split(_ axis: SplitAxis) {
         guard !fixedTile, let path = state.selected ?? (frames.leaves.count == 1 ? [] : nil),
             let (tree, new) = state.tree.splitting(at: path, axis: axis)
         else { return }
@@ -1248,7 +1262,7 @@ final class StageView: NSView {
         edit { _ in tree }
     }
 
-    func removeSelected() {
+    package func removeSelected() {
         guard !fixedTile, let path = state.selected, let (tree, survivor) = state.tree.removing(at: path) else { return }
         state.selected = tree[survivor]?.isLeaf == true ? survivor : nil
         edit { _ in tree }
@@ -1256,14 +1270,14 @@ final class StageView: NSView {
 
     /// Shows `camera` in the tile at `path`; a camera new to the tile
     /// starts at the default view (1x, centered, following the window).
-    func assign(_ camera: CameraRef?, at path: NodePath) {
+    package func assign(_ camera: CameraRef?, at path: NodePath) {
         guard !fixedTile else { return }
         edit { $0.assigning(camera, at: path) }
     }
 
     /// Swaps the cameras of two tiles; each view goes with its camera (the
     /// tiles keep their identities, members and places).
-    func swapTiles(_ from: NodePath, _ to: NodePath) {
+    package func swapTiles(_ from: NodePath, _ to: NodePath) {
         guard !fixedTile, from != to, let tree = state.tree.swapping(from, to) else { return }
         state.views.swapViews(layout: state.viewsKey, tree: state.tree, from, to)
         state.selected = to
@@ -1271,7 +1285,7 @@ final class StageView: NSView {
     }
 
     /// The selected tile's camera (Listen menu, keyboard).
-    var selectedCamera: CameraRef? {
+    package var selectedCamera: CameraRef? {
         if let f = state.focused { return state.tree[f]?.camera }
         if let s = state.selected { return state.tree[s]?.camera }
         return frames.leaves.count == 1 ? frames.leaves.first?.camera : nil
@@ -1298,7 +1312,7 @@ final class StageView: NSView {
 
     /// What a plain drag starting at `p` does (self-test: the same choice
     /// the pointer makes): "pan", "aim", "swap" or nil.
-    func dragKind(at p: CGPoint) -> String? {
+    package func dragKind(at p: CGPoint) -> String? {
         switch panGesture(at: p) {
         case .pan?: return "pan"
         case .aim?: return "aim"
@@ -1308,7 +1322,7 @@ final class StageView: NSView {
 
     /// Drags from `from` to `to` as the pointer would (self-test): the
     /// same mouse down, dragged and up handlers, in `steps` moves.
-    func simulateDrag(from: CGPoint, to: CGPoint, steps: Int = 4) {
+    package func simulateDrag(from: CGPoint, to: CGPoint, steps: Int = 4) {
         mouseDown(at: from, clickCount: 1)
         let n = max(steps, 1)
         for i in 1...n {
@@ -1426,18 +1440,18 @@ final class StageView: NSView {
 
     /// The height of a tile's header strip, where the pointer stays an
     /// arrow (a drag there swaps the tile).
-    static let headerDragHeight: CGFloat = 40
+    package static let headerDragHeight: CGFloat = 40
 
     // MARK: Drag and drop (cameras from the sidebar)
 
-    static let cameraPrefix = "nvrview-camera:"
+    package static let cameraPrefix = "nvrview-camera:"
 
     /// "nvrview-camera:CHANNEL[.LENS]@DEVICE".
-    static func dragString(_ camera: CameraRef) -> String {
+    package static func dragString(_ camera: CameraRef) -> String {
         "\(cameraPrefix)\(camera.channel)\(camera.lens == 0 ? "" : ".\(camera.lens)")@\(camera.device)"
     }
 
-    static func camera(fromDrag s: String) -> CameraRef? {
+    package static func camera(fromDrag s: String) -> CameraRef? {
         guard s.hasPrefix(cameraPrefix) else { return nil }
         let rest = s.dropFirst(cameraPrefix.count)
         guard let at = rest.firstIndex(of: "@") else { return nil }
@@ -1470,7 +1484,7 @@ final class StageView: NSView {
 
     // MARK: Keyboard and menus
 
-    override func keyDown(with event: NSEvent) {
+    package override func keyDown(with event: NSEvent) {
         // Space, Return and the arrows arrive as window shortcuts
         // (ViewerWindow); what is left here is the stage's own.
         switch event.keyCode {
@@ -1480,7 +1494,8 @@ final class StageView: NSView {
                 unfocus()
             } else if state.editing {
                 delegate?.stageDidChangeState(self)
-                NSApp.sendAction(#selector(ViewerWindowController.toggleEditing(_:)), to: nil, from: self)
+                // `ViewerWindowController.toggleEditing(_:)`, found through the responder chain.
+                NSApp.sendAction(Selector(("toggleEditing:")), to: nil, from: self)
             }
         case 51, 117:  // Delete, Forward Delete
             if state.editing, !fixedTile { removeSelected() } else { super.keyDown(with: event) }
@@ -1490,7 +1505,7 @@ final class StageView: NSView {
     }
 
     /// Quality ▸ Auto, Clear, Fluent, and Balanced where the camera has it.
-    func qualityMenuItem(camera: CameraRef, path: NodePath) -> NSMenuItem {
+    package func qualityMenuItem(camera: CameraRef, path: NodePath) -> NSMenuItem {
         let current = model.leases.effectiveQuality(state.tree[path]?.quality ?? .auto, camera)
         let sub = NSMenu()
         for q in TileQuality.allCases where q != .balanced || model.leases.offersBalanced(camera) {
@@ -1527,7 +1542,7 @@ final class StageView: NSView {
     }
 
     /// The right-click menu of a tile (also for the self-test).
-    func contextMenu(for leaf: LeafFrame) -> NSMenu {
+    package func contextMenu(for leaf: LeafFrame) -> NSMenu {
         let menu = NSMenu()
         func item(_ title: String, _ action: @escaping () -> Void) {
             menu.addItem(ClosureMenuItem(title: title, action: action))
@@ -1574,22 +1589,22 @@ final class StageView: NSView {
 /// layout geometry).
 @MainActor
 private final class StageOverlay: NSView {
-    weak var stage: StageView?
+    package weak var stage: StageView?
 
-    override var isFlipped: Bool { true }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    package override var isFlipped: Bool { true }
+    package override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     private func point(_ event: NSEvent) -> CGPoint { convert(event.locationInWindow, from: nil) }
 
-    override func mouseDown(with event: NSEvent) { stage?.mouseDown(at: point(event), clickCount: event.clickCount) }
-    override func mouseDragged(with event: NSEvent) { stage?.mouseDragged(to: point(event)) }
-    override func mouseUp(with event: NSEvent) { stage?.mouseUp(at: point(event)) }
-    override func menu(for event: NSEvent) -> NSMenu? { stage?.menu(at: point(event)) }
+    package override func mouseDown(with event: NSEvent) { stage?.mouseDown(at: point(event), clickCount: event.clickCount) }
+    package override func mouseDragged(with event: NSEvent) { stage?.mouseDragged(to: point(event)) }
+    package override func mouseUp(with event: NSEvent) { stage?.mouseUp(at: point(event)) }
+    package override func menu(for event: NSEvent) -> NSMenu? { stage?.menu(at: point(event)) }
 
     // A mouse wheel zooms around the pointer; a trackpad's (or Magic
     // Mouse's) two-finger scroll pans a zoomed tile, and zooms with Option
     // held; a pinch zooms.
-    override func scrollWheel(with event: NSEvent) {
+    package override func scrollWheel(with event: NSEvent) {
         guard let stage else { return }
         let p = point(event)
         if event.hasPreciseScrollingDeltas {
@@ -1603,11 +1618,11 @@ private final class StageOverlay: NSView {
         }
     }
 
-    override func magnify(with event: NSEvent) {
+    package override func magnify(with event: NSEvent) {
         stage?.zoom(at: point(event), by: 1 + Double(event.magnification), eased: false)
     }
 
-    override func resetCursorRects() {
+    package override func resetCursorRects() {
         for (rect, cursor) in stage?.cursorRects() ?? [] { addCursorRect(rect, cursor: cursor) }
     }
 
@@ -1615,17 +1630,17 @@ private final class StageOverlay: NSView {
         info.draggingPasteboard.string(forType: .string).flatMap(StageView.camera(fromDrag:))
     }
 
-    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+    package override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         stage?.dragUpdated(at: convert(sender.draggingLocation, from: nil), camera: camera(sender)) ?? []
     }
 
-    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+    package override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
         stage?.dragUpdated(at: convert(sender.draggingLocation, from: nil), camera: camera(sender)) ?? []
     }
 
-    override func draggingExited(_ sender: (any NSDraggingInfo)?) { stage?.dragExited() }
+    package override func draggingExited(_ sender: (any NSDraggingInfo)?) { stage?.dragExited() }
 
-    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+    package override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         stage?.performDrop(at: convert(sender.draggingLocation, from: nil), camera: camera(sender)) ?? false
     }
 }

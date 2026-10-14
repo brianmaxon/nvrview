@@ -10,12 +10,12 @@ import AppAlerts
 // stacking, "+N more"). Nothing here takes the keyboard.
 
 extension StageView {
-    func installVerification() {
+    package func installVerification() {
         guard !fixedTile else { return }
         verifyToken = model.alertsModel.subscribe { [weak self] in self?.syncVerification() }
     }
 
-    func tearDownVerification() {
+    package func tearDownVerification() {
         if let verifyToken { model.alertsModel.unsubscribe(verifyToken) }
         verifyToken = nil
         for v in verifyBands.values { v.removeFromSuperview() }
@@ -70,7 +70,7 @@ extension StageView {
 
     /// After any change of the checks: inset items in and out, and the
     /// bands' and overlays' contents.
-    func syncVerification() {
+    package func syncVerification() {
         guard !fixedTile else { return }
         let places = verificationPlaces()
         let wanted = Set(places.insets.keys)
@@ -95,7 +95,7 @@ extension StageView {
     private var currentVerificationLeaves: [LeafFrame] { insetBoard.swap == nil ? frames.leaves : [] }
 
     /// The bands over the tiles (from the stage's chrome layout).
-    func layoutVerification(_ leaves: [LeafFrame]) {
+    package func layoutVerification(_ leaves: [LeafFrame]) {
         guard !fixedTile, let alerts = model.alertsModel else { return }
         let tiles = verificationPlaces().tiles
         var used: Set<NodePath> = []
@@ -125,7 +125,7 @@ extension StageView {
 
     /// The overlays on the verification insets (and on any inset of a
     /// camera with a check, such as a doorbell's).
-    func layoutVerificationInsets() {
+    package func layoutVerificationInsets() {
         guard !fixedTile else { return }
         let insets = verificationPlaces().insets
         var used: Set<CameraRef> = []
@@ -155,7 +155,7 @@ extension StageView {
     /// each inset (oldest first) with its verification overlay directly above
     /// it. Views are moved only when the order is wrong (the set of insets
     /// changed), never on every refresh.
-    func restackInsetLayer() {
+    package func restackInsetLayer() {
         var wanted: [NSView] = []
         for item in insetBoard.shown.reversed() {
             guard let v = alertInsetViews[item.camera], v.superview === insetLayer else { continue }
@@ -185,7 +185,7 @@ extension StageView {
     }
 
     /// The inset of a check was closed (its × or Esc): its checks go too.
-    func verificationInsetDismissed(_ camera: CameraRef) {
+    package func verificationInsetDismissed(_ camera: CameraRef) {
         let alerts = model.alertsModel!
         for c in alerts.board.shown where ref(c) == camera { alerts.dismiss(c.id) }
     }
@@ -193,12 +193,12 @@ extension StageView {
     // MARK: Self-test
 
     /// The band over the tile showing `camera`, if one is up.
-    func verificationBand(for camera: CameraRef) -> VerificationOverlayView? {
+    package func verificationBand(for camera: CameraRef) -> VerificationOverlayView? {
         guard let leaf = frames.leaves.first(where: { $0.camera == camera }) else { return nil }
         return verifyBands[leaf.path].flatMap { $0.isHidden || $0.superview == nil ? nil : $0 }
     }
 
-    func verificationInsetOverlay(for camera: CameraRef) -> VerificationOverlayView? {
+    package func verificationInsetOverlay(for camera: CameraRef) -> VerificationOverlayView? {
         verifyInsetOverlays[camera].flatMap { $0.isHidden || $0.superview == nil ? nil : $0 }
     }
 }

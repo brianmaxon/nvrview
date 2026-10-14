@@ -49,6 +49,8 @@ let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     // Recordings: browsing, playback, editing, and export.
     ("AppRecordings", ["AppBase", "AppCapture"]),
     ("AppAlerts", ["AppBase", "AppCapture", "AlertHost", "DetectorKit"]),
+    // The stage: the tile grid, headers, insets, and the call window.
+    ("AppStage", ["AppBase", "AppCalls", "AppCapture", "AppPTZ", "AppAlerts"]),
 ]
 
 let appDependencies: [Target.Dependency] =

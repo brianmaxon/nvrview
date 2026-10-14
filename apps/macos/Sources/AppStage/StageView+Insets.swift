@@ -14,20 +14,20 @@ extension StageView {
 
     /// Routes one inset's call controls to the doorbell calls.
     private final class CallTarget: CallControlsDelegate {
-        weak var stage: StageView?
-        let camera: CameraRef
-        init(stage: StageView, camera: CameraRef) {
+        package weak var stage: StageView?
+        package let camera: CameraRef
+        package init(stage: StageView, camera: CameraRef) {
             self.stage = stage
             self.camera = camera
         }
-        func callUnmute() { stage?.unmuteCall(camera) }
-        func callTalk(_ down: Bool) { stage?.talk(camera, down) }
-        func callLatch(_ on: Bool) { stage?.latch(camera, on) }
-        func callDraft(_ text: String) { stage?.draft(text, camera) }
-        func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { stage?.sendReply(text, camera, accepted: accepted) }
+        package func callUnmute() { stage?.unmuteCall(camera) }
+        package func callTalk(_ down: Bool) { stage?.talk(camera, down) }
+        package func callLatch(_ on: Bool) { stage?.latch(camera, on) }
+        package func callDraft(_ text: String) { stage?.draft(text, camera) }
+        package func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { stage?.sendReply(text, camera, accepted: accepted) }
     }
 
-    func installInsets() {
+    package func installInsets() {
         insetLayer.frame = bounds
         insetLayer.autoresizingMask = [.width, .height]
         addSubview(insetLayer)
@@ -65,7 +65,7 @@ extension StageView {
         }
     }
 
-    func tearDownInsets() {
+    package func tearDownInsets() {
         if let detectionToken { model.unsubscribeDetections(detectionToken) }
         detectionToken = nil
         model.leases.clearDemands(owner: TakeoverOwner(stage: ObjectIdentifier(self)))
@@ -78,7 +78,7 @@ extension StageView {
 
     /// Whether the stage shows `camera` now (the swapped-in camera, the
     /// focused tile, or any tile of the layout).
-    func showsCamera(_ camera: CameraRef) -> Bool {
+    package func showsCamera(_ camera: CameraRef) -> Bool {
         if let s = insetBoard.swap { return s.shown == camera }
         if let f = state.focused { return state.tree[f]?.camera == camera }
         return state.tree.cameras.contains(camera)
@@ -86,7 +86,7 @@ extension StageView {
 
     /// The same for any lens of a channel (a sound alarm belongs to the
     /// channel's microphone).
-    func showsChannel(_ camera: CameraRef) -> Bool {
+    package func showsChannel(_ camera: CameraRef) -> Bool {
         func same(_ c: CameraRef?) -> Bool { c?.device == camera.device && c?.channel == camera.channel }
         if let s = insetBoard.swap { return same(s.shown) }
         if let f = state.focused { return same(state.tree[f]?.camera) }
@@ -96,15 +96,15 @@ extension StageView {
     /// The stage shows a layout: several tiles, none focused, no swap. A swap
     /// then keeps the whole layout in the return inset; a focused or single
     /// tile keeps just its camera.
-    var stageShowsLayout: Bool {
+    package var stageShowsLayout: Bool {
         insetBoard.swap == nil && state.focused == nil && state.tree.leafCount > 1
     }
 
     /// The grid this window uses: its own choice, else the Settings default.
-    var effectiveInsetGrid: InsetGridSetting { insetGridOverride ?? model.insetGrid }
+    package var effectiveInsetGrid: InsetGridSetting { insetGridOverride ?? model.insetGrid }
 
     /// The camera that fills the whole stage, if one does.
-    var stageFillingCamera: CameraRef? {
+    package var stageFillingCamera: CameraRef? {
         if let s = insetBoard.swap { return s.shown }
         if let f = state.focused { return state.tree[f]?.camera }
         return state.tree.leafCount == 1 ? state.tree.cameras.first : nil
@@ -138,7 +138,7 @@ extension StageView {
 
     /// A click on an inset (or Tab): its camera takes the stage; the camera
     /// that was there goes into the return inset.
-    func swapInset(_ camera: CameraRef) {
+    package func swapInset(_ camera: CameraRef) {
         let displaced =
             state.focused.flatMap { state.tree[$0]?.camera } ?? state.selected.flatMap { state.tree[$0]?.camera }
             ?? state.tree.cameras.first
@@ -150,7 +150,7 @@ extension StageView {
 
     /// Esc or a close control. Dismissing a smoke or CO inset dismisses its
     /// alert too; closing a doorbell's inset ends its call.
-    func dismissInset(_ camera: CameraRef) {
+    package func dismissInset(_ camera: CameraRef) {
         if let item = insetBoard.dismiss(camera) {
             if item.kind.isCritical { dismissAlert(item.camera) }
             if item.kind.isCall { model.calls.end(item.camera, reason: "closed") }
@@ -164,7 +164,7 @@ extension StageView {
     /// Talk, typed reply) in the camera's inset, or over the stage when the
     /// camera fills it, as a press does, but with no press. The inset behaves
     /// like a doorbell's that ended: it closes a minute after its last use.
-    func startConversation(_ camera: CameraRef) {
+    package func startConversation(_ camera: CameraRef) {
         let target = camera.firstLens
         let now = clock.now
         let date = Date()
@@ -178,14 +178,14 @@ extension StageView {
     }
 
     /// The camera's call is shown in its own window.
-    func isPoppedOut(_ camera: CameraRef) -> Bool { model.calls.call(for: camera)?.presentation == .window }
+    package func isPoppedOut(_ camera: CameraRef) -> Bool { model.calls.call(for: camera)?.presentation == .window }
 
     /// Follows each call's presentation (one state for the whole app): a
     /// call popped out detaches its item here (ending a swap that shows
     /// it), one popped in comes back on top with a fresh minute, and the
     /// detached item of a call that ended goes. Returns whether the board
     /// changed.
-    func followCallPresentations() -> Bool {
+    package func followCallPresentations() -> Bool {
         var changed = false
         let now = clock.now
         if let s = insetBoard.swap, s.item.kind.isCall, isPoppedOut(s.shown) {
@@ -249,7 +249,7 @@ extension StageView {
     /// the call's last activity like a conversation's. Returns whether the
     /// board changed.
     @discardableResult
-    func adoptOpenCalls(_ cameras: Set<CameraRef>) -> Bool {
+    package func adoptOpenCalls(_ cameras: Set<CameraRef>) -> Bool {
         var changed = false
         let now = clock.now
         for camera in cameras {
@@ -265,7 +265,7 @@ extension StageView {
 
     /// Ends a camera's call whichever way it is shown (its inset, or over
     /// the stage).
-    func endConversation(_ camera: CameraRef) {
+    package func endConversation(_ camera: CameraRef) {
         if insetBoard.item(for: camera.firstLens) != nil { dismissInset(camera.firstLens) }
         model.calls.end(camera, reason: "closed")
         syncInsets()
@@ -274,7 +274,7 @@ extension StageView {
 
     /// Tab and Esc while the stage has the keyboard: true when an inset used
     /// the key (otherwise it goes on as before).
-    func handleInsetKey(_ key: InsetKey) -> Bool {
+    package func handleInsetKey(_ key: InsetKey) -> Bool {
         guard !insetBoard.isEmpty else { return false }
         switch key {
         case .swap:
@@ -326,7 +326,7 @@ extension StageView {
 
     /// From the stage's time step: insets close on the viewer clock; a
     /// call's activity counts as using its inset.
-    func tickInsets(now: Double) {
+    package func tickInsets(now: Double) {
         guard !insetBoard.isEmpty else { return }
         for camera in model.calls.cameras {
             if let call = model.calls.call(for: camera), insetBoard.item(for: camera) != nil {
@@ -344,7 +344,7 @@ extension StageView {
 
     /// After any change of the board: alerts dismissed elsewhere, leases,
     /// the swapped-in camera's stream, the views and their places.
-    func syncInsets() {
+    package func syncInsets() {
         guard !fixedTile else { return }
         appliedInsetGrid = effectiveInsetGrid
         insetBoard.setCapacity(appliedInsetGrid.capacity, now: clock.now)
@@ -404,7 +404,7 @@ extension StageView {
     }
 
     /// From `refreshChrome` (model changes, the window's slow timer).
-    func refreshInsets() {
+    package func refreshInsets() {
         guard !fixedTile else { return }
         if appliedInsetGrid != effectiveInsetGrid {
             syncInsets()
@@ -459,12 +459,12 @@ extension StageView {
     /// the default corner (the Settings corner, else opposite the
     /// indicators). The 12 pt margin keeps it off the sidebar's 6 pt
     /// edge-reveal strip and the full-screen toolbar's reveal edge at the top.
-    var effectiveInsetAnchor: InsetAnchor { insetDragAnchor ?? insetAnchor ?? InsetAnchor(corner: model.insetCorner) }
+    package var effectiveInsetAnchor: InsetAnchor { insetDragAnchor ?? insetAnchor ?? InsetAnchor(corner: model.insetCorner) }
 
     /// A drag on an inset moves the whole column; each axis snaps to its
     /// edge within 24 pt. The column keeps its position as a fraction of the
     /// free space (InsetPlacement), so resizing keeps it in place.
-    func dragInsets(_ phase: InsetView.DragPhase, at point: CGPoint) {
+    package func dragInsets(_ phase: InsetView.DragPhase, at point: CGPoint) {
         switch phase {
         case .began:
             guard let column = insetColumn else { return }
@@ -506,7 +506,7 @@ extension StageView {
     }
 
     /// "Reset Position": back to the default corner.
-    func resetInsetPosition() {
+    package func resetInsetPosition() {
         insetDragStart = nil
         insetDragAnchor = nil
         insetAnchor = nil
@@ -516,7 +516,7 @@ extension StageView {
     /// Places the insets in their column (where the user moved it, else the
     /// default corner), newest nearest its nearer horizontal edge, and notes
     /// where each picture goes for the renderer.
-    func layoutInsetViews() {
+    package func layoutInsetViews() {
         let b = insetLayer.bounds
         guard b.width > 0, b.height > 0 else { return }
         let grid = effectiveInsetGrid
@@ -575,7 +575,7 @@ extension StageView {
     // MARK: The waiting list and the window's grid
 
     /// What the return inset of a layout is called.
-    var layoutName: String {
+    package var layoutName: String {
         let n = state.tree.cameras.count
         return "Layout, \(n) camera\(n == 1 ? "" : "s")"
     }
@@ -597,7 +597,7 @@ extension StageView {
     }
 
     /// A waiting camera was chosen from the chip.
-    func bringInInset(_ camera: CameraRef) {
+    package func bringInInset(_ camera: CameraRef) {
         guard insetBoard.bringIn(camera, now: clock.now) else { return }
         syncInsets()
     }
@@ -635,14 +635,14 @@ extension StageView {
     }
 
     /// This window's own rows and/or columns (the other keeps its value).
-    func setInsetGrid(rows: Int?, columns: Int?) {
+    package func setInsetGrid(rows: Int?, columns: Int?) {
         let current = effectiveInsetGrid
         insetGridOverride = InsetGridSetting(rows: rows ?? current.rows, columns: columns ?? current.columns)
         onInsetGridChange()
     }
 
     /// Back to the Settings default for this window.
-    func useDefaultInsetGrid() {
+    package func useDefaultInsetGrid() {
         insetGridOverride = nil
         onInsetGridChange()
     }
@@ -650,26 +650,26 @@ extension StageView {
     // MARK: Self-test
 
     /// The inset views drawn now, top of the stack first.
-    var shownInsetViews: [InsetView] { insetBoard.shown.compactMap { alertInsetViews[$0.camera] }.filter { !$0.isHidden } }
+    package var shownInsetViews: [InsetView] { insetBoard.shown.compactMap { alertInsetViews[$0.camera] }.filter { !$0.isHidden } }
 }
 
 /// The "+N more" chip: a click asks for the list of waiting cameras.
 @MainActor
-final class MoreChipView: NSTextField {
-    var onClick: ((NSView) -> Void)?
-    override func mouseDown(with event: NSEvent) { onClick?(self) }
+package final class MoreChipView: NSTextField {
+    package var onClick: ((NSView) -> Void)?
+    package override func mouseDown(with event: NSEvent) { onClick?(self) }
 }
 
 /// Over the whole stage: the swapped-in camera's header (with its close
 /// control), and the call of a doorbell that fills the stage (its Unmute
 /// control over the picture, its controls along the bottom).
 @MainActor
-final class StageCallView: PassThroughView, CallControlsDelegate {
-    var onClose: () -> Void = {}
+package final class StageCallView: PassThroughView, CallControlsDelegate {
+    package var onClose: () -> Void = {}
     /// Pop Out for the call over the stage.
-    var onPopOut: (() -> Void)?
+    package var onPopOut: (() -> Void)?
     /// Holds the target strongly (it refers to the stage weakly).
-    var callTarget: CallControlsDelegate?
+    package var callTarget: CallControlsDelegate?
 
     private let banner = NSView()
     private let popOut = NSButton()
@@ -678,7 +678,7 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
     private let unmute = NSButton()
     private let panel = CallPanelView()
 
-    override init(frame: NSRect) {
+    package override init(frame: NSRect) {
         super.init(frame: frame)
         banner.wantsLayer = true
         banner.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.1, blue: 0.12, alpha: 0.85).cgColor
@@ -728,14 +728,14 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     /// The insets' column, which the call controls keep clear of.
-    var avoid: CGRect? {
+    package var avoid: CGRect? {
         didSet { if avoid != oldValue { needsLayout = true } }
     }
 
-    func apply(banner text: String?, call: CallContent?) {
+    package func apply(banner text: String?, call: CallContent?) {
         banner.isHidden = text == nil
         bannerText.stringValue = text ?? ""
         unmute.isHidden = call?.showsUnmute != true
@@ -747,9 +747,9 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
     }
 
     /// The self-test reads whether the stage's Unmute control shows.
-    var unmuteShown: Bool { !isHidden && !unmute.isHidden }
+    package var unmuteShown: Bool { !isHidden && !unmute.isHidden }
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         let b = bounds
         banner.frame = CGRect(x: 12, y: 12, width: min(b.width - 24, 620), height: 28)
@@ -772,9 +772,9 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
     @objc private func unmuteClicked() { callTarget?.callUnmute() }
     @objc private func popOutClicked() { onPopOut?() }
 
-    func callUnmute() { callTarget?.callUnmute() }
-    func callTalk(_ down: Bool) { callTarget?.callTalk(down) }
-    func callLatch(_ on: Bool) { callTarget?.callLatch(on) }
-    func callDraft(_ text: String) { callTarget?.callDraft(text) }
-    func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callTarget?.callSend(text, accepted: accepted) }
+    package func callUnmute() { callTarget?.callUnmute() }
+    package func callTalk(_ down: Bool) { callTarget?.callTalk(down) }
+    package func callLatch(_ on: Bool) { callTarget?.callLatch(on) }
+    package func callDraft(_ text: String) { callTarget?.callDraft(text) }
+    package func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callTarget?.callSend(text, accepted: accepted) }
 }

@@ -13,7 +13,7 @@ import AppBase
 extension StageView {
     /// What to draw for `kind` from the tile at `path` now. Nil without a
     /// picture.
-    func pictureRender(at path: NodePath, kind: PictureKind) -> PictureRender? {
+    package func pictureRender(at path: NodePath, kind: PictureKind) -> PictureRender? {
         guard let camera = state.tree[path]?.camera, let tile = model.leases.tile(for: camera) else { return nil }
         return PictureRenderBuilder.make(
             tile: tile, kind: kind, tileSize: frames.leaves.first(where: { $0.path == path })?.rect.size,
@@ -26,7 +26,7 @@ extension StageView {
     /// Saves the picture of the tile at `path`: to the pictures folder, or
     /// with `ask` where a save panel says. The picture is taken now; the
     /// confirmation comes when the file is written.
-    func savePicture(at path: NodePath, kind: PictureKind, ask: Bool) {
+    package func savePicture(at path: NodePath, kind: PictureKind, ask: Bool) {
         guard let camera = state.tree[path]?.camera, let job = pictureRender(at: path, kind: kind) else {
             showToast("No picture to save")
             return
@@ -107,7 +107,7 @@ extension StageView {
     }
 
     /// Opens the pictures folder in the Finder (made first if missing).
-    func openPicturesFolder() {
+    package func openPicturesFolder() {
         let folder = model.picturesFolder
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(folder)

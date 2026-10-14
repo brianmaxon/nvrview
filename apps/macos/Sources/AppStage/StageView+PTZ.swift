@@ -12,7 +12,7 @@ import AppPTZ
 extension StageView {
     /// Shows the problems the model reports as a line over the tile (the
     /// popover has its own line).
-    func installPTZ() {
+    package func installPTZ() {
         ptzObserver = model.ptz.addObserver { [weak self] change in
             guard let self, case .problem(let camera, let text) = change else { return }
             MainActor.assumeIsolated {
@@ -26,7 +26,7 @@ extension StageView {
 
     /// Opens the pad or the lens popover for the camera at `path`, under
     /// `view` (the header button) or the tile's header.
-    func showPTZ(_ mode: PTZPopoverController.Mode, camera: CameraRef, path: NodePath, from view: NSView?) {
+    package func showPTZ(_ mode: PTZPopoverController.Mode, camera: CameraRef, path: NodePath, from view: NSView?) {
         closePTZPopover()
         let controller = PTZPopoverController(
             camera: camera, mode: mode, name: model.name(of: camera), ptz: model.ptz)
@@ -43,7 +43,7 @@ extension StageView {
     }
 
     /// Closes the popover, and with it anything it holds.
-    func closePTZPopover() {
+    package func closePTZPopover() {
         guard let popover = ptzPopover else { return }
         popover.close()
         endPTZPopover()
@@ -56,7 +56,7 @@ extension StageView {
     }
 
     /// The presets menu of the camera at `path`, once its list is read.
-    func showPresets(camera: CameraRef, path: NodePath, from view: NSView?) {
+    package func showPresets(camera: CameraRef, path: NodePath, from view: NSView?) {
         model.ptz.withInfo(camera) { [weak self] info in
             guard let self else { return }
             guard let info else {
@@ -70,7 +70,7 @@ extension StageView {
 
     /// The right-click and Camera menus' Presets item, from the list read so
     /// far (reading it when it has not been).
-    func presetsMenuItem(camera: CameraRef) -> NSMenuItem {
+    package func presetsMenuItem(camera: CameraRef) -> NSMenuItem {
         let item = NSMenuItem(title: "Presets", action: nil, keyEquivalent: "")
         if let info = model.ptz.info(for: camera) {
             item.submenu = presetsMenu(info: info, camera: camera, ptz: model.ptz)
@@ -89,7 +89,7 @@ extension StageView {
     // MARK: Keys (docs/UX.md "Capture and camera keys")
 
     /// What the selected (or focused) tile's camera can do with the keys.
-    var selectedPTZCapability: (panTilt: Bool, lens: Bool) {
+    package var selectedPTZCapability: (panTilt: Bool, lens: Bool) {
         guard let path = selectedPath, let camera = state.tree[path]?.camera,
             let tile = headerTile(camera, path: path)
         else { return (false, false) }
@@ -98,7 +98,7 @@ extension StageView {
 
     /// A camera key for the selected tile's camera. False when the tile has
     /// no such control (the key goes on).
-    func handlePTZKey(_ key: PTZKey) -> Bool {
+    package func handlePTZKey(_ key: PTZKey) -> Bool {
         guard let path = selectedPath, let camera = state.tree[path]?.camera,
             let tile = headerTile(camera, path: path)
         else { return false }
@@ -127,9 +127,9 @@ extension StageView {
     }
 
     /// An arrow key came up.
-    func handlePTZKeyUp(_ direction: PTZDirection) { model.ptz.keyUp(direction) }
+    package func handlePTZKeyUp(_ direction: PTZDirection) { model.ptz.keyUp(direction) }
 }
 
 extension StageView: NSPopoverDelegate {
-    func popoverDidClose(_ notification: Notification) { endPTZPopover() }
+    package func popoverDidClose(_ notification: Notification) { endPTZPopover() }
 }

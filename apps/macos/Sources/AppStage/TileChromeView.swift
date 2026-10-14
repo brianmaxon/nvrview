@@ -4,30 +4,30 @@ import QuartzCore
 import AppBase
 
 /// What one tile's chrome shows; rebuilt from the model, applied cheaply.
-struct TileChromeContent: Equatable {
-    var title: String
-    var subtitle: String?
+package struct TileChromeContent: Equatable {
+    package var title: String
+    package var subtitle: String?
     /// The frame-rate readout, when the user turned it on.
-    var rates: String?
+    package var rates: String?
     /// What is detected now for the camera (corner indicators).
-    var indicators: [IndicatorItem] = []
-    var corner: ChromeCorner = .fallback
+    package var indicators: [IndicatorItem] = []
+    package var corner: ChromeCorner = .fallback
     /// The camera's raised alert, as the header's lines (docs/UX.md "Alerts").
-    var alertLines: [String]?
-    var veil: TileVeil?
+    package var alertLines: [String]?
+    package var veil: TileVeil?
     /// The veil offers a Retry button (it has been up for a while).
-    var retry = false
-    var hasCamera: Bool
-    var audible: Bool
+    package var retry = false
+    package var hasCamera: Bool
+    package var audible: Bool
     /// What the hover header shows (docs/UX.md "Tile header"); nil for a
     /// tile without a camera.
-    var header: TileHeaderTile?
+    package var header: TileHeaderTile?
     /// "● REC 1:23" while the camera is recorded (always shown, not hover
     /// chrome; docs/CAPTURE.md "Indicators").
-    var recordingPill: String? = nil
-    var selected: Bool
-    var editing: Bool
-    var dropTarget: Bool
+    package var recordingPill: String? = nil
+    package var selected: Bool
+    package var editing: Bool
+    package var dropTarget: Bool
 }
 
 /// The lightweight layer above one tile of the Metal surface (docs/UX.md
@@ -42,18 +42,18 @@ struct TileChromeContent: Equatable {
 /// It never takes clicks except on its button, so the stage below handles
 /// selection, dragging and focus.
 @MainActor
-final class TileChromeView: NSView {
-    static let fadeOutDelay: TimeInterval = 2.5
-    static let fadeOutAfterExit: TimeInterval = 0.8
+package final class TileChromeView: NSView {
+    package static let fadeOutDelay: TimeInterval = 2.5
+    package static let fadeOutAfterExit: TimeInterval = 0.8
 
     /// A header button was clicked: the item and the button (menus pop up
     /// under it).
-    var onItem: (TileHeaderItem, NSView) -> Void = { _, _ in }
-    var onDismissAlert: () -> Void = {}
+    package var onItem: (TileHeaderItem, NSView) -> Void = { _, _ in }
+    package var onDismissAlert: () -> Void = {}
     /// Items whose action is not built yet (drawn dimmed; a click says so).
-    var isPending: (TileHeaderItem) -> Bool = { _ in false }
+    package var isPending: (TileHeaderItem) -> Bool = { _ in false }
     /// The veil's Retry button.
-    var onRetry: () -> Void = {}
+    package var onRetry: () -> Void = {}
 
     private let header = NSView()
     private let headerGradient = CAGradientLayer()
@@ -63,7 +63,7 @@ final class TileChromeView: NSView {
     /// The header's buttons, made when first shown.
     private var buttons: [TileHeaderItem: NSButton] = [:]
     /// The header as last laid out (kept for the model's hysteresis).
-    private(set) var headerLayout: TileHeaderLayout?
+    package private(set) var headerLayout: TileHeaderLayout?
     /// The title's natural width, for the string it was measured for.
     private var titleMeasure: (text: String, width: Double)?
     private let cornerView = CornerIndicatorView()
@@ -105,9 +105,9 @@ final class TileChromeView: NSView {
     /// The selection outline is shown (it fades with the chrome).
     private var outlineShown = true
 
-    override var isFlipped: Bool { true }
+    package override var isFlipped: Bool { true }
 
-    init(clock: any ViewerClock) {
+    package init(clock: any ViewerClock) {
         self.clock = clock
         super.init(frame: .zero)
         wantsLayer = true
@@ -233,10 +233,10 @@ final class TileChromeView: NSView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 
     // Clicks reach the stage, except on the header's buttons.
-    override func hitTest(_ point: NSPoint) -> NSView? {
+    package override func hitTest(_ point: NSPoint) -> NSView? {
         let p = convert(point, from: superview)
         // The veil's Retry button takes clicks whether or not the header shows.
         if !retryButton.isHidden, !veil.isHidden, retryButton.convert(retryButton.bounds, to: self).contains(p) {
@@ -252,7 +252,7 @@ final class TileChromeView: NSView {
 
     // MARK: Content
 
-    func apply(_ c: TileChromeContent) {
+    package func apply(_ c: TileChromeContent) {
         guard c != content else { return }
         let old = content
         content = c
@@ -302,10 +302,10 @@ final class TileChromeView: NSView {
 
     /// Whether the stage should read this tile's level now: only while its
     /// meter is on screen (audible, or muted with the header shown).
-    var wantsLevel: Bool { meterMode.polls(headerShown: header.alphaValue > 0) }
+    package var wantsLevel: Bool { meterMode.polls(headerShown: header.alphaValue > 0) }
 
     /// The level meter (0...1), called at display rate while `wantsLevel`.
-    func setLevel(_ value: Float) {
+    package func setLevel(_ value: Float) {
         guard wantsLevel else { return }
         // Fast attack, slower release, so it reads as a level, not a flicker.
         level = value > level ? value : max(value, level * 0.85)
@@ -323,7 +323,7 @@ final class TileChromeView: NSView {
 
     // MARK: Layout
 
-    override func layout() {
+    package override func layout() {
         super.layout()
         let w = bounds.width, h = bounds.height
         let alertHeight: CGFloat = alertStrip.isHidden ? 0 : CGFloat(alertLineCount) * Self.alertLineHeight + 12
@@ -411,13 +411,13 @@ final class TileChromeView: NSView {
     /// Where the recording pill goes: the corner opposite the corner
     /// indicators, except that the top right (the header's buttons) moves
     /// to the top left.
-    static func pillCorner(_ indicators: ChromeCorner) -> ChromeCorner {
+    package static func pillCorner(_ indicators: ChromeCorner) -> ChromeCorner {
         let opposite = indicators.opposite
         return opposite == .topRight ? .topLeft : opposite
     }
 
     /// The pill's text while it shows (self-test).
-    var pillText: String? { pill.isHidden ? nil : pill.stringValue }
+    package var pillText: String? { pill.isHidden ? nil : pill.stringValue }
 
     /// The pill, the title and Dismiss are not buttons of the row: the
     /// alert's Dismiss stays in its strip below the title, and the pill is
@@ -482,20 +482,20 @@ final class TileChromeView: NSView {
     }
 
     /// The header items shown as buttons, left to right (self-test).
-    var shownHeaderButtons: [TileHeaderItem] {
+    package var shownHeaderButtons: [TileHeaderItem] {
         buttons.filter { !$0.value.isHidden }.sorted { $0.value.frame.minX < $1.value.frame.minX }.map(\.key)
     }
 
     /// The buttons' frames, in this view's coordinates (self-test).
-    var headerButtonFrames: [TileHeaderItem: CGRect] {
+    package var headerButtonFrames: [TileHeaderItem: CGRect] {
         buttons.filter { !$0.value.isHidden }.mapValues { header.convert($0.frame, to: self) }
     }
 
     /// The title's frame, in this view's coordinates (self-test).
-    var titleFrame: CGRect { header.convert(title.frame, to: self) }
+    package var titleFrame: CGRect { header.convert(title.frame, to: self) }
 
     /// Clicks a header button as the pointer would (self-test).
-    func pressHeader(_ item: TileHeaderItem) {
+    package func pressHeader(_ item: TileHeaderItem) {
         guard let b = buttons[item], !b.isHidden else { return }
         b.performClick(nil)
     }
@@ -505,7 +505,7 @@ final class TileChromeView: NSView {
     /// relayouts about twice a second) made AppKit send fresh entered and
     /// moved events with the pointer standing still, so the header came
     /// back on its own after fading.
-    override func updateTrackingAreas() {
+    package override func updateTrackingAreas() {
         super.updateTrackingAreas()
         guard tracking == nil else { return }
         let area = NSTrackingArea(
@@ -517,7 +517,7 @@ final class TileChromeView: NSView {
 
     // MARK: Hover
 
-    override func mouseEntered(with event: NSEvent) {
+    package override func mouseEntered(with event: NSEvent) {
         lastPointer = NSEvent.mouseLocation
         showChrome()
     }
@@ -525,16 +525,16 @@ final class TileChromeView: NSView {
     /// Only a real movement shows the header: a moved event with the
     /// pointer where it was (cursor unhiding, window or layer updates) is
     /// ignored.
-    override func mouseMoved(with event: NSEvent) {
+    package override func mouseMoved(with event: NSEvent) {
         let now = NSEvent.mouseLocation
         if let last = lastPointer, abs(now.x - last.x) < 0.5, abs(now.y - last.y) < 0.5 { return }
         lastPointer = now
         showChrome()
     }
-    override func mouseExited(with event: NSEvent) { scheduleFade(after: Self.fadeOutAfterExit) }
+    package override func mouseExited(with event: NSEvent) { scheduleFade(after: Self.fadeOutAfterExit) }
 
     /// Fades in at once; fades out a few seconds after the last movement.
-    func showChrome() {
+    package func showChrome() {
         fadeAt = nil
         if header.alphaValue < 1 {
             NSAnimationContext.runAnimationGroup { ctx in
@@ -551,12 +551,12 @@ final class TileChromeView: NSView {
     }
 
     /// The stage's time step: fades the header out once its delay is up.
-    func tick(now: Double) {
+    package func tick(now: Double) {
         guard let at = fadeAt, now >= at else { return }
         fadeOut()
     }
 
-    func fadeOut() {
+    package func fadeOut() {
         fadeAt = nil
         guard !headerPinned else { return }
         NSAnimationContext.runAnimationGroup { ctx in
@@ -569,7 +569,7 @@ final class TileChromeView: NSView {
 
     /// Keeps the header shown whatever the hover and auto-hide say (a tile
     /// with an active alert); releasing it lets it fade as usual.
-    func setHeaderPinned(_ pinned: Bool) {
+    package func setHeaderPinned(_ pinned: Bool) {
         guard pinned != headerPinned else { return }
         headerPinned = pinned
         if pinned {
@@ -580,21 +580,21 @@ final class TileChromeView: NSView {
         }
     }
 
-    var isHeaderPinned: Bool { headerPinned }
+    package var isHeaderPinned: Bool { headerPinned }
 
     /// Whether the header is on screen now (for the self-test).
-    var isHeaderShown: Bool { header.alphaValue > 0.01 }
+    package var isHeaderShown: Bool { header.alphaValue > 0.01 }
 
     /// The header's area in the superview's coordinates while it is shown
     /// (a drag there swaps the tile), else nil.
-    var shownHeaderFrame: CGRect? {
+    package var shownHeaderFrame: CGRect? {
         guard header.alphaValue > 0.05, !header.isHidden, !isHidden else { return nil }
         return convert(header.frame, to: superview)
     }
 
     /// Fades the selection outline with the rest of the chrome (it stays
     /// while editing the layout).
-    func setOutlineShown(_ shown: Bool) {
+    package func setOutlineShown(_ shown: Bool) {
         guard shown != outlineShown else { return }
         outlineShown = shown
         let editing = content?.editing == true
@@ -642,31 +642,31 @@ final class TileChromeView: NSView {
     @objc private func retryClicked(_ sender: NSButton) { onRetry() }
 
     /// Whether the veil's Retry button is showing (for the self-test).
-    var isRetryShown: Bool { !retryButton.isHidden }
+    package var isRetryShown: Bool { !retryButton.isHidden }
 
     /// Clicks the veil's Retry button, as the pointer or keyboard would (for
     /// the self-test).
-    func pressRetry() { if !retryButton.isHidden { retryButton.performClick(nil) } }
+    package func pressRetry() { if !retryButton.isHidden { retryButton.performClick(nil) } }
 
     @objc private func dismissAlertClicked(_ sender: NSButton) { onDismissAlert() }
 
     /// Whether the alert strip is showing (for the self-test).
-    var isAlertShown: Bool { !alertStrip.isHidden }
+    package var isAlertShown: Bool { !alertStrip.isHidden }
 
 }
 
 /// A header button that knows its item.
 @MainActor
 private final class HeaderButton: NSButton {
-    let item: TileHeaderItem
+    package let item: TileHeaderItem
     /// The symbol it shows now.
-    var symbol = ""
+    package var symbol = ""
 
-    init(item: TileHeaderItem) {
+    package init(item: TileHeaderItem) {
         self.item = item
         super.init(frame: .zero)
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
+    package required init?(coder: NSCoder) { fatalError("not used") }
 }

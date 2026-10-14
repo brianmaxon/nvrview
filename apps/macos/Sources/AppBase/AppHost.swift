@@ -28,6 +28,9 @@ package protocol AppHost: AnyObject {
     func cameras(device key: String, channel c: ChannelInfo) -> [CameraRef]
     func cameraRef(_ c: AlertCamera) -> CameraRef?
     func alertCamera(_ c: CameraRef) -> AlertCamera?
+    func isFisheye(_ camera: CameraRef) -> Bool
+    func fisheyeLens(_ camera: CameraRef, picture: DecodedPicture?) -> FisheyeLens?
+    func setFisheyeMount(_ camera: CameraRef, _ mount: FisheyeMount)
 
     // Audio.
     var audible: Set<CameraRef> { get }

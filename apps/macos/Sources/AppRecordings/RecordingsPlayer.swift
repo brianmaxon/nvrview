@@ -3,6 +3,7 @@ import Foundation
 import NVRCore
 import Observation
 import AppBase
+import AppCapture
 
 /// The Recordings window's player (docs/UX.md "Recordings"): one playback
 /// (FFI-RECORDINGS.md section 6) of up to four cameras of the shown day,
@@ -103,7 +104,7 @@ package final class RecordingsPlayer {
         self.model = model
     }
 
-    package var app: (any RecordingsHost)? { model.app }
+    package var app: (any CaptureHost)? { model.app }
 
     package var transport: TransportState {
         TransportState(startMs: startMs, endMs: endMs, positionMs: positionMs, state: state, rate: rate)

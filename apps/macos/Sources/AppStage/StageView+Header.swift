@@ -13,7 +13,7 @@ extension StageView {
     /// What the header model needs to know about the tile at `path`
     /// showing `camera`: the camera's capabilities (the `channels` event)
     /// and the tile's state.
-    func headerTile(_ camera: CameraRef, path: NodePath) -> TileHeaderTile? {
+    package func headerTile(_ camera: CameraRef, path: NodePath) -> TileHeaderTile? {
         let info = model.channelInfo(camera)
         let ptz = info?.ptz(lens: camera.lens) ?? .none
         let call = model.calls.call(for: camera.firstLens)
@@ -33,27 +33,27 @@ extension StageView {
 
     /// The tile the keys and the Camera menu act on: the focused one, the
     /// selected one, or the only one.
-    var selectedPath: NodePath? {
+    package var selectedPath: NodePath? {
         if let f = state.focused { return f }
         if let s = state.selected, state.tree[s]?.isLeaf == true { return s }
         return frames.leaves.count == 1 ? frames.leaves.first?.path : nil
     }
 
     /// The selected tile's header model (Camera menu titles).
-    var selectedHeaderTile: TileHeaderTile? {
+    package var selectedHeaderTile: TileHeaderTile? {
         guard let path = selectedPath, let camera = state.tree[path]?.camera else { return nil }
         return headerTile(camera, path: path)
     }
 
     /// A key or a Camera menu item for the selected tile.
-    func performOnSelected(_ item: TileHeaderItem) {
+    package func performOnSelected(_ item: TileHeaderItem) {
         guard let path = selectedPath else { return }
         performHeaderItem(item, at: path, from: nil)
     }
 
     /// ⇧⌘R in a viewer window: the selected tile's call recording while
     /// its camera's call is open, else as R.
-    func recordCallOnSelected() {
+    package func recordCallOnSelected() {
         guard let path = selectedPath, let camera = state.tree[path]?.camera else { return }
         guard !fixedTile, model.calls.call(for: camera.firstLens) != nil else { return performOnSelected(.record) }
         noteInteraction()
@@ -63,7 +63,7 @@ extension StageView {
 
     /// Does what `item` does for the tile at `path`; `view` is the button
     /// clicked, under which a menu pops up (nil from a key or a menu).
-    func performHeaderItem(_ item: TileHeaderItem, at path: NodePath, from view: NSView?) {
+    package func performHeaderItem(_ item: TileHeaderItem, at path: NodePath, from view: NSView?) {
         guard let camera = state.tree[path]?.camera, let tile = headerTile(camera, path: path) else { return }
         noteInteraction()
         if TileActionStub.isPending(item) {
@@ -123,7 +123,7 @@ extension StageView {
 
     /// The menu a header button opens: Quality, Fisheye View, Calls open
     /// in, or "…" (the right-click menu without what the header shows).
-    func menu(for item: TileHeaderItem, at path: NodePath) -> NSMenu? {
+    package func menu(for item: TileHeaderItem, at path: NodePath) -> NSMenu? {
         guard let camera = state.tree[path]?.camera, let tile = headerTile(camera, path: path) else { return nil }
         if item == .more {
             let shown = Set(chromes[path]?.headerLayout?.visible ?? [])
@@ -138,9 +138,9 @@ extension StageView {
     }
 
     /// The "…" menu of the tile at `path` (self-test).
-    func moreMenu(_ path: NodePath) -> NSMenu? { menu(for: .more, at: path) }
+    package func moreMenu(_ path: NodePath) -> NSMenu? { menu(for: .more, at: path) }
 
-    func popUp(_ menu: NSMenu, under view: NSView?, path: NodePath) {
+    package func popUp(_ menu: NSMenu, under view: NSView?, path: NodePath) {
         if let view {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: view.isFlipped ? view.bounds.height + 2 : -2), in: view)
         } else if let chrome = chromes[path] {
@@ -150,7 +150,7 @@ extension StageView {
 
     /// One header menu entry as a menu item: its label, its key hint, and
     /// a submenu where it has one.
-    func menuItem(_ entry: TileHeaderMenuEntry, camera: CameraRef, path: NodePath) -> NSMenuItem {
+    package func menuItem(_ entry: TileHeaderMenuEntry, camera: CameraRef, path: NodePath) -> NSMenuItem {
         let item: NSMenuItem
         switch entry.item {
         case .quality:
@@ -215,12 +215,12 @@ extension StageView {
 
     // MARK: The short message over the stage
 
-    func installToast() {
+    package func installToast() {
         addSubview(toast)
     }
 
     /// Shows `text` over the stage for a few seconds (on the stage's clock).
-    func showToast(_ text: String, action: (title: String, handler: () -> Void)? = nil) {
+    package func showToast(_ text: String, action: (title: String, handler: () -> Void)? = nil) {
         toast.show(text, action: action)
         toast.place(in: bounds)
         addSubview(toast, positioned: .above, relativeTo: nil)
@@ -228,9 +228,9 @@ extension StageView {
     }
 
     /// What the message says now, nil when none shows (self-test).
-    var toastText: String? { toast.text }
+    package var toastText: String? { toast.text }
 
-    func tickToast(now: Double) {
+    package func tickToast(now: Double) {
         guard let at = toastHideAt, now >= at else { return }
         toastHideAt = nil
         toast.isHidden = true

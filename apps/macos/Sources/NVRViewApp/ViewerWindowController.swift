@@ -3,6 +3,8 @@ import NVRCore
 import Observation
 import SwiftUI
 import VideoKit
+import AppStage
+import AppBase
 
 /// What the sidebar of one window needs to know about that window.
 @MainActor
