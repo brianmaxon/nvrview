@@ -1,6 +1,7 @@
 import AppKit
 import NVRCore
 import SwiftUI
+import AppBase
 
 /// The Recordings window (docs/UX.md "Recordings"): Window > Recordings
 /// (⌥⌘R). The player in the middle with its transport and the day's
@@ -275,7 +276,7 @@ struct IndexStateText: View {
 struct DeviceCameraToggles: View {
     let model: RecordingsModel
     let app: AppModel
-    let device: AppModel.DeviceRuntime
+    let device: DeviceRuntime
 
     var body: some View {
         let cameras = device.channels.flatMap { app.cameras(device: device.key, channel: $0) }

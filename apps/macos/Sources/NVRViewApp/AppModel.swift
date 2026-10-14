@@ -7,6 +7,7 @@ import Observation
 import VideoKit
 import AppBase
 import AppUpdates
+import AppCalls
 
 #if NVRVIEW_REAL_CORE
 import NVRCoreC
@@ -33,21 +34,6 @@ enum WindowContent: Equatable {
 @MainActor
 @Observable
 final class AppModel {
-    struct DeviceRuntime: Identifiable {
-        var config: DeviceConfig
-        /// The per-run device ID while the device is added to the core.
-        var deviceID: UInt64?
-        var link = DeviceLink()
-        var reportedName: String?
-        var model: String?
-        var channels: [ChannelInfo] = []
-
-        /// The name layouts and groups give the device's cameras: the core's
-        /// stable device key once known (`nv_device_key`), else the app's.
-        var key: String { config.coreKey ?? config.key }
-        var id: String { config.key }
-    }
-
     @ObservationIgnored let bridge: CoreBridge
     /// Set with `--fake`, for the self-test's contract checks.
     @ObservationIgnored let fake: FakeCore?
@@ -1293,56 +1279,8 @@ final class FakeBox: @unchecked Sendable {
     }
 }
 
-/// What the user set for one camera (saved in the app's data directory). The
-/// doorbell options belong to a channel (its first lens).
-struct CameraOptions: Codable, Equatable, Sendable {
-    var camera: CameraRef
-    /// A person on this camera opens an alert inset (docs/UX.md "Alert insets").
-    var entrance = false
-    /// A doorbell: audible when it rings even if nothing was playing.
-    var unmuteOnRing = false
-    /// A doorbell: talk-back allowed (camera motion control; off by default).
-    var allowTalk = false
-    /// Automations (`auto_correction`, a local API client) the user let move
-    /// this camera (camera motion control; none by default). The user's own
-    /// pan, tilt, lens and preset controls need no grant.
-    var motionGrants: [String] = []
-    /// A fisheye camera: how it is mounted (docs/UX.md "Fisheye cameras").
-    var fisheyeMount = FisheyeMount.ceiling
-    /// Where its calls open: true in their own window, false in the insets,
-    /// nil as "Open calls in their own window" says (the default).
-    var callWindow: Bool?
-
-    /// The override for `CallPresentation.resolve`.
-    var callPresentation: CallPresentation? { callWindow.map { $0 ? .window : .inset } }
-
-    init(
-        camera: CameraRef, entrance: Bool = false, unmuteOnRing: Bool = false, allowTalk: Bool = false,
-        fisheyeMount: FisheyeMount = .ceiling
-    ) {
-        self.camera = camera
-        self.entrance = entrance
-        self.unmuteOnRing = unmuteOnRing
-        self.allowTalk = allowTalk
-        self.fisheyeMount = fisheyeMount
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case camera, entrance, unmuteOnRing, allowTalk, fisheyeMount, callWindow, motionGrants
-    }
-
-    init(from decoder: any Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        camera = try c.decode(CameraRef.self, forKey: .camera)
-        entrance = try c.decodeIfPresent(Bool.self, forKey: .entrance) ?? false
-        unmuteOnRing = try c.decodeIfPresent(Bool.self, forKey: .unmuteOnRing) ?? false
-        allowTalk = try c.decodeIfPresent(Bool.self, forKey: .allowTalk) ?? false
-        motionGrants = try c.decodeIfPresent([String].self, forKey: .motionGrants) ?? []
-        fisheyeMount = (try? c.decodeIfPresent(FisheyeMount.self, forKey: .fisheyeMount)) ?? .ceiling
-        callWindow = try c.decodeIfPresent(Bool.self, forKey: .callWindow)
-    }
-
-    var isDefault: Bool {
-        !entrance && !unmuteOnRing && !allowTalk && fisheyeMount == .ceiling && callWindow == nil && motionGrants.isEmpty
-    }
+extension AppModel: AppHost {
+    func startCallRecording(_ camera: CameraRef) { capture.startCall(camera) }
+    func reservedCallStem(_ camera: CameraRef) -> String? { capture.reservedCallStem(camera) }
+    func callEnded(_ camera: CameraRef) { capture.callEnded(camera) }
 }

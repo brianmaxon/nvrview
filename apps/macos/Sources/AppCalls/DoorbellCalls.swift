@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import NVRCore
 import Synchronization
+import AppBase
 
 /// The doorbell calls in progress (docs/UX.md "Doorbell calls"), shared by
 /// every window: a press opens one; the windows show it in the doorbell's
@@ -15,62 +16,62 @@ import Synchronization
 /// Talk or Send finds it off; the core refuses otherwise), and never started
 /// on its own.
 @MainActor
-final class DoorbellCalls {
+package final class DoorbellCalls {
     /// One call's moving parts besides its pure state.
     private final class Session {
-        var call: DoorbellCall
-        var visitor: (any TranscriptionEngine)?
-        var you: (any TranscriptionEngine)?
+        package var call: DoorbellCall
+        package var visitor: (any TranscriptionEngine)?
+        package var you: (any TranscriptionEngine)?
         /// Talk-back started by holding Talk or the toggle (the microphone).
-        var micTalk = false
+        package var micTalk = false
         /// A typed reply waiting for the talk to become active.
-        var pendingReply: [Float]?
+        package var pendingReply: [Float]?
         /// The echo gate, run on the microphone's thread with the doorbell's
         /// level for each block (the level is lock-free to read).
-        let echo = EchoBox()
+        package let echo = EchoBox()
         /// Whether the system cancels the doorbell's echo while the
         /// microphone is on (nil while it is off).
-        var echoCancellation: EchoCancellation?
-        var tapped: CoreTile?
+        package var echoCancellation: EchoCancellation?
+        package var tapped: CoreTile?
         /// A status note for the call (microphone refused, ...).
-        var note: String?
+        package var note: String?
         /// The confirmation to allow talk-back is on screen.
-        var asking = false
+        package var asking = false
         /// What the user last started, and the typed reply's audio, so a
         /// refusal from the core can be answered by the same prompt.
-        var lastAction: TalkPermission.Action?
-        var lastReply: [Float]?
+        package var lastAction: TalkPermission.Action?
+        package var lastReply: [Float]?
         /// The doorbell tile the core was told is in this conversation (its
         /// talk starts skip the per-minute limit while the call is open).
-        var conversationTile: CoreTile?
+        package var conversationTile: CoreTile?
         /// "Record calls" was on when the call opened: its recording starts
         /// once the doorbell's tile is open.
-        var autoRecord = false
+        package var autoRecord = false
 
-        init(call: DoorbellCall) { self.call = call }
+        package init(call: DoorbellCall) { self.call = call }
     }
 
-    private unowned let model: AppModel
+    private unowned let model: any AppHost
     private let services: CallServices
     private var sessions: [CameraRef: Session] = [:]
     private let taps: TapRouter
     private var echoLog = EchoCancellationLog()
 
-    init(model: AppModel, services: CallServices, taps: TapRouter) {
+    package init(model: any AppHost, services: CallServices, taps: TapRouter) {
         self.model = model
         self.services = services
         self.taps = taps
     }
 
     /// The call for a doorbell (any lens of its channel), if one is open.
-    func call(for camera: CameraRef) -> DoorbellCall? { sessions[camera.firstLens]?.call }
-    var cameras: [CameraRef] { Array(sessions.keys) }
-    var isEmpty: Bool { sessions.isEmpty }
+    package func call(for camera: CameraRef) -> DoorbellCall? { sessions[camera.firstLens]?.call }
+    package var cameras: [CameraRef] { Array(sessions.keys) }
+    package var isEmpty: Bool { sessions.isEmpty }
     /// The call's status note: a problem (microphone refused, ...), else
     /// whether echo cancellation is on while the microphone is. The Mac's
     /// call views show the note instead of the talk state, so it is joined
     /// to it here.
-    func note(for camera: CameraRef) -> String? {
+    package func note(for camera: CameraRef) -> String? {
         guard let s = sessions[camera.firstLens] else { return nil }
         if let note = s.note { return note }
         guard s.micTalk, let echo = s.echoCancellation else { return nil }
@@ -79,23 +80,23 @@ final class DoorbellCalls {
 
     /// Whether the system cancels the doorbell's echo in the microphone
     /// (nil while the microphone is off).
-    func echoCancellation(for camera: CameraRef) -> EchoCancellation? {
+    package func echoCancellation(for camera: CameraRef) -> EchoCancellation? {
         guard let s = sessions[camera.firstLens], s.micTalk else { return nil }
         return s.echoCancellation
     }
 
     /// Whether the caption gate runs in its echo-cancelled mode (self-test).
-    func echoGateCancelled(_ camera: CameraRef) -> Bool? { sessions[camera.firstLens]?.echo.echoCancelled }
+    package func echoGateCancelled(_ camera: CameraRef) -> Bool? { sessions[camera.firstLens]?.echo.echoCancelled }
 
     /// The fake microphone, when the services are fakes (self-test).
-    var fakeMicrophone: FakeMicrophone? { services.microphone as? FakeMicrophone }
-    var fakePrompter: FakeTalkPrompter? { services.prompter as? FakeTalkPrompter }
-    var fakeSpeech: FakeSpeechRenderer? { services.speech as? FakeSpeechRenderer }
+    package var fakeMicrophone: FakeMicrophone? { services.microphone as? FakeMicrophone }
+    package var fakePrompter: FakeTalkPrompter? { services.prompter as? FakeTalkPrompter }
+    package var fakeSpeech: FakeSpeechRenderer? { services.speech as? FakeSpeechRenderer }
 
     // MARK: Ring
 
     /// A doorbell press (`visitor` alarm start).
-    func ring(_ doorbell: CameraRef, at date: Date) {
+    package func ring(_ doorbell: CameraRef, at date: Date) {
         let camera = doorbell.firstLens
         if let s = sessions[camera] {
             s.call.pressed(now: model.clock.now)
@@ -115,7 +116,7 @@ final class DoorbellCalls {
     /// control: nothing is sent until the user presses Talk or sends a reply,
     /// and the core refuses without the camera's permission. A call already
     /// open on the camera is kept as it is.
-    func startConversation(_ camera: CameraRef, at date: Date) {
+    package func startConversation(_ camera: CameraRef, at date: Date) {
         let camera = camera.firstLens
         if let s = sessions[camera] {
             s.call.activity(now: model.clock.now)
@@ -130,13 +131,13 @@ final class DoorbellCalls {
 
     /// The user did something with the call's inset (hovered, clicked,
     /// typed): it counts as activity, so the call stays open.
-    func use(_ camera: CameraRef) {
+    package func use(_ camera: CameraRef) {
         sessions[camera.firstLens]?.call.activity(now: model.clock.now)
     }
 
     /// "Keep talking" turned on or off. Kept with the call, so every view of
     /// it (another window's inset, a view built again) shows the same.
-    func setLatched(_ camera: CameraRef, _ on: Bool) {
+    package func setLatched(_ camera: CameraRef, _ on: Bool) {
         guard let s = sessions[camera.firstLens] else { return }
         s.call.setLatched(on, now: model.clock.now)
         if on { startTalking(camera) } else { stopTalking(camera) }
@@ -144,7 +145,7 @@ final class DoorbellCalls {
     }
 
     /// The reply field's text, kept with the call until it is sent.
-    func setDraft(_ camera: CameraRef, _ text: String) {
+    package func setDraft(_ camera: CameraRef, _ text: String) {
         sessions[camera.firstLens]?.call.edited(draft: text, now: model.clock.now)
     }
 
@@ -152,7 +153,7 @@ final class DoorbellCalls {
     /// (docs/UX.md "A call in its own window"). Nothing else about the call
     /// changes (lease, tap, transcript, talk, latch, draft); the pop counts
     /// as activity, so the call gets a fresh minute.
-    func setPresentation(_ camera: CameraRef, _ presentation: CallPresentation) {
+    package func setPresentation(_ camera: CameraRef, _ presentation: CallPresentation) {
         guard let s = sessions[camera.firstLens], s.call.presentation != presentation else { return }
         s.call.presentation = presentation
         s.call.activity(now: model.clock.now)
@@ -160,13 +161,13 @@ final class DoorbellCalls {
     }
 
     /// The visitor's transcription engine (self-test drives its callbacks).
-    func visitorEngine(_ camera: CameraRef) -> (any TranscriptionEngine)? { sessions[camera.firstLens]?.visitor }
+    package func visitorEngine(_ camera: CameraRef) -> (any TranscriptionEngine)? { sessions[camera.firstLens]?.visitor }
 
     /// The doorbell's audio is tapped for the visitor's transcript (self-test).
-    func isTapped(_ camera: CameraRef) -> Bool { sessions[camera.firstLens]?.tapped != nil }
+    package func isTapped(_ camera: CameraRef) -> Bool { sessions[camera.firstLens]?.tapped != nil }
 
     /// A device was removed: its calls end.
-    func endCalls(device key: String) {
+    package func endCalls(device key: String) {
         for camera in Array(sessions.keys) where camera.device == key { end(camera, reason: "device removed") }
     }
 
@@ -213,16 +214,16 @@ final class DoorbellCalls {
     }
 
     /// The doorbell tile the core was told is in a conversation (self-test).
-    func conversationTile(_ camera: CameraRef) -> CoreTile? { sessions[camera.firstLens]?.conversationTile }
+    package func conversationTile(_ camera: CameraRef) -> CoreTile? { sessions[camera.firstLens]?.conversationTile }
 
     /// The doorbell's tile opened or closed: its tap and the conversation
     /// mark follow.
-    func tileChanged(_ camera: CameraRef) {
+    package func tileChanged(_ camera: CameraRef) {
         guard let s = sessions[camera.firstLens] else { return }
         markConversation(s)
         if s.autoRecord, model.leases.tile(for: s.call.camera) != nil {
             s.autoRecord = false
-            model.capture.startCall(s.call.camera)
+            model.startCallRecording(s.call.camera)
         }
         let tile = model.leases.tile(for: camera.firstLens)
         if let old = s.tapped, old !== tile {
@@ -282,7 +283,7 @@ final class DoorbellCalls {
 
     /// The large Unmute control: the doorbell plays; whatever played is
     /// muted for the call.
-    func unmute(_ camera: CameraRef) {
+    package func unmute(_ camera: CameraRef) {
         guard let s = sessions[camera.firstLens] else { return }
         let others = model.audible.subtracting([s.call.camera])
         s.call.mutedForCall.formUnion(others)
@@ -319,7 +320,7 @@ final class DoorbellCalls {
     /// microphone. When the camera's talk-back is off the user is asked
     /// first (nothing is sent before the answer); a `not_permitted` refusal
     /// from the core (options out of sync) asks the same way.
-    func startTalking(_ camera: CameraRef) {
+    package func startTalking(_ camera: CameraRef) {
         guard let s = sessions[camera.firstLens], !s.micTalk, !s.asking else { return }
         s.call.activity(now: model.clock.now)
         s.lastAction = .microphone
@@ -358,7 +359,7 @@ final class DoorbellCalls {
     }
 
     /// Talk released (or the toggle off).
-    func stopTalking(_ camera: CameraRef) {
+    package func stopTalking(_ camera: CameraRef) {
         guard let s = sessions[camera.firstLens] else { return }
         // Whatever stops the microphone turns "Keep talking" off.
         s.call.microphoneStopped()
@@ -380,7 +381,7 @@ final class DoorbellCalls {
         model.changed()
     }
 
-    func isTalkingWithMicrophone(_ camera: CameraRef) -> Bool { sessions[camera.firstLens]?.micTalk == true }
+    package func isTalkingWithMicrophone(_ camera: CameraRef) -> Bool { sessions[camera.firstLens]?.micTalk == true }
 
     /// Asks the core for talk-back unless it runs already; false if refused
     /// at once.
@@ -451,7 +452,7 @@ final class DoorbellCalls {
     /// through the doorbell with the system voice, under the same permission
     /// and limits as Talk. `accepted(false)` when nothing was sent (the user
     /// answered Cancel to the talk-back prompt): the caller keeps the text.
-    func sendReply(_ text: String, to camera: CameraRef, accepted done: @escaping (Bool) -> Void = { _ in }) {
+    package func sendReply(_ text: String, to camera: CameraRef, accepted done: @escaping (Bool) -> Void = { _ in }) {
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let s = sessions[camera.firstLens], !typed.isEmpty, !s.asking else { return done(false) }
         // On its way: the call's draft empties too (unless the user typed on).
@@ -504,7 +505,7 @@ final class DoorbellCalls {
     }
 
     /// A `talk` event for a tile.
-    func talkEvent(_ e: TalkEvent) {
+    package func talkEvent(_ e: TalkEvent) {
         guard let camera = model.leases.camera(forTile: e.tile), let s = sessions[camera.firstLens] else { return }
         // The events of an earlier start that arrive late change nothing.
         guard s.call.talk.apply(e) else { return }
@@ -557,13 +558,13 @@ final class DoorbellCalls {
 
     /// Ends calls a minute after their last activity (the one-second timer;
     /// the self-test's clock).
-    func tick(now: Double) {
+    package func tick(now: Double) {
         for (camera, s) in sessions where s.call.expired(now: now) { end(camera, reason: "no activity") }
     }
 
     /// What plays changed: the echo gate needs to know whether the doorbell
     /// is audible.
-    func audibleChanged(_ audible: Set<CameraRef>) {
+    package func audibleChanged(_ audible: Set<CameraRef>) {
         for (camera, s) in sessions { s.echo.doorbellAudible = audible.contains(camera) }
     }
 
@@ -571,7 +572,7 @@ final class DoorbellCalls {
     /// stops, the tap and transcription end, the audio goes back to what
     /// played before, and the call is logged (with its transcript only when
     /// the user turned saving on).
-    func end(_ camera: CameraRef, reason: String) {
+    package func end(_ camera: CameraRef, reason: String) {
         guard let s = sessions.removeValue(forKey: camera.firstLens) else { return }
         if s.micTalk { services.microphone.stop() }
         if let tile = model.leases.tile(for: s.call.camera), s.call.talk.isTalking || s.pendingReply != nil {
@@ -595,8 +596,8 @@ final class DoorbellCalls {
         model.logEvent(text + " (\(reason))", transcriptFollows: model.saveCallTranscripts && !s.call.transcript.finals.isEmpty)
         // And as a text file of its own (nothing when nothing was transcribed).
         // A recorded call's transcript takes its recording's name.
-        let stem = model.capture.reservedCallStem(s.call.camera)
-        model.capture.callEnded(s.call.camera)
+        let stem = model.reservedCallStem(s.call.camera)
+        model.callEnded(s.call.camera)
         if model.saveCallTranscripts,
             let file = s.call.transcriptFile(cameraName: model.name(of: s.call.camera), endedAt: endedAt)
         {
@@ -610,21 +611,22 @@ final class DoorbellCalls {
     }
 
     /// Ends every call (shutdown).
-    func endAll() {
+    package func endAll() {
         for camera in Array(sessions.keys) { end(camera, reason: "closed") }
     }
 }
 
 /// Routes tapped audio (on the core's tap thread) to the transcription
 /// engine of the call whose doorbell tile it is.
-final class TapRouter: Sendable {
+package final class TapRouter: Sendable {
     private let routes = Mutex<[UInt64: any TranscriptionEngine]>([:])
+    package init() {}
 
-    func add(_ tile: UInt64, _ engine: any TranscriptionEngine) { routes.withLock { $0[tile] = engine } }
-    func remove(_ tile: UInt64) { routes.withLock { _ = $0.removeValue(forKey: tile) } }
+    package func add(_ tile: UInt64, _ engine: any TranscriptionEngine) { routes.withLock { $0[tile] = engine } }
+    package func remove(_ tile: UInt64) { routes.withLock { _ = $0.removeValue(forKey: tile) } }
 
     /// From the core's tap thread: 16 kHz mono, borrowed for the call.
-    func deliver(_ block: CoreAudioBlock, tile: UInt64) {
+    package func deliver(_ block: CoreAudioBlock, tile: UInt64) {
         guard let engine = routes.withLock({ $0[tile] }) else { return }
         engine.feed(pcm16k: Array(block.samples))
     }
@@ -633,22 +635,22 @@ final class TapRouter: Sendable {
 /// The echo gate for one call, used on the microphone's thread; whether the
 /// doorbell is audible is set from the main thread, whether the system
 /// cancels its echo from the microphone's.
-final class EchoBox: Sendable {
+package final class EchoBox: Sendable {
     private let gate = Mutex(MicrophoneEchoGate())
     private let audible = Atomic<Bool>(false)
     private let cancelled = Atomic<Bool>(false)
 
-    var doorbellAudible: Bool {
+    package var doorbellAudible: Bool {
         get { audible.load(ordering: .relaxed) }
         set { audible.store(newValue, ordering: .relaxed) }
     }
 
-    var echoCancelled: Bool {
+    package var echoCancelled: Bool {
         get { cancelled.load(ordering: .relaxed) }
         set { cancelled.store(newValue, ordering: .relaxed) }
     }
 
-    func allows(now: Double, peak: Float) -> Bool {
+    package func allows(now: Double, peak: Float) -> Bool {
         let playing = doorbellAudible
         let cancelled = echoCancelled
         return gate.withLock {

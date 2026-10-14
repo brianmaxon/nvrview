@@ -13,7 +13,7 @@ import Synchronization
 
 /// The computer's microphone as 16 kHz mono float blocks.
 @MainActor
-protocol MicrophoneInput: AnyObject {
+package protocol MicrophoneInput: AnyObject {
     /// Asks for the microphone (the system prompt, once). `done(false)` when
     /// refused or unavailable, with a reason for the call's status line.
     func requestAccess(_ done: @escaping @MainActor (_ granted: Bool, _ reason: String?) -> Void)
@@ -34,28 +34,28 @@ protocol MicrophoneInput: AnyObject {
 
 /// Text-to-speech for a typed reply, as 16 kHz mono float samples.
 @MainActor
-protocol SpeechRenderer: AnyObject {
+package protocol SpeechRenderer: AnyObject {
     func render(_ text: String) async -> [Float]
 }
 
 /// Asks the user to allow talk-back for a camera (the confirmation of
 /// `TalkPermission`); `answer(true)` is Allow. Never answers by itself.
 @MainActor
-protocol TalkPrompter: AnyObject {
+package protocol TalkPrompter: AnyObject {
     func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void)
 }
 
 /// Everything a call needs from the system.
 @MainActor
-struct CallServices {
-    var makeTranscriber: @MainActor (TranscriptSource) -> any TranscriptionEngine
-    var microphone: any MicrophoneInput
-    var speech: any SpeechRenderer
-    var prompter: any TalkPrompter = AlertTalkPrompter()
+package struct CallServices {
+    package var makeTranscriber: @MainActor (TranscriptSource) -> any TranscriptionEngine
+    package var microphone: any MicrophoneInput
+    package var speech: any SpeechRenderer
+    package var prompter: any TalkPrompter = AlertTalkPrompter()
 
     /// The real ones. `player` is the app's audio output, whose engine the
     /// microphone joins for echo cancellation.
-    static func system(player: @escaping @MainActor () -> AudioPlayer?) -> CallServices {
+    package static func system(player: @escaping @MainActor () -> AudioPlayer?) -> CallServices {
         CallServices(
             makeTranscriber: { _ in AppleTranscriber() }, microphone: AppleMicrophone(player: player),
             speech: AppleSpeechRenderer())
@@ -63,16 +63,23 @@ struct CallServices {
 
     /// Fakes for the self-test and development: no permission prompt, no
     /// device; the transcriber turns fed audio into placeholder text.
-    static func fakes() -> CallServices {
+    package static func fakes() -> CallServices {
         CallServices(makeTranscriber: { _ in FakeTranscriber() }, microphone: FakeMicrophone(), speech: FakeSpeechRenderer(),
             prompter: FakeTalkPrompter())
+    }
+
+    package init(makeTranscriber: @escaping @MainActor (TranscriptSource) -> any TranscriptionEngine, microphone: any MicrophoneInput, speech: any SpeechRenderer, prompter: any TalkPrompter = AlertTalkPrompter()) {
+        self.makeTranscriber = makeTranscriber
+        self.microphone = microphone
+        self.speech = speech
+        self.prompter = prompter
     }
 }
 
 /// Whether the running app has a usage string for a protected resource: an
 /// unbundled build (`swift run`) has none, and asking without one ends the
 /// process, so the request is not made.
-func hasUsageString(_ key: String) -> Bool {
+package func hasUsageString(_ key: String) -> Bool {
     (Bundle.main.object(forInfoDictionaryKey: key) as? String)?.isEmpty == false
 }
 
@@ -87,7 +94,7 @@ func hasUsageString(_ key: String) -> Bool {
 /// start, or stops working during the call, the microphone runs on an
 /// engine of its own as before, and the call falls back to the caption gate.
 @MainActor
-final class AppleMicrophone: MicrophoneInput {
+package final class AppleMicrophone: MicrophoneInput {
     private let player: @MainActor () -> AudioPlayer?
     private var engine: AVAudioEngine?
     private var voice: AudioPlayer?
@@ -95,9 +102,9 @@ final class AppleMicrophone: MicrophoneInput {
     /// from an earlier capture changes nothing.
     private var generation = 0
 
-    init(player: @escaping @MainActor () -> AudioPlayer?) { self.player = player }
+    package init(player: @escaping @MainActor () -> AudioPlayer?) { self.player = player }
 
-    func requestAccess(_ done: @escaping @MainActor (Bool, String?) -> Void) {
+    package func requestAccess(_ done: @escaping @MainActor (Bool, String?) -> Void) {
         guard hasUsageString("NSMicrophoneUsageDescription") else {
             done(false, "the microphone needs the packaged app")
             return
@@ -117,7 +124,7 @@ final class AppleMicrophone: MicrophoneInput {
         }
     }
 
-    func start(
+    package func start(
         _ onSamples: @escaping @Sendable ([Float]) -> Void, onEcho: @escaping @Sendable (EchoCancellation) -> Void
     ) throws {
         stop()
@@ -133,7 +140,7 @@ final class AppleMicrophone: MicrophoneInput {
             done: Self.startedHandler(self, generation: generation, onSamples, onEcho))
     }
 
-    func prepare(_ calls: Bool) {
+    package func prepare(_ calls: Bool) {
         guard let player = player() else { return }
         // Building the engine for voice processing reads the input device's
         // format; not before the user allowed the microphone (no prompt).
@@ -216,7 +223,7 @@ final class AppleMicrophone: MicrophoneInput {
         self.engine = engine
     }
 
-    func stop() {
+    package func stop() {
         generation += 1
         voice?.stopVoiceProcessing()
         voice = nil
@@ -231,10 +238,10 @@ final class AppleMicrophone: MicrophoneInput {
 /// The system voice rendered to buffers (`write(_:toBufferCallback:)`), never
 /// to the speakers, then converted to 16 kHz mono for talk-back.
 @MainActor
-final class AppleSpeechRenderer: SpeechRenderer {
+package final class AppleSpeechRenderer: SpeechRenderer {
     private let synthesizer = AVSpeechSynthesizer()
 
-    func render(_ text: String) async -> [Float] {
+    package func render(_ text: String) async -> [Float] {
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: Locale.current.language.languageCode?.identifier ?? "en")
         let collected = SpeechBufferCollector()
@@ -253,11 +260,11 @@ final class AppleSpeechRenderer: SpeechRenderer {
 /// macOS 26): volatile and fast results, one session per source. Installs
 /// the language's assets if needed (status `preparing`), and reports
 /// `unavailable` instead of failing the call when it cannot.
-final class AppleTranscriber: TranscriptionEngine, @unchecked Sendable {
-    var onPartial: (@Sendable (String) -> Void)?
-    var onFinal: (@Sendable (String) -> Void)?
-    var onError: (@Sendable (String) -> Void)?
-    var onStatus: (@Sendable (TranscriptionStatus) -> Void)?
+package final class AppleTranscriber: TranscriptionEngine, @unchecked Sendable {
+    package var onPartial: (@Sendable (String) -> Void)?
+    package var onFinal: (@Sendable (String) -> Void)?
+    package var onError: (@Sendable (String) -> Void)?
+    package var onStatus: (@Sendable (TranscriptionStatus) -> Void)?
 
     private let lock = NSLock()
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
@@ -266,7 +273,7 @@ final class AppleTranscriber: TranscriptionEngine, @unchecked Sendable {
     private var task: Task<Void, Never>?
     private var finished = false
 
-    func start(source: TranscriptSource) {
+    package func start(source: TranscriptSource) {
         let onStatus = onStatus, onError = onError, onPartial = onPartial, onFinal = onFinal
         task = Task { [weak self] in
             onStatus?(.preparing)
@@ -364,7 +371,7 @@ final class AppleTranscriber: TranscriptionEngine, @unchecked Sendable {
         }
     }
 
-    func feed(pcm16k: [Float]) {
+    package func feed(pcm16k: [Float]) {
         lock.withLock {
             guard !finished, let continuation, let format, !pcm16k.isEmpty else { return }
             let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
@@ -394,7 +401,7 @@ final class AppleTranscriber: TranscriptionEngine, @unchecked Sendable {
         }
     }
 
-    func finish() {
+    package func finish() {
         let c = lock.withLock { () -> AsyncStream<AnalyzerInput>.Continuation? in
             finished = true
             defer { continuation = nil }
@@ -414,20 +421,20 @@ final class AppleTranscriber: TranscriptionEngine, @unchecked Sendable {
 
 /// Turns fed audio into placeholder text: a partial result on the first
 /// block, a final one for every second of audio. Never touches Speech.
-final class FakeTranscriber: TranscriptionEngine, @unchecked Sendable {
-    var onPartial: (@Sendable (String) -> Void)?
-    var onFinal: (@Sendable (String) -> Void)?
-    var onError: (@Sendable (String) -> Void)?
-    var onStatus: (@Sendable (TranscriptionStatus) -> Void)?
+package final class FakeTranscriber: TranscriptionEngine, @unchecked Sendable {
+    package var onPartial: (@Sendable (String) -> Void)?
+    package var onFinal: (@Sendable (String) -> Void)?
+    package var onError: (@Sendable (String) -> Void)?
+    package var onStatus: (@Sendable (TranscriptionStatus) -> Void)?
     private let fed = Mutex(0)
     private var source = TranscriptSource.visitor
 
-    func start(source: TranscriptSource) {
+    package func start(source: TranscriptSource) {
         self.source = source
         onStatus?(.running)
     }
 
-    func feed(pcm16k: [Float]) {
+    package func feed(pcm16k: [Float]) {
         let (before, after) = fed.withLock { n -> (Int, Int) in
             defer { n += pcm16k.count }
             return (n, n + pcm16k.count)
@@ -436,21 +443,21 @@ final class FakeTranscriber: TranscriptionEngine, @unchecked Sendable {
         if after / 16_000 > before / 16_000 { onFinal?("(test speech \(after / 16_000))") }
     }
 
-    func finish() { onStatus?(.finished) }
+    package func finish() { onStatus?(.finished) }
 }
 
 /// No microphone: grants at once, sends nothing unless told to.
 @MainActor
-final class FakeMicrophone: MicrophoneInput {
-    private(set) var running = false
+package final class FakeMicrophone: MicrophoneInput {
+    package private(set) var running = false
     private var onSamples: (@Sendable ([Float]) -> Void)?
 
-    func requestAccess(_ done: @escaping @MainActor (Bool, String?) -> Void) { done(true, nil) }
+    package func requestAccess(_ done: @escaping @MainActor (Bool, String?) -> Void) { done(true, nil) }
 
     /// What the next start reports (the self-test sets the fallback too).
-    var echo = EchoCancellation.system
+    package var echo = EchoCancellation.system
 
-    func start(
+    package func start(
         _ onSamples: @escaping @Sendable ([Float]) -> Void, onEcho: @escaping @Sendable (EchoCancellation) -> Void
     ) throws {
         running = true
@@ -459,16 +466,16 @@ final class FakeMicrophone: MicrophoneInput {
     }
 
     /// Whether a call asked for echo cancellation to be prepared.
-    private(set) var prepared = false
-    func prepare(_ calls: Bool) { prepared = calls }
+    package private(set) var prepared = false
+    package func prepare(_ calls: Bool) { prepared = calls }
 
-    func stop() {
+    package func stop() {
         running = false
         onSamples = nil
     }
 
     /// Sends `count` samples of a quiet tone as if spoken.
-    func speak(count: Int) {
+    package func speak(count: Int) {
         let samples = (0..<count).map { Float(0.1 * sin(Double($0) * 2 * Double.pi * 300 / 16_000)) }
         onSamples?(samples)
     }
@@ -477,8 +484,8 @@ final class FakeMicrophone: MicrophoneInput {
 /// The real prompt: an alert sheet on the window that holds the call (a
 /// modal alert when no window is showing).
 @MainActor
-final class AlertTalkPrompter: TalkPrompter {
-    func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void) {
+package final class AlertTalkPrompter: TalkPrompter {
+    package func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void) {
         let alert = NSAlert()
         alert.messageText = prompt.title
         alert.informativeText = prompt.message
@@ -497,10 +504,10 @@ final class AlertTalkPrompter: TalkPrompter {
 /// The self-test's prompt: records what was asked and answers with the next
 /// queued answer (Cancel when none), so no human is needed.
 @MainActor
-final class FakeTalkPrompter: TalkPrompter {
-    private(set) var asked: [TalkPermission.Prompt] = []
-    var answers: [Bool] = []
-    func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void) {
+package final class FakeTalkPrompter: TalkPrompter {
+    package private(set) var asked: [TalkPermission.Prompt] = []
+    package var answers: [Bool] = []
+    package func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void) {
         asked.append(prompt)
         answer(answers.isEmpty ? false : answers.removeFirst())
     }
@@ -508,9 +515,9 @@ final class FakeTalkPrompter: TalkPrompter {
 
 /// Half a second of tone per reply, without a voice.
 @MainActor
-final class FakeSpeechRenderer: SpeechRenderer {
-    private(set) var rendered: [String] = []
-    func render(_ text: String) async -> [Float] {
+package final class FakeSpeechRenderer: SpeechRenderer {
+    package private(set) var rendered: [String] = []
+    package func render(_ text: String) async -> [Float] {
         rendered.append(text)
         return (0..<8_000).map { Float(0.2 * sin(Double($0) * 2 * Double.pi * 220 / 16_000)) }
     }

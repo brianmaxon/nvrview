@@ -38,6 +38,8 @@ let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     ("AppBase", ["NVRCore", "VideoKit"]),
     // Updates: checking, downloading, release notes, and their settings page.
     ("AppUpdates", ["AppBase"]),
+    // Doorbell calls: the call sessions, microphone, speech, and transcripts.
+    ("AppCalls", ["AppBase"]),
 ]
 
 let appDependencies: [Target.Dependency] =
