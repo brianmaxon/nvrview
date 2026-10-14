@@ -8,14 +8,20 @@
 //! camera AI's claim, our detector's boxes, anything else that ran). Sets
 //! expire after the retention time (30 minutes to 24 hours, default 2
 //! hours), and are also capped at [`MAX_SETS`] sets and [`MAX_BYTES`] bytes,
-//! oldest first. Every function takes the time as an argument, so tests run
-//! on a simulated clock.
+//! oldest first. A set made during the night (the alerts' night: sunset and
+//! sunrise at the location, or the fixed hours) is kept until a number of
+//! hours (0 to 12, default 4) after that night ends, so the night can be
+//! reviewed the next morning; the store decides each set's expiry when it
+//! is created and again when the settings change. Every function takes the
+//! time as an argument, so tests run on a simulated clock.
 //!
 //! A pinned set leaves the short-lived store for `pinned/` beside it, where
 //! it keeps the per-alert snapshot limits (7 days, 256 sets, 64 MiB).
 //! Everything is local and is deleted when it expires; nothing here is sent
 //! anywhere.
 
+use alerts::rules::night_end_ms;
+use alerts::settings::{Location, NightSettings};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,10 +34,13 @@ pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// The detections document of a set, in bytes.
 const MAX_DOC_BYTES: usize = 256 * 1024;
 /// Sets kept.
-pub(crate) const MAX_SETS: usize = 300;
+pub(crate) const MAX_SETS: usize = 600;
 /// All short-lived sets together.
-pub(crate) const MAX_BYTES: u64 = 200 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 400 * 1024 * 1024;
 pub(crate) const DEFAULT_RETENTION_MIN: u32 = 120;
+/// Hours a night's sets are kept after the night ends.
+pub(crate) const DEFAULT_NIGHT_HOLD_H: u32 = 4;
+pub(crate) const MAX_NIGHT_HOLD_H: u32 = 12;
 const MIN_RETENTION_MIN: u32 = 30;
 const MAX_RETENTION_MIN: u32 = 24 * 60;
 const PIN_RETENTION_MS: i64 = 7 * 24 * 3600 * 1000;
@@ -41,8 +50,18 @@ const PIN_BYTES: u64 = 64 * 1024 * 1024;
 /// in memory and the same bounds apply.
 const META: &str = "meta.json";
 
+/// What the store needs to tell night from day.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NightPlan {
+    pub location: Option<Location>,
+    pub night: NightSettings,
+    pub offset_min: i32,
+}
+
 struct Set {
     created_ms: i64,
+    /// When the set expires (unpinned sets); decided when it is created.
+    expires_ms: i64,
     bytes: u64,
     pinned: bool,
     /// Frame index to (at_ms, bytes); the bytes live on disk or in `memory`.
@@ -55,6 +74,8 @@ struct Set {
 pub(crate) struct EvidenceStore {
     dir: Option<PathBuf>,
     retention_ms: i64,
+    night_hold_ms: i64,
+    night: Option<NightPlan>,
     /// The caps on the short-lived sets (fields so tests can use small ones).
     max_sets: usize,
     max_bytes: u64,
@@ -98,6 +119,8 @@ impl EvidenceStore {
         let mut s = EvidenceStore {
             dir,
             retention_ms: i64::from(DEFAULT_RETENTION_MIN) * 60_000,
+            night_hold_ms: i64::from(DEFAULT_NIGHT_HOLD_H) * 3_600_000,
+            night: None,
             max_sets: MAX_SETS,
             max_bytes: MAX_BYTES,
             sets: BTreeMap::new(),
@@ -131,6 +154,9 @@ impl EvidenceStore {
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .unwrap_or(Value::Null);
             let created_ms = doc["created_ms"].as_i64().unwrap_or(0);
+            let expires_ms = doc["expires_ms"]
+                .as_i64()
+                .unwrap_or(created_ms + self.retention_ms);
             let mut frames = BTreeMap::new();
             let mut bytes = 0;
             if let Ok(files) = fs::read_dir(&path) {
@@ -155,6 +181,7 @@ impl EvidenceStore {
                 id,
                 Set {
                     created_ms,
+                    expires_ms,
                     bytes,
                     pinned,
                     frames,
@@ -165,10 +192,56 @@ impl EvidenceStore {
         }
     }
 
+    /// When a set made at `created_ms` expires: the retention, or for a set
+    /// made at night, the hold after that night ends if that is later.
+    fn expiry_for(&self, created_ms: i64) -> i64 {
+        let day = created_ms + self.retention_ms;
+        let night_end = self
+            .night
+            .and_then(|p| night_end_ms(p.location, &p.night, created_ms, p.offset_min));
+        match night_end {
+            Some(end) => day.max(end + self.night_hold_ms),
+            None => day,
+        }
+    }
+
+    /// Works out every unpinned set's expiry again (the settings changed).
+    fn reexpire(&mut self) {
+        let ids: Vec<u64> = self
+            .sets
+            .iter()
+            .filter(|(_, s)| !s.pinned)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            let created = self.sets[&id].created_ms;
+            let expires = self.expiry_for(created);
+            if let Some(s) = self.sets.get_mut(&id) {
+                s.expires_ms = expires;
+                s.doc["expires_ms"] = json!(expires);
+            }
+            self.write_doc(id);
+        }
+    }
+
     /// Sets the retention (minutes, clamped) and prunes.
     pub(crate) fn set_retention_min(&mut self, minutes: u32, now_ms: i64) {
         self.retention_ms = i64::from(clamp_retention_min(i64::from(minutes))) * 60_000;
+        self.reexpire();
         self.prune(now_ms);
+    }
+
+    /// Sets the hours a night's sets are kept after the night (0 to 12) and
+    /// what tells night from day (`None`: no night rule), then recomputes.
+    pub(crate) fn set_night(&mut self, hold_h: u32, plan: Option<NightPlan>, now_ms: i64) {
+        self.night_hold_ms = i64::from(hold_h.min(MAX_NIGHT_HOLD_H)) * 3_600_000;
+        self.night = plan;
+        self.reexpire();
+        self.prune(now_ms);
+    }
+
+    pub(crate) fn night_hold_h(&self) -> u32 {
+        u32::try_from(self.night_hold_ms / 3_600_000).unwrap_or(DEFAULT_NIGHT_HOLD_H)
     }
 
     pub(crate) fn retention_min(&self) -> u32 {
@@ -176,12 +249,14 @@ impl EvidenceStore {
     }
 
     fn entry(&mut self, id: u64, now_ms: i64) -> &mut Set {
+        let expires_ms = self.expiry_for(now_ms);
         self.sets.entry(id).or_insert_with(|| Set {
             created_ms: now_ms,
+            expires_ms,
             bytes: 0,
             pinned: false,
             frames: BTreeMap::new(),
-            doc: json!({"trigger_id": id, "created_ms": now_ms}),
+            doc: json!({"trigger_id": id, "created_ms": now_ms, "expires_ms": expires_ms}),
             memory: BTreeMap::new(),
         })
     }
@@ -247,7 +322,7 @@ impl EvidenceStore {
             // The store's own members are not the app's to set.
             if matches!(
                 k.as_str(),
-                "trigger_id" | "created_ms" | "frames" | "pinned"
+                "trigger_id" | "created_ms" | "expires_ms" | "frames" | "pinned"
             ) {
                 continue;
             }
@@ -292,7 +367,7 @@ impl EvidenceStore {
         v["expires_ms"] = if set.pinned {
             json!(set.created_ms + PIN_RETENTION_MS)
         } else {
-            json!(set.created_ms + self.retention_ms)
+            json!(set.expires_ms)
         };
         v["frames"] = Value::Array(
             set.frames
@@ -351,6 +426,7 @@ impl EvidenceStore {
             // The seven days count from the pin.
             set.created_ms = now_ms;
             set.doc["created_ms"] = json!(now_ms);
+            set.doc["expires_ms"] = json!(now_ms + PIN_RETENTION_MS);
         }
         self.write_doc(id);
         self.prune(now_ms);
@@ -368,18 +444,13 @@ impl EvidenceStore {
     /// Drops what expired, then what is over the count and size caps,
     /// oldest first.
     pub(crate) fn prune(&mut self, now_ms: i64) {
-        let retention = self.retention_ms;
         let (cap_sets, cap_bytes) = (self.max_sets, self.max_bytes);
         let expired: Vec<u64> = self
             .sets
             .iter()
             .filter(|(_, s)| {
-                now_ms - s.created_ms
-                    > if s.pinned {
-                        PIN_RETENTION_MS
-                    } else {
-                        retention
-                    }
+                now_ms - s.created_ms > PIN_RETENTION_MS && s.pinned
+                    || !s.pinned && now_ms > s.expires_ms
             })
             .map(|(id, _)| *id)
             .collect();
@@ -553,5 +624,119 @@ mod tests {
             (json!(false), json!(T0), json!(1))
         );
         assert!(!s.merge_doc(1, &json!([1]), T0));
+    }
+
+    fn plan(location: Option<Location>) -> NightPlan {
+        NightPlan {
+            location,
+            night: NightSettings::default(),
+            offset_min: 0,
+        }
+    }
+
+    /// 2024-06-20 00:00 UTC.
+    const DAY0: i64 = 1_718_841_600_000;
+    const HOUR: i64 = 3_600_000;
+
+    #[test]
+    fn a_night_set_is_kept_until_hours_after_the_night_ends() {
+        // Fixed hours 22:00 to 06:00; four hours of hold: until 10:00.
+        let mut s = EvidenceStore::open(None, DAY0);
+        s.set_night(4, Some(plan(None)), DAY0);
+        let night = DAY0 + 23 * HOUR;
+        let day = DAY0 + 12 * HOUR;
+        s.merge_doc(2, &json!({"a": 1}), day);
+        // The daytime set keeps the ordinary 2 hours.
+        assert_eq!(s.get(2, day).unwrap()["expires_ms"], json!(day + 2 * HOUR));
+        s.merge_doc(1, &json!({"a": 1}), night);
+        assert_eq!(
+            s.get(1, night).unwrap()["expires_ms"],
+            json!(DAY0 + 24 * HOUR + 10 * HOUR)
+        );
+        // Next morning at 09:59 the night set is there, at 10:01 it is not.
+        assert!(s.get(1, DAY0 + 24 * HOUR + 10 * HOUR - 60_000).is_some());
+        assert!(s.get(1, DAY0 + 24 * HOUR + 10 * HOUR + 60_000).is_none());
+        // The day set is long gone.
+        assert!(s.get(2, DAY0 + 15 * HOUR).is_none());
+    }
+
+    #[test]
+    fn the_hold_is_zero_to_twelve_hours_and_recomputed_on_change() {
+        let mut s = EvidenceStore::open(None, DAY0);
+        s.set_night(4, Some(plan(None)), DAY0);
+        let night = DAY0 + 23 * HOUR;
+        s.merge_doc(1, &json!({"a": 1}), night);
+        // 0 hours: until the night ends (06:00).
+        s.set_night(0, Some(plan(None)), night);
+        assert_eq!(
+            s.get(1, night).unwrap()["expires_ms"],
+            json!(DAY0 + 30 * HOUR)
+        );
+        // More than 12 is 12.
+        s.set_night(99, Some(plan(None)), night);
+        assert_eq!(s.night_hold_h(), 12);
+        assert_eq!(
+            s.get(1, night).unwrap()["expires_ms"],
+            json!(DAY0 + 42 * HOUR)
+        );
+        // No night rule: the ordinary retention again.
+        s.set_night(4, None, night);
+        assert_eq!(
+            s.get(1, night).unwrap()["expires_ms"],
+            json!(night + 2 * HOUR)
+        );
+    }
+
+    #[test]
+    fn a_sun_based_night_and_a_polar_one() {
+        let london = Some(Location {
+            lat: 51.5,
+            lon: 0.0,
+        });
+        let mut s = EvidenceStore::open(None, DAY0);
+        s.set_night(4, Some(plan(london)), DAY0);
+        // Midsummer 23:30 UTC is night; the next sunrise is about 03:45
+        // UTC less the margin, so the set lasts until about 07:15 UTC.
+        let night = DAY0 + 23 * HOUR + 30 * 60_000;
+        s.merge_doc(1, &json!({"a": 1}), night);
+        let exp = s.get(1, night).unwrap()["expires_ms"].as_i64().unwrap();
+        let next_day = DAY0 + 24 * HOUR;
+        assert!(
+            (next_day + 6 * HOUR..next_day + 8 * HOUR).contains(&exp),
+            "{}",
+            (exp - next_day) / 60_000
+        );
+        // Polar night (the fixed hours' end stands in): 06:00 plus the hold.
+        let arctic = Some(Location {
+            lat: 80.0,
+            lon: 0.0,
+        });
+        let winter = 1_734_739_200_000; // 2024-12-21 00:00 UTC
+        s.set_night(4, Some(plan(arctic)), winter);
+        s.merge_doc(2, &json!({"a": 1}), winter + 12 * HOUR);
+        assert_eq!(
+            s.get(2, winter + 12 * HOUR).unwrap()["expires_ms"],
+            json!(winter + 24 * HOUR + 10 * HOUR)
+        );
+    }
+
+    #[test]
+    fn caps_hold_a_busy_night_and_never_touch_pinned_sets() {
+        assert_eq!((MAX_SETS, MAX_BYTES), (600, 400 * 1024 * 1024));
+        let mut s = EvidenceStore::open(None, DAY0);
+        s.set_night(4, Some(plan(None)), DAY0);
+        let night = DAY0 + 23 * HOUR;
+        s.put_frame(1, 0, night, b"keep", night);
+        assert!(s.pin(1, night));
+        for id in 100..(100 + MAX_SETS as u64 + 10) {
+            assert!(s.merge_doc(id, &json!({"n": id}), night + id as i64));
+        }
+        let t = night + 1000;
+        // Oldest unpinned first; the pinned set stays.
+        assert!(s.get(100, t).is_none());
+        assert!(s.get(109, t).is_none());
+        assert!(s.get(110, t).is_some());
+        assert!(s.get(1, t).is_some());
+        assert_eq!(s.counts().0, MAX_SETS);
     }
 }
