@@ -323,12 +323,16 @@ final class SelfTest {
     }
 
     /// Live pacing (docs/RENDERING.md "Playback pacing"): until every live
-    /// tile of the first window has been delivered `livePacingPictures`
+    /// tile of the first window has decoded `livePacingPictures`
     /// pictures (a count, not a time), each tile notes when each picture
-    /// reaches the app, and the window's renderer counts the pictures it
-    /// draws for the first time; together the tiles must draw at least 90%
-    /// of the pictures delivered (what the header's "Device" and "Shown"
-    /// rates compare). The pictures come in at the stream's own pace, so this
+    /// reaches the app and when the decoder answered it. The verdict
+    /// (`PacingVerdict`: frame selection, gating and drops) is given per tile
+    /// on a simulated 60 Hz display fed with those real decode times
+    /// (`PacingRefresh`), so it does not depend on the refreshes the real
+    /// display gives a covered or minimized window. Before, the step counted
+    /// the pictures the real display drew (at least 90% of those delivered)
+    /// and failed when the window was covered. The real display's count is
+    /// still printed. The pictures come in at the stream's own pace, so this
     /// takes a second or two; the release pacing itself is proven on a
     /// simulated clock in the core's tests (tests/core.rs, live pictures
     /// delivered in groups) and the bounds in PacingStatsTests.
@@ -343,9 +347,6 @@ final class SelfTest {
             t.pacing.reset()
             t.pacing.enabled = true
         }
-        // A window behind others gets few display refreshes: in front (not
-        // activated) while measuring, then behind again.
-        window.window?.orderFrontRegardless()
         let refreshes = window.stage.grid.refreshes
         // How busy the main thread is (the display link runs on it): a 100 Hz timer's longest gap.
         var lastTick = CACurrentMediaTime(), longest = 0.0, ticks = 0
@@ -359,24 +360,23 @@ final class SelfTest {
         }
         RunLoop.main.add(probe, forMode: .common)
         let began = CACurrentMediaTime()
-        when({ tiles.allSatisfy { $0.pacing.report().released.pictures >= Self.livePacingPictures } }, timeout: 15) { [self] in
+        when({ tiles.allSatisfy { $0.pacing.report().decoded >= Self.livePacingPictures } }, timeout: 15) { [self] in
             probe.invalidate()
             let seconds = CACurrentMediaTime() - began
             print(String(format: "live pacing: main thread %d timer ticks in %.2f s, longest gap %.0f ms; window visible %@", ticks, seconds, longest * 1000,
                          window.window?.occlusionState.contains(.visible) == true ? "yes" : "no"))
-            window.window?.orderBack(nil)
             renderer.onNewPicture = nil
             let reports = tiles.map { t in
                 t.pacing.enabled = false
                 return t.pacing.report()
             }
             let arrived = reports.map(\.released.pictures).reduce(0, +)
-            let ratio = arrived > 0 ? Double(shown) / Double(arrived) : 0
             let made = window.stage.grid.refreshes - refreshes
             let first = reports.first.map { String(describing: $0) } ?? "none"
-            print("live pacing: \(tiles.count) tiles, \(arrived) pictures delivered, \(shown) drawn (\(String(format: "%.2f", ratio))), \(made) display refreshes in \(String(format: "%.2f", seconds)) s; first tile: \(first)")
-            if ratio < Self.pacingShownRatio {
-                problems.append("live pacing: \(shown) of \(arrived) delivered pictures were drawn")
+            print("live pacing: \(tiles.count) tiles, \(arrived) pictures delivered, real display drew \(shown) in \(made) refreshes in \(String(format: "%.2f", seconds)) s; first tile: \(first)")
+            if tiles.isEmpty { problems.append("live pacing: no live tile to measure") }
+            for (i, r) in reports.enumerated() {
+                problems.append(contentsOf: r.verdict(minPairs: Self.livePacingPairs).map { "live pacing (tile \(i)): \($0)" })
             }
             next()
         }
@@ -1346,10 +1346,10 @@ final class SelfTest {
 
     var recordingsChecked = false
 
-    /// Share of the delivered pictures the live tiles must draw.
-    static let pacingShownRatio = PacingVerdict.shownRatio
     /// Pictures every live tile is delivered while live pacing measures.
-    static let livePacingPictures = 30
+    static let livePacingPictures = 60
+    /// Shown pairs the live pacing verdict needs of each tile (decoded in the window, past the first picture or two).
+    static let livePacingPairs = 30
     /// Share of the released pictures the real display must draw in the
     /// playback pacing step (a wiring check; the verdict is the simulated
     /// display's).
