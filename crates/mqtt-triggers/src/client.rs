@@ -548,6 +548,8 @@ fn run(ctx: Ctx) {
         let (status, kind, msg) = match fail {
             Fail::Stopped => break,
             Fail::Auth => {
+                // Log first: a reader that sees the status may rely on the line.
+                ctx.log("the broker rejected the login (check the user name and password); not retrying");
                 ctx.shared.update(|s| {
                     s.status = Status::AuthFailed;
                     s.auth_failures += 1;
@@ -555,7 +557,6 @@ fn run(ctx: Ctx) {
                     s.last_error_kind = Some(ErrorKind::Login);
                     s.last_error_ms = Some(now);
                 });
-                ctx.log("the broker rejected the login (check the user name and password); not retrying");
                 return;
             }
             Fail::Refused => (
@@ -569,6 +570,7 @@ fn run(ctx: Ctx) {
                 (Status::Backoff, ErrorKind::Protocol, m)
             }
         };
+        ctx.log(msg);
         ctx.shared.update(|s| {
             s.status = status;
             s.last_error = Some(msg);
@@ -580,7 +582,6 @@ fn run(ctx: Ctx) {
                 s.connect_failures += 1;
             }
         });
-        ctx.log(msg);
         rng ^= rng << 13;
         rng ^= rng >> 7;
         rng ^= rng << 17;
