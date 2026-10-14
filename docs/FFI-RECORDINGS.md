@@ -272,6 +272,16 @@ buckets and aggregates on the way out):
   "peak_db": [-48, -47, -12, null, -50], "rms_db": [-60, -59, -30, null, -61]}]}
 ```
 
+- With `"gaps": true` (minor 15) each lane of an enabled device also has
+  `"gaps": [{"start", "end", "reason", "analyzable"}]`, the runs of `null`
+  buckets as inclusive device-local seconds clipped to the query, split at
+  what the core knows: `reason` is `not_recorded` (the index has no file of
+  the camera there), `no_audio` (the camera's live listener was refused for
+  no audio, or an analysis of the downloaded video of that span found no
+  audio; in memory, re-learned by the next listen or analysis, and
+  forgotten when live audio is heard), or `not_analyzed`; `analyzable` is
+  true when a finished download of the camera covers the gap. A device that
+  is not enabled has no `gaps`.
 - Values are dBFS rounded to whole decibels, `null` where no audio was
   analyzed (not "silence"). Stored as one byte per value: a camera costs
   about 170 KB per day, bounded by the index's age and size limits.
@@ -1695,7 +1705,12 @@ F3.
    downloads of that camera-day (see "Sound from downloaded days" below).
    Proposed C surface for F3:
    `nv_sound_analyze_day(core, json, out, cap, len)` and
-   `nv_sound_analyze_cancel(core, request)`.
+   `nv_sound_analyze_cancel(core, request)`. With `"start"` and `"end"`
+   (both, inclusive device-local seconds inside the day; minor 15) only that
+   span is read, as a source is not read past `end` and only that span's
+   seconds and alarm labels are stored; the events repeat `start` and `end`,
+   and a request for the same camera-day and span is the same request. This
+   is "Analyze this gap" of the loudness lane.
 
 ## Clarifications from the implementation (C13, 2026-10-11)
 

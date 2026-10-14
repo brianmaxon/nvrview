@@ -125,10 +125,16 @@ import Testing
         #expect(RecordingsPanes.shown(width: 800, sidebar: false, inspector: true) == (false, true))
         #expect(RecordingsPanes.shown(width: 2000, sidebar: false, inspector: false) == (false, false))
         // Lanes: all of them while they fit in a third; at least two lanes.
-        // Each lane has its loudness strip (26 + 10), and the legend is under them.
-        #expect(RecordingsPanes.lanesHeight(height: 900, lanes: 3) == CGFloat(18 + 3 * 36 + 14 + 8))
+        // Each lane has its loudness strip (26 + 28), and the legend is under them.
+        #expect(RecordingsPanes.lanesHeight(height: 900, lanes: 3) == CGFloat(18 + 3 * 54 + 14 + 8))
         #expect(RecordingsPanes.lanesHeight(height: 600, lanes: 16) == (600 - RecordingsPanes.transportHeight) / 3)
-        #expect(RecordingsPanes.lanesHeight(height: 200, lanes: 16) == CGFloat(18 + 2 * 36 + 14 + 8))
+        #expect(RecordingsPanes.lanesHeight(height: 200, lanes: 16) == CGFloat(18 + 2 * 54 + 14 + 8))
+        // The strip's height: 28 by default, dragged within 12 to 96, garbage means the default.
+        #expect(RecordingsPanes.loudnessHeight == 28 && RecordingsPanes.rowHeight == 54)
+        #expect(RecordingsPanes.clampLoudness(nil) == 28 && RecordingsPanes.clampLoudness(.nan) == 28)
+        #expect(RecordingsPanes.clampLoudness(5) == 12 && RecordingsPanes.clampLoudness(500) == 96)
+        #expect(RecordingsPanes.clampLoudness(40) == 40)
+        #expect(RecordingsPanes.lanesHeight(height: 900, lanes: 2, loudness: 60) == CGFloat(18 + 2 * 86 + 14 + 8))
     }
 
     @Test func splitAndStrip() {

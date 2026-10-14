@@ -50,6 +50,8 @@ pub(super) struct DayFile {
     pub path: PathBuf,
     /// Milliseconds on the index's clock (device-local naive time).
     pub start_ms: i64,
+    /// Milliseconds on the same clock where the download's range ends.
+    pub end_ms: i64,
 }
 
 /// The finished downloads of `camera` on `device` whose file can reach
@@ -97,6 +99,7 @@ pub(super) fn files_for_day(
             out.push(DayFile {
                 path: c.output.clone(),
                 start_ms,
+                end_ms,
             });
         }
     }

@@ -33,7 +33,55 @@ public sealed partial class FakeRecordings
             }
         }
     }
-    private readonly List<(ulong Request, RecordingCamera Camera, long Day)> _analyses = [];
+    private readonly List<(ulong Request, RecordingCamera Camera, long Day, (long Start, long End)? Span)> _analyses = [];
+    private readonly HashSet<RecordingCamera> _lacksSound = [];
+
+    /// <summary>Marks a camera's recordings as having no sound: its loudness gaps say no_audio (what the core learns from a measurement; tests).</summary>
+    public void SetLacksSound(RecordingCamera camera, bool lacks = true)
+    {
+        lock (_gate)
+        {
+            RecordingCamera mic = camera with { Lens = 0 };
+            _ = lacks ? _lacksSound.Add(mic) : _lacksSound.Remove(mic);
+        }
+    }
+
+    /// <summary>
+    /// The gap [a, b] split like the core does for a camera that recorded all of it: no_audio throughout, or not analyzed
+    /// with the downloaded spans analyzable.
+    /// </summary>
+    internal static List<LoudnessGap> SplitGap(long a, long b, bool noAudio, IEnumerable<(long Start, long End)> downloaded)
+    {
+        if (noAudio)
+        {
+            return [new LoudnessGap(a, b, "no_audio")];
+        }
+        var gaps = new List<LoudnessGap>();
+        long from = a;
+        foreach ((long s, long e) in downloaded.OrderBy(d => d.Start))
+        {
+            if (e < from || s > b)
+            {
+                continue;
+            }
+            if (s > from)
+            {
+                gaps.Add(new LoudnessGap(from, s - 1, "not_analyzed"));
+            }
+            long hi = Math.Min(e, b);
+            gaps.Add(new LoudnessGap(Math.Max(s, from), hi, "not_analyzed", true));
+            from = hi + 1;
+            if (from > b)
+            {
+                break;
+            }
+        }
+        if (from <= b)
+        {
+            gaps.Add(new LoudnessGap(from, b, "not_analyzed"));
+        }
+        return gaps;
+    }
     private ulong _nextAnalysis = 1;
 
     // Seconds of audio analyzed from downloads: first-lens camera, span.
@@ -298,7 +346,7 @@ public sealed partial class FakeRecordings
                     return live || _analyzed.Any(a => a.Camera == c && a.Start <= to && a.End >= from);
                 })];
                 JsonNode?[] Fill(int value) => [.. heard.Select(h => h ? (JsonNode?)JsonValue.Create(value) : null)];
-                return (JsonNode)new JsonObject
+                var lane = new JsonObject
                 {
                     ["camera"] = CameraNode(c),
                     ["bucket_s"] = bucket,
@@ -306,6 +354,37 @@ public sealed partial class FakeRecordings
                     ["peak_db"] = new JsonArray(Fill(-40)),
                     ["rms_db"] = new JsonArray(Fill(-50)),
                 };
+                if (o["gaps"] is JsonValue gv && gv.TryGetValue(out bool wantGaps) && wantGaps)
+                {
+                    // Every camera recorded all day (see above): an empty stretch is no_audio for a camera found without
+                    // sound, else not analyzed, analyzable where a finished download of the camera covers it.
+                    List<(long Start, long End)> downloaded = [.. _downloads
+                        .Where(d => d.State == "done" && d.Cameras.Any(x => x with { Lens = 0 } == c))
+                        .Select(d => (d.Start, d.End))];
+                    var gaps = new JsonArray();
+                    int k = 0;
+                    while (k < heard.Length)
+                    {
+                        if (heard[k])
+                        {
+                            k++;
+                            continue;
+                        }
+                        int first = k;
+                        while (k < heard.Length && !heard[k])
+                        {
+                            k++;
+                        }
+                        long a = start + (first * (long)bucket), z = Math.Min(start + (k * (long)bucket) - 1, end);
+                        foreach (LoudnessGap g in SplitGap(a, z, _lacksSound.Contains(c), downloaded))
+                        {
+                            JsonNode node = new JsonObject { ["start"] = g.Start, ["end"] = g.End, ["reason"] = g.Reason, ["analyzable"] = g.Analyzable };
+                            gaps.Add(node);
+                        }
+                    }
+                    lane["gaps"] = gaps;
+                }
+                return (JsonNode)lane;
             })]);
             return new JsonObject { ["revision"] = _revision, ["lanes"] = lanes }.ToJsonString();
         }
@@ -363,6 +442,17 @@ public sealed partial class FakeRecordings
         {
             throw Error(NvStatus.InvalidArgument, F);
         }
+        (long Start, long End)? span = null;
+        if (o["start"] is not null || o["end"] is not null)
+        {
+            long first = DeviceTime.DayStart(day);
+            if (o["start"] is not JsonValue sv || !sv.TryGetValue(out long s) || o["end"] is not JsonValue ev || !ev.TryGetValue(out long e) ||
+                s < first || e < s || e >= first + DeviceTime.Day)
+            {
+                throw Error(NvStatus.InvalidArgument, F);
+            }
+            span = (s, e);
+        }
         ulong request;
         lock (_gate)
         {
@@ -373,8 +463,8 @@ public sealed partial class FakeRecordings
                 throw Error(NvStatus.Limit, F);
             }
             request = _nextAnalysis++;
-            _analyses.Add((request, c, day));
-            Emit(AnalysisEvent(request, c, day, "queued"));
+            _analyses.Add((request, c, day, span));
+            Emit(AnalysisEvent(request, c, day, "queued", span));
         }
         ScheduleWork();
         return new JsonObject { ["request"] = request, ["state"] = "queued" }.ToJsonString();
@@ -392,9 +482,9 @@ public sealed partial class FakeRecordings
             {
                 throw Error(NvStatus.UnknownId, F);
             }
-            (_, RecordingCamera c, long day) = _analyses[i];
+            (_, RecordingCamera c, long day, (long, long)? span) = _analyses[i];
             _analyses.RemoveAt(i);
-            Emit(AnalysisEvent(request, c, day, "canceled"));
+            Emit(AnalysisEvent(request, c, day, "canceled", span));
         }
     }
 
@@ -402,14 +492,23 @@ public sealed partial class FakeRecordings
     public TileLoudness GetTileLoudness(ulong tile, int capacity) =>
         throw Error(NvStatus.UnknownId, "nv_tile_loudness");
 
-    private static JsonObject AnalysisEvent(ulong request, RecordingCamera c, long day, string state) => new()
+    private static JsonObject AnalysisEvent(ulong request, RecordingCamera c, long day, string state, (long Start, long End)? span = null)
     {
-        ["type"] = "sound_analyze",
-        ["request"] = request,
-        ["camera"] = CameraNode(c),
-        ["day"] = day,
-        ["state"] = state,
-    };
+        var v = new JsonObject
+        {
+            ["type"] = "sound_analyze",
+            ["request"] = request,
+            ["camera"] = CameraNode(c),
+            ["day"] = day,
+            ["state"] = state,
+        };
+        if (span is { } sp)
+        {
+            v["start"] = sp.Start;
+            v["end"] = sp.End;
+        }
+        return v;
+    }
 
     // Called with the gate held, from CompleteRecordingWork.
     // As the core does from finished downloads: with no downloads folder a request fails no_source, with no finished
@@ -419,21 +518,23 @@ public sealed partial class FakeRecordings
     private void CompleteSoundAnalyses()
     {
         bool changed = false;
-        foreach ((ulong request, RecordingCamera c, long day) in _analyses)
+        foreach ((ulong request, RecordingCamera c, long day, (long Start, long End)? span) in _analyses)
         {
             JsonObject last;
             if (_downloadsDir is null)
             {
-                last = AnalysisEvent(request, c, day, "failed");
+                last = AnalysisEvent(request, c, day, "failed", span);
                 last["reason"] = "no_source";
             }
             else
             {
                 long dayStart = DeviceTime.DayStart(day);
+                // A span asked for limits what is read.
+                long lo = Math.Max(span?.Start ?? dayStart, dayStart), hi = Math.Min(span?.End ?? dayStart + DeviceTime.Day - 1, dayStart + DeviceTime.Day - 1);
                 List<(long Start, long End)> spans = [];
                 foreach (FakeDownload d in _downloads.Where(d => d.State == "done" && d.Cameras.Contains(c)))
                 {
-                    long s = Math.Max(d.Start, dayStart), e = Math.Min(d.End, dayStart + DeviceTime.Day - 1);
+                    long s = Math.Max(d.Start, lo), e = Math.Min(d.End, hi);
                     if (s <= e)
                     {
                         spans.Add((s, e));
@@ -441,7 +542,7 @@ public sealed partial class FakeRecordings
                 }
                 if (spans.Count == 0)
                 {
-                    last = AnalysisEvent(request, c, day, "failed");
+                    last = AnalysisEvent(request, c, day, "failed", span);
                     last["reason"] = "no_audio";
                 }
                 else
@@ -459,8 +560,8 @@ public sealed partial class FakeRecordings
                     _revision++;
                     _incidentsRevision++;
                     changed = true;
-                    Emit(AnalysisEvent(request, c, day, "running"));
-                    last = AnalysisEvent(request, c, day, "done");
+                    Emit(AnalysisEvent(request, c, day, "running", span));
+                    last = AnalysisEvent(request, c, day, "done", span);
                     last["seconds"] = seconds;
                     last["labels"] = spans.Count;
                 }

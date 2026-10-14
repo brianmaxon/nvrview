@@ -62,6 +62,7 @@ public sealed class RecordingsBrowser
     private IncidentScope _scope = IncidentScope.Everything;
     private bool _lockedOnly;
     private HashSet<string> _selection = [];
+    private readonly ExportSettings _layout;
 
     /// <param name="model">The shared recordings model.</param>
     /// <param name="files">Opens the files of a follow cut or grid (none: they cannot be opened).</param>
@@ -74,7 +75,8 @@ public sealed class RecordingsBrowser
         HoldId = model.NewHold();
         Player = new RecordingsPlayer(model);
         EditPlayer = new EditPlayer(model, Player, files ?? new NoEditFiles(), audio ?? new NoEditAudio());
-        Export = new ExportController(this, exportSettings);
+        _layout = exportSettings ?? new ExportSettings(null);
+        Export = new ExportController(this, _layout);
         long today = model.Today;
         Day = today;
         Month = DeviceTime.Month(today).Start;
@@ -178,11 +180,39 @@ public sealed class RecordingsBrowser
     public void AnalyzeSound(RecordingCamera? camera = null) =>
         Model.AnalyzeSound(camera is { } c ? [c] : [.. Lanes.Select(l => l.Camera)], Day);
 
+    /// <summary>"Analyze this gap": measures one empty stretch of a lane's loudness from the downloaded video. Only a gap the core said is analyzable.</summary>
+    public void AnalyzeGap(LoudnessGap gap, RecordingCamera camera)
+    {
+        RecordingCamera mic = LoudnessScale.Microphone(camera);
+        if (gap.CanAnalyze && !Model.IsAnalyzing(mic, Day))
+        {
+            Model.AnalyzeSound(mic, Day, (gap.Start, gap.End));
+        }
+    }
+
+    /// <summary>The height of the loudness strips (the user drags it; kept across launches).</summary>
+    public double LoudnessHeight
+    {
+        get => RecordingsPanes.ClampLoudness(_layout.LoudnessHeight);
+        set
+        {
+            double h = RecordingsPanes.ClampLoudness(value);
+            if (h != LoudnessHeight)
+            {
+                _layout.LoudnessHeight = h;
+            }
+        }
+    }
+
+    /// <summary>Writes the strips' height to the settings file (when a drag ends).</summary>
+    public void KeepLoudnessHeight() => _layout.Save();
+
     /// <summary>Cancels a lane's analysis.</summary>
     public void CancelAnalysis(RecordingCamera camera) => Model.CancelAnalysis(camera, Day);
 
     /// <summary>A lane's sound analysis while it waits or runs.</summary>
-    public AnalysisEntry? AnalysisOf(RecordingCamera camera) => Model.Analysis(camera, Day) is { Active: true } e ? e : null;
+    public AnalysisEntry? AnalysisOf(RecordingCamera camera) =>
+        (Model.Analysis(camera, Day) ?? Model.Analysis(LoudnessScale.Microphone(camera), Day)) is { Active: true } e ? e : null;
 
     /// <summary>Whether any lane can still be asked to analyze.</summary>
     public bool CanAnalyze => Lanes.Any(l => !Model.IsAnalyzing(l.Camera, Day));

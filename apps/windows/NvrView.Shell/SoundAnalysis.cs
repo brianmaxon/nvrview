@@ -40,6 +40,10 @@ public static class SoundAnalysis
     /// <summary><c>nv_sound_analyze_day</c>'s input for a camera and a day (any second of it).</summary>
     public static string Query(RecordingCamera camera, long day) => $"{{\"camera\":{camera.Json},\"day\":{day}}}";
 
+    /// <summary><c>nv_sound_analyze_day</c>'s input for one span of a day (a loudness gap), inclusive device-local seconds inside the day.</summary>
+    public static string Query(RecordingCamera camera, long day, long start, long end) =>
+        $"{{\"camera\":{camera.Json},\"day\":{day},\"start\":{start},\"end\":{end}}}";
+
     /// <summary>The state an event names, or null for one this app does not know.</summary>
     public static AnalysisState? ParseState(string name) => name switch
     {

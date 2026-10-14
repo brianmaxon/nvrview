@@ -45,7 +45,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// nv_ptz_lens, nv_ptz_preset, nv_motion_grant). Minor 12: smart alerts
 /// (docs/FFI.md, "Smart alerts"). Minor 13: nv_alerts_sun_times. Minor 14: smart-alert debugging and
 /// review (nv_alerts_messages, nv_alerts_output_test, nv_alert_evidence_*).
-pub const NV_ABI_MINOR: u32 = 14;
+/// Minor 15: loudness gaps with their reasons ("gaps" in
+/// nv_recordings_loudness) and a span within the day for nv_sound_analyze_day.
+pub const NV_ABI_MINOR: u32 = 15;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -2566,7 +2568,14 @@ pub unsafe extern "C" fn nv_sound_watch(
 /// "lanes":[{"camera","bucket_s","start","peak_db":[...],"rms_db":[...]}]},
 /// whole dBFS or null where no audio was analyzed. Answers from memory;
 /// NV_ERR_LIMIT beyond 100000 buckets per lane. Out-buffer rules as
-/// nv_recordings_calendar. Added in minor 8.
+/// nv_recordings_calendar. Added in minor 8. With "gaps":true (minor 15)
+/// each lane of an enabled device also has "gaps":[{"start","end","reason",
+/// "analyzable"}]: the runs of empty buckets (inclusive device-local
+/// seconds) and why they are empty: "not_recorded" (no recording there),
+/// "no_audio" (the camera or that span was measured to have no sound),
+/// "not_analyzed" (recorded, not measured yet; "analyzable" is true when a
+/// finished download covers it, so nv_sound_analyze_day with "start" and
+/// "end" can measure it).
 ///
 /// # Safety
 /// `core` is a live handle; `query` is a NUL-terminated string; `out` is
@@ -2610,7 +2619,9 @@ pub unsafe extern "C" fn nv_sound_labels_put(core: *mut NvCore, json: *const c_c
 }
 
 /// Asks for the sound of one camera's recorded day to be analyzed:
-/// {"camera":{...},"day":S} (any second of the day, device-local). Answers
+/// {"camera":{...},"day":S} (any second of the day, device-local; with
+/// optional "start" and "end" inside the day, minor 15, only that span is
+/// read and stored, and the events carry them). Answers
 /// {"request":N,"state":"queued"}, or the existing request for the same
 /// camera-day; sound_analyze events follow (running, done with seconds and
 /// labels, failed with a reason, canceled). At most 32 requests, one running

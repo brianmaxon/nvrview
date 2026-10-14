@@ -207,6 +207,13 @@ internal sealed partial class RecordingsWindow
         _lanes.Margin = new Thickness(10, 0, 10, 6);
         _lanes.LaneClicked += (camera, second, near) => Browser.LaneClick(camera, second, near);
         _lanes.AnalyzeRequested += camera => Browser.AnalyzeSound(camera);
+        _lanes.AnalyzeGapRequested += (camera, gap) => Browser.AnalyzeGap(gap, camera);
+        _lanes.LoudnessHeightRequested += height =>
+        {
+            Browser.LoudnessHeight = height;
+            RefreshLanes();
+        };
+        _lanes.LoudnessHeightKept += Browser.KeepLoudnessHeight;
         _lanes.AnalyzeCancelRequested += camera => Browser.CancelAnalysis(camera);
         _lanes.ViewportRequested += view =>
         {
@@ -345,7 +352,7 @@ internal sealed partial class RecordingsWindow
             _scrub.Set(0, 0, [], 0, []);
             _scrubStart.Text = _scrubEnd.Text = "";
         }
-        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, open ? t.PositionMs : null, LanesAnalyzing);
+        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, open ? t.PositionMs : null, LanesAnalyzing, Browser.LoudnessHeight);
         _emptyText.Text = editing ? edit.Message ?? (edit.Loading ? "Opening the downloaded files…" : "")
             : open ? ""
             : Browser.Player.Message is { } m ? m
@@ -364,8 +371,8 @@ internal sealed partial class RecordingsWindow
     private void RefreshLanes()
     {
         double height = Math.Max(_playerColumn.ActualHeight, RecordingsPanes.WindowMinHeight - 80);
-        _lanesRow.Height = new GridLength(RecordingsPanes.LanesHeight(height, Browser.Lanes.Count));
-        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null, LanesAnalyzing);
+        _lanesRow.Height = new GridLength(RecordingsPanes.LanesHeight(height, Browser.Lanes.Count, Browser.LoudnessHeight));
+        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null, LanesAnalyzing, Browser.LoudnessHeight);
     }
 
     // ---- the picture area ----

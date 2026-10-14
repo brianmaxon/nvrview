@@ -262,6 +262,17 @@ package final class RecordingsModel {
     /// come back as `sound_analyze` events. Sets `notice` when nothing can
     /// be asked.
     package func analyzeSound(of cameras: [RecordingCamera], day: Int64) {
+        analyzeSound(of: cameras, day: day, span: nil)
+    }
+
+    /// The same for one stretch of a day (a loudness gap, inclusive
+    /// device-local seconds): the core reads the downloaded video only
+    /// there, one analysis per device at a time.
+    package func analyzeSound(of camera: RecordingCamera, day: Int64, span: ClosedRange<Int64>) {
+        analyzeSound(of: [camera], day: day, span: span)
+    }
+
+    private func analyzeSound(of cameras: [RecordingCamera], day: Int64, span: ClosedRange<Int64>?) {
         guard let core = core() else { return }
         guard downloadsFolder != nil else {
             notice = SoundAnalysis.failure(reason: "no_source")
@@ -271,7 +282,9 @@ package final class RecordingsModel {
         for camera in cameras where !isAnalyzing(camera, day: day) {
             let key = AnalysisKey(camera: camera, day: DeviceTime.dayStart(day))
             do throws(CoreStatus) {
-                let answer = try core.soundAnalyzeDay(json: SoundAnalysis.query(camera: camera, day: day))
+                let json = span.map { SoundAnalysis.query(camera: camera, day: day, start: $0.lowerBound, end: $0.upperBound) }
+                    ?? SoundAnalysis.query(camera: camera, day: day)
+                let answer = try core.soundAnalyzeDay(json: json)
                 let request = (try? JSONSerialization.jsonObject(with: Data(answer.utf8)) as? [String: Any])?["request"]
                 if soundAnalyses[key]?.active != true, let id = (request as? NSNumber)?.uint64Value {
                     soundAnalyses[key] = SoundAnalysis.Entry(request: id, state: .queued)
@@ -358,7 +371,7 @@ package final class RecordingsModel {
     /// Loudness lanes for `cameras` over `[start, end]` (memory only).
     package func loudness(start: Int64, end: Int64, bucket: Int64, cameras: [RecordingCamera]) -> LoudnessAnswer? {
         guard !cameras.isEmpty else { return nil }
-        let q = LoudnessScale.query(start: start, end: end, bucket: bucket, cameras: cameras)
+        let q = LoudnessScale.query(start: start, end: end, bucket: bucket, cameras: cameras, gaps: true)
         return query { core throws(CoreStatus) in try core.recordingsLoudness(query: q) }
     }
 

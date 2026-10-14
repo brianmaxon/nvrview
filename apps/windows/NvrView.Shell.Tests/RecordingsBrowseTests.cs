@@ -335,10 +335,16 @@ internal static class RecordingsBrowseTests
             T.Equal((false, false), RecordingsPanes.Shown(600, true, true));
             T.Equal((false, true), RecordingsPanes.Shown(800, false, true));
             T.Equal((false, false), RecordingsPanes.Shown(2000, false, false));
-            // Each lane has its loudness strip (26 + 10), and the legend is under them.
-            T.Equal(18.0 + 3 * 36 + 14 + 8, RecordingsPanes.LanesHeight(900, 3));
+            // Each lane has its loudness strip (26 + 28), and the legend is under them.
+            T.Equal(18.0 + 3 * 54 + 14 + 8, RecordingsPanes.LanesHeight(900, 3));
             T.Equal((600 - RecordingsPanes.TransportHeight) / 3, RecordingsPanes.LanesHeight(600, 16));
-            T.Equal(18.0 + 2 * 36 + 14 + 8, RecordingsPanes.LanesHeight(200, 16));
+            T.Equal(18.0 + 2 * 54 + 14 + 8, RecordingsPanes.LanesHeight(200, 16));
+            // The strip's height: 28 by default, dragged within 12 to 96, garbage means the default.
+            T.Check(RecordingsPanes.LoudnessHeight == 28 && RecordingsPanes.RowHeight == 54);
+            T.Check(RecordingsPanes.ClampLoudness(null) == 28 && RecordingsPanes.ClampLoudness(double.NaN) == 28);
+            T.Check(RecordingsPanes.ClampLoudness(5) == 12 && RecordingsPanes.ClampLoudness(500) == 96);
+            T.Check(RecordingsPanes.ClampLoudness(40) == 40);
+            T.Equal(18.0 + 2 * 86 + 14 + 8, RecordingsPanes.LanesHeight(900, 2, 60));
             T.Equal<long?>(105, IncidentSplit.Second(100, 110, 105_400));
             T.Equal<long?>(null, IncidentSplit.Second(100, 110, 100_900));
             T.Equal<long?>(null, IncidentSplit.Second(100, 110, 110_000));

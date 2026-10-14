@@ -12,7 +12,8 @@ package struct PlayerColumn: View {
 
     package var body: some View {
         GeometryReader { geo in
-            let lanes = RecordingsPanes.lanesHeight(height: geo.size.height, lanes: browser.lanes.count)
+            let lanes = RecordingsPanes.lanesHeight(
+                height: geo.size.height, lanes: browser.lanes.count, loudness: browser.loudnessHeight)
             VStack(spacing: 0) {
                 Group {
                     if browser.playerView == .cameras {
@@ -561,7 +562,7 @@ package struct TimelineLanes: View {
     private let labelWidth: CGFloat = 130
 
     package var body: some View {
-        let laneHeight = RecordingsPanes.laneHeight, rowHeight = RecordingsPanes.rowHeight
+        let laneHeight = RecordingsPanes.laneHeight, rowHeight = RecordingsPanes.rowHeight(loudness: browser.loudnessHeight)
         VStack(spacing: 0) {
             if browser.lanes.isEmpty {
                 Text("Choose the cameras to search to see their recordings here.")
@@ -628,9 +629,8 @@ package struct TimelineLanes: View {
                                     ForEach(browser.lanes) { lane in
                                         LaneView(browser: browser, lane: lane, zoom: zoom, start: start)
                                             .frame(width: viewport, height: laneHeight)
-                                        LoudnessStrip(lane: browser.loudness(of: lane.camera), day: browser.day, zoom: zoom, start: start)
+                                        LoudnessCell(browser: browser, lane: lane, zoom: zoom, start: start, width: viewport)
                                             .frame(width: viewport, height: rowHeight - laneHeight)
-                                            .help(LoudnessStrip.help(browser.loudness(of: lane.camera), listening: browser.model.isListening(lane.camera)))
                                     }
                                     LoudnessLegend().frame(height: RecordingsPanes.legendHeight)
                                 }
@@ -997,6 +997,8 @@ package struct LoudnessStrip: View, @preconcurrency Animatable {
     package let day: Int64
     package var zoom: Double
     package var start: Double
+    /// The gap under the pointer, drawn stronger.
+    package var hovered: LoudnessGap?
 
     // Zoom and start animate together (a wheel notch eases).
     package var animatableData: AnimatablePair<Double, Double> {
@@ -1012,6 +1014,21 @@ package struct LoudnessStrip: View, @preconcurrency Animatable {
             ctx.fill(Path(CGRect(x: 0, y: 0, width: size.width, height: size.height)), with: .color(.secondary.opacity(0.05)))
             guard let lane, lane.bucket > 0 else { return }
             let map = TimelineMap(day: day, zoom: zoom, start: start, width: size.width)
+            // Empty stretches say why: a label where it fits, a tint where
+            // "Analyze this gap" applies.
+            for g in lane.gaps {
+                let x0 = max(map.x(g.start), 0), x1 = min(map.x(g.end + 1), size.width)
+                guard x1 > x0 else { continue }
+                if g.canAnalyze {
+                    ctx.fill(Path(CGRect(x: x0, y: 0, width: x1 - x0, height: size.height)),
+                        with: .color(Color.accentColor.opacity(g == hovered ? 0.18 : 0.08)))
+                }
+                let text = ctx.resolve(Text(g.label).font(.system(size: 9)).foregroundColor(.secondary))
+                let tw = text.measure(in: size).width
+                if size.height >= 14, x1 - x0 >= tw + 8 {
+                    ctx.draw(text, at: CGPoint(x: (x0 + x1) / 2, y: size.height / 2), anchor: .center)
+                }
+            }
             let w = max(map.pointsPerSecond * CGFloat(lane.bucket), 1)
             let first = max(0, Int((map.second(atX: 0) - lane.start) / lane.bucket))
             guard first < lane.peak.count else { return }
@@ -1029,18 +1046,78 @@ package struct LoudnessStrip: View, @preconcurrency Animatable {
         }
     }
 
-    package static func help(_ lane: LoudnessLane?, listening: Bool) -> String {
+    package static func help(_ lane: LoudnessLane?, listening: Bool, gap: LoudnessGap? = nil) -> String {
+        if let gap { return gap.help }
         if lane?.heard == true { return "Loudness: light is the loudest second, dark the average" }
         return listening
             ? "No sound analyzed on this day yet"
             : "No sound analyzed: sound is analyzed while the camera is on screen or listens for sounds, or for a downloaded day with Analyze Sounds"
     }
 
-    package init(lane: LoudnessLane?, day: Int64, zoom: Double, start: Double) {
+    package init(lane: LoudnessLane?, day: Int64, zoom: Double, start: Double, hovered: LoudnessGap? = nil) {
         self.lane = lane
         self.day = day
         self.zoom = zoom
         self.start = start
+        self.hovered = hovered
+    }
+}
+
+/// One lane's loudness strip with its gap hover text, the "Analyze this
+/// gap" menu, and a handle on its lower edge to drag the strips' height.
+package struct LoudnessCell: View {
+    @Bindable package var browser: RecordingsBrowser
+    package let lane: RecordingsBrowser.Lane
+    package let zoom: Double
+    package let start: Double
+    package let width: CGFloat
+    /// Where the pointer is (kept after it leaves, so a context menu knows
+    /// where it opened) and the height when a drag began.
+    @State private var hoverX: CGFloat?
+    @State private var lastX: CGFloat?
+    @State private var dragFrom: CGFloat?
+
+    private func gap(at x: CGFloat?, _ loud: LoudnessLane?) -> LoudnessGap? {
+        guard let x, let loud else { return nil }
+        return loud.gap(at: TimelineMap(day: browser.day, zoom: zoom, start: start, width: width).second(atX: x))
+    }
+
+    package var body: some View {
+        let loud = browser.loudness(of: lane.camera)
+        let under = gap(at: hoverX, loud)
+        LoudnessStrip(lane: loud, day: browser.day, zoom: zoom, start: start, hovered: under)
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let p):
+                    hoverX = p.x
+                    lastX = p.x
+                case .ended: hoverX = nil
+                }
+            }
+            .help(LoudnessStrip.help(loud, listening: browser.model.isListening(lane.camera), gap: under))
+            .contextMenu {
+                if let g = gap(at: lastX, loud) {
+                    Button("Analyze this gap") { browser.analyzeGap(g, of: lane.camera) }
+                        .disabled(!g.canAnalyze || browser.model.isAnalyzing(LoudnessScale.microphone(of: lane.camera), day: browser.day))
+                    Text(g.help)
+                } else {
+                    Text("Right-click an empty stretch to analyze it")
+                }
+            }
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Color.clear).frame(height: 5).contentShape(Rectangle())
+                    .onHover { inside in if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { v in
+                                if dragFrom == nil { dragFrom = browser.loudnessHeight }
+                                browser.loudnessHeight = RecordingsPanes.clampLoudness(Double((dragFrom ?? 0) + v.translation.height))
+                            }
+                            .onEnded { _ in dragFrom = nil }
+                    )
+                    .help("Drag to change the height of the loudness lanes")
+                    .accessibilityLabel("Loudness lane height")
+            }
     }
 }
 
@@ -1053,7 +1130,7 @@ package struct LoudnessLegend: View {
             Text("loudest")
             RoundedRectangle(cornerRadius: 1).fill(Color.loudness.opacity(0.85)).frame(width: 10, height: 7)
             Text("average")
-            Text("· blank: not analyzed (not silence)")
+            Text("· blank: not analyzed, not recorded, or no audio (not silence)")
             RoundedRectangle(cornerRadius: 1).fill(Color.soundLane).frame(width: 10, height: 7).padding(.leading, 6)
             Text("a sound")
             Spacer(minLength: 0)

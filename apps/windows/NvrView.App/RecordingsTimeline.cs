@@ -301,6 +301,80 @@ internal sealed class ScrubBar : Canvas
     }
 }
 
+/// <summary>
+/// The thin bar on the first loudness strip's lower edge: dragging it up or down asks for another height of all the strips
+/// (the browser clamps and keeps it). It is not drawn into the lanes' canvas, so redrawing the lanes does not end a drag.
+/// </summary>
+internal sealed class LoudnessResizeHandle : Grid
+{
+    /// <summary>How tall the grab area is.</summary>
+    public const double Thickness = 6;
+
+    private double? _fromY;
+    private double _fromHeight;
+
+    public LoudnessResizeHandle()
+    {
+        Background = new SolidColorBrush(Colors.Transparent);
+        VerticalAlignment = VerticalAlignment.Top;
+        HorizontalAlignment = HorizontalAlignment.Stretch;
+        Visibility = Visibility.Collapsed;
+        Children.Add(new Rectangle
+        {
+            Height = 1,
+            VerticalAlignment = VerticalAlignment.Center,
+            Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(0x38, 0xFF, 0xFF, 0xFF)),
+            IsHitTestVisible = false,
+        });
+        ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.SizeNorthSouth);
+        ToolTipService.SetToolTip(this, "Drag to change the height of the loudness lanes");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, "Loudness lane height");
+        PointerPressed += (_, e) =>
+        {
+            if (CapturePointer(e.Pointer))
+            {
+                _fromY = e.GetCurrentPoint(null).Position.Y;
+                _fromHeight = CurrentHeight;
+                e.Handled = true;
+            }
+        };
+        PointerMoved += (_, e) =>
+        {
+            if (_fromY is { } from)
+            {
+                HeightChanged?.Invoke(_fromHeight + (e.GetCurrentPoint(null).Position.Y - from));
+                e.Handled = true;
+            }
+        };
+        PointerReleased += (_, e) => End(e.Pointer);
+        PointerCanceled += (_, e) => End(e.Pointer);
+        PointerCaptureLost += (_, _) => End(null);
+    }
+
+    /// <summary>The strips' height now (set by the lanes).</summary>
+    public double CurrentHeight { get; set; }
+
+    /// <summary>The height asked for while dragging.</summary>
+    public event Action<double>? HeightChanged;
+
+    /// <summary>The drag ended.</summary>
+    public event Action? Kept;
+
+    private void End(Pointer? pointer)
+    {
+        if (_fromY is null)
+        {
+            return;
+        }
+        _fromY = null;
+        if (pointer is not null)
+        {
+            ReleasePointerCapture(pointer);
+        }
+        Kept?.Invoke();
+    }
+}
+
 /// <summary>The day's timeline lanes with an hour ruler, zoom, and the playhead.</summary>
 internal sealed class LanesView : Grid
 {
@@ -318,6 +392,8 @@ internal sealed class LanesView : Grid
     private IReadOnlyList<TimelineLane> _lanes = [];
     private IReadOnlyList<LoudnessLane?> _loudness = [];
     private IReadOnlySet<RecordingCamera> _analyzing = new HashSet<RecordingCamera>();
+    private double _loudnessHeight = RecordingsPanes.LoudnessHeight;
+    private readonly LoudnessResizeHandle _handle = new();
     private long _day;
     private TimelineViewport _view = new();
     // Scrolls of ours still to land (their ViewChanged is not the user's), and retries left.
@@ -328,9 +404,15 @@ internal sealed class LanesView : Grid
     private InOutPoints _points;
     private readonly Rectangle _band = new() { Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(0x30, 0xFF, 0xC1, 0x07)), IsHitTestVisible = false, Visibility = Visibility.Collapsed };
 
+    /// <summary>A lane with its loudness strip at the height shown.</summary>
+    private double RowHeight => RecordingsPanes.RowHeightFor(_loudnessHeight);
+
     public LanesView()
     {
         Children.Add(_scroll);
+        Children.Add(_handle);
+        _handle.HeightChanged += h => LoudnessHeightRequested?.Invoke(h);
+        _handle.Kept += () => LoudnessHeightKept?.Invoke();
         _scroll.Content = _canvas;
         _scroll.SizeChanged += (_, _) =>
         {
@@ -348,6 +430,15 @@ internal sealed class LanesView : Grid
 
     /// <summary>"Analyze Sounds" was chosen from a lane's menu.</summary>
     public event Action<RecordingCamera>? AnalyzeRequested;
+
+    /// <summary>"Analyze this gap" was chosen from the menu on a loudness gap.</summary>
+    public event Action<RecordingCamera, LoudnessGap>? AnalyzeGapRequested;
+
+    /// <summary>The user is dragging the loudness strips' height (the height asked for).</summary>
+    public event Action<double>? LoudnessHeightRequested;
+
+    /// <summary>The drag of the strips' height ended (keep it).</summary>
+    public event Action? LoudnessHeightKept;
 
     /// <summary>The cancel beside a lane's analysis progress was clicked.</summary>
     public event Action<RecordingCamera>? AnalyzeCancelRequested;
@@ -368,11 +459,12 @@ internal sealed class LanesView : Grid
 
     /// <summary>Shows the lanes of a day, <paramref name="view"/>'s part of it, with each lane's loudness (in lane order).</summary>
     public void Set(IReadOnlyList<TimelineLane> lanes, IReadOnlyList<LoudnessLane?> loudness, long day, TimelineViewport view, long? playheadMs,
-        IReadOnlySet<RecordingCamera>? analyzing = null)
+        IReadOnlySet<RecordingCamera>? analyzing = null, double loudnessHeight = RecordingsPanes.LoudnessHeight)
     {
         analyzing ??= new HashSet<RecordingCamera>();
         bool changed = !ReferenceEquals(lanes, _lanes) || !loudness.SequenceEqual(_loudness) || day != _day || view.Zoom != _view.Zoom || !_drawn ||
-            !analyzing.SetEquals(_analyzing);
+            !analyzing.SetEquals(_analyzing) || loudnessHeight != _loudnessHeight;
+        _loudnessHeight = loudnessHeight;
         _lanes = lanes;
         _loudness = loudness;
         _analyzing = analyzing;
@@ -408,6 +500,7 @@ internal sealed class LanesView : Grid
     private void OnViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
         PlaceLabels();
+        PlaceHandle();
         if (e.IsIntermediate || _scroll.ActualWidth <= 0)
         {
             return;
@@ -445,7 +538,7 @@ internal sealed class LanesView : Grid
         _drawn = true;
         _canvas.Children.Clear();
         _labels.Clear();
-        double height = RecordingsPanes.RulerHeight + Math.Max(_lanes.Count, 1) * RecordingsPanes.RowHeight + RecordingsPanes.LegendHeight;
+        double height = RecordingsPanes.RulerHeight + Math.Max(_lanes.Count, 1) * RowHeight + RecordingsPanes.LegendHeight;
         _canvas.Width = w;
         _canvas.Height = height;
         // Hour ruler: every 6 hours at the whole day, finer as it zooms.
@@ -467,7 +560,7 @@ internal sealed class LanesView : Grid
         for (int i = 0; i < _lanes.Count; i++)
         {
             TimelineLane lane = _lanes[i];
-            double top = RecordingsPanes.RulerHeight + i * RecordingsPanes.RowHeight;
+            double top = RecordingsPanes.RulerHeight + i * RowHeight;
             foreach (RecordingSpan s in lane.Spans)
             {
                 double x0 = w * (s.Start - _day) / 86400.0, x1 = w * (s.End - _day) / 86400.0;
@@ -484,7 +577,7 @@ internal sealed class LanesView : Grid
                 Canvas.SetTop(bar, top + 3);
                 _canvas.Children.Add(bar);
             }
-            AddLoudness(i < _loudness.Count ? _loudness[i] : null, top + RecordingsPanes.LaneHeight, w);
+            AddLoudness(lane.Camera, i < _loudness.Count ? _loudness[i] : null, top + RecordingsPanes.LaneHeight, w);
             var name = new TextBlock
             {
                 Text = lane.Failed ? $"{lane.Name} \u26A0 could not search this day" : lane.Name,
@@ -518,7 +611,7 @@ internal sealed class LanesView : Grid
         }
         var legend = new TextBlock
         {
-            Text = "Loudness: light = loudest second, dark = average; blank = not analyzed (not silence). Pink bars are sounds.",
+            Text = "Loudness: light = loudest second, dark = average; blank = not analyzed, not recorded, or no audio (not silence). Pink bars are sounds. Drag the lower edge of the first strip to resize.",
             FontSize = 10,
             Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xA3, 0xA8)),
             IsHitTestVisible = false,
@@ -529,8 +622,25 @@ internal sealed class LanesView : Grid
         _canvas.Children.Add(_band);
         _canvas.Children.Add(_head);
         PlaceLabels();
+        PlaceHandle();
         PlaceHead();
         PlaceBand();
+    }
+
+    // The handle on the first strip's lower edge, kept in place while the lanes scroll (it is not part of the canvas, so
+    // a drag survives the redraws it causes).
+    private void PlaceHandle()
+    {
+        if (_lanes.Count == 0 || !_drawn)
+        {
+            _handle.Visibility = Visibility.Collapsed;
+            return;
+        }
+        double y = RecordingsPanes.RulerHeight + RecordingsPanes.LaneHeight + _loudnessHeight - _scroll.VerticalOffset - (LoudnessResizeHandle.Thickness / 2);
+        _handle.Visibility = y > -LoudnessResizeHandle.Thickness && y < ActualHeight ? Visibility.Visible : Visibility.Collapsed;
+        _handle.Margin = new Thickness(0, Math.Max(y, 0), 0, 0);
+        _handle.Height = LoudnessResizeHandle.Thickness;
+        _handle.CurrentHeight = _loudnessHeight;
     }
 
     /// <summary>Shows the in and out points as a shaded band over the lanes (an unset one is the day's edge).</summary>
@@ -565,23 +675,60 @@ internal sealed class LanesView : Grid
 
     // A lane's loudness strip: the loudest second of each bucket light, its average dark, from -80 dBFS (nothing)
     // to 0 (full height), as two polygons (not a shape per bucket); blank where no audio was analyzed.
-    private void AddLoudness(LoudnessLane? lane, double top, double width)
+    private void AddLoudness(RecordingCamera camera, LoudnessLane? lane, double top, double width)
     {
-        double h = RecordingsPanes.LoudnessHeight, bottom = top + h;
+        double h = _loudnessHeight, bottom = top + h;
         var track = new Rectangle { Width = width, Height = h, Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(0x0D, 0xFF, 0xFF, 0xFF)), IsHitTestVisible = false };
         Canvas.SetTop(track, top);
         _canvas.Children.Add(track);
-        if (lane is null || lane.Bucket <= 0 || !lane.Heard)
+        if (lane is null || lane.Bucket <= 0)
         {
             return;
         }
-        _canvas.Children.Add(Envelope(lane, lane.Peak, 0x60, bottom, width));
-        _canvas.Children.Add(Envelope(lane, lane.Rms, 0xD8, bottom, width));
+        if (lane.Heard)
+        {
+            _canvas.Children.Add(Envelope(lane, lane.Peak, 0x60, bottom, width));
+            _canvas.Children.Add(Envelope(lane, lane.Rms, 0xD8, bottom, width));
+        }
+        // Empty stretches say why: a label where it fits, a tint where "Analyze this gap" applies, and the reason as
+        // hover text.
+        foreach (LoudnessGap g in lane.GapList)
+        {
+            double x0 = width * (g.Start - _day) / 86400.0, x1 = width * (g.End + 1 - _day) / 86400.0;
+            if (x1 <= x0)
+            {
+                continue;
+            }
+            var hit = new Rectangle
+            {
+                Width = x1 - x0,
+                Height = h,
+                Fill = new SolidColorBrush(g.CanAnalyze ? Windows.UI.Color.FromArgb(0x22, 0x3B, 0x82, 0xF6) : Colors.Transparent),
+            };
+            ToolTipService.SetToolTip(hit, g.Help);
+            Canvas.SetLeft(hit, x0);
+            Canvas.SetTop(hit, top);
+            _canvas.Children.Add(hit);
+            // About 5.5 points a character at 9 points; the label is skipped where it would not fit or the strip is thin.
+            if (h >= 14 && x1 - x0 >= (g.Label.Length * 5.5) + 8)
+            {
+                var text = new TextBlock
+                {
+                    Text = g.Label,
+                    FontSize = 9,
+                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xA3, 0xA8)),
+                    IsHitTestVisible = false,
+                };
+                Canvas.SetLeft(text, x0 + 4);
+                Canvas.SetTop(text, top + ((h - 12) / 2));
+                _canvas.Children.Add(text);
+            }
+        }
     }
 
     private Polygon Envelope(LoudnessLane lane, IReadOnlyList<int?> values, byte alpha, double bottom, double width)
     {
-        double h = RecordingsPanes.LoudnessHeight;
+        double h = _loudnessHeight;
         var points = new Microsoft.UI.Xaml.Media.PointCollection();
         double x = 0;
         points.Add(new Windows.Foundation.Point(0, bottom));
@@ -621,7 +768,7 @@ internal sealed class LanesView : Grid
     }
 
     private (int Lane, long Second) At(Windows.Foundation.Point p) =>
-        ((int)Math.Floor((p.Y - RecordingsPanes.RulerHeight) / RecordingsPanes.RowHeight), _day + (long)(p.X / ContentWidth * 86400));
+        ((int)Math.Floor((p.Y - RecordingsPanes.RulerHeight) / RowHeight), _day + (long)(p.X / ContentWidth * 86400));
 
     private void OnTapped(object sender, TappedRoutedEventArgs e)
     {
@@ -641,7 +788,7 @@ internal sealed class LanesView : Grid
     private void OnRightTapped(object sender, RightTappedRoutedEventArgs e)
     {
         Windows.Foundation.Point at = e.GetPosition(_canvas);
-        (int lane, _) = At(at);
+        (int lane, long second) = At(at);
         if (lane < 0 || lane >= _lanes.Count)
         {
             return;
@@ -650,6 +797,16 @@ internal sealed class LanesView : Grid
         var item = new MenuFlyoutItem { Text = "Analyze Sounds", IsEnabled = !_analyzing.Contains(camera) };
         item.Click += (_, _) => AnalyzeRequested?.Invoke(camera);
         var menu = new MenuFlyout();
+        // On a loudness strip's empty stretch: the gap's own action (enabled where video is downloaded to read).
+        double inRow = at.Y - RecordingsPanes.RulerHeight - (lane * RowHeight);
+        if (inRow >= RecordingsPanes.LaneHeight && lane < _loudness.Count && _loudness[lane]?.GapAt(second) is { } gap)
+        {
+            var gapItem = new MenuFlyoutItem { Text = "Analyze this gap", IsEnabled = gap.CanAnalyze && !_analyzing.Contains(camera) };
+            gapItem.Click += (_, _) => AnalyzeGapRequested?.Invoke(camera, gap);
+            menu.Items.Add(gapItem);
+            menu.Items.Add(new MenuFlyoutItem { Text = gap.Help, IsEnabled = false });
+            menu.Items.Add(new MenuFlyoutSeparator());
+        }
         menu.Items.Add(item);
         menu.ShowAt(_canvas, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions { Position = at });
         e.Handled = true;

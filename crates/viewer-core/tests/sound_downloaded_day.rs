@@ -254,3 +254,98 @@ fn without_downloads_there_is_no_source() {
     );
     sim.run_free(|| core.shutdown());
 }
+
+/// A loudness gap says why it is empty, and "analyze this gap" measures
+/// only that span of the downloaded video.
+#[test]
+fn gaps_say_why_and_a_span_is_analyzed_alone() {
+    let sim = SimRuntime::new();
+    let nvr = archive_mock(&sim);
+    let out = tempfile::tempdir().unwrap();
+    let (core, rec) = start(config(&sim, None));
+    core.recordings_configure(
+        &json!({"downloads_dir": out.path(), "downloads": {"chunk_s": 5}}).to_string(),
+    )
+    .unwrap();
+    let key = downloaded(&sim, &core, &rec, &nvr);
+    let gaps = |d: i64| -> Vec<Value> {
+        let l = parse(
+            core.recordings_loudness(
+                &json!({"start": d, "end": d + 86_399, "bucket_s": 60, "gaps": true,
+                        "cameras": [cam(&key, 0)]})
+                .to_string(),
+            ),
+        );
+        l["lanes"][0]["gaps"].as_array().unwrap().clone()
+    };
+    let reasons = |g: &[Value]| -> Vec<(String, bool)> {
+        g.iter()
+            .map(|g| {
+                (
+                    g["reason"].as_str().unwrap().to_owned(),
+                    g["analyzable"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    };
+    // The 8th is recorded but not downloaded: not analyzed, not analyzable.
+    let g8 = gaps(day(8));
+    assert!(
+        reasons(&g8).contains(&("not_analyzed".to_owned(), false)),
+        "{g8:?}"
+    );
+    assert!(
+        reasons(&g8).iter().all(|(_, analyzable)| !analyzable),
+        "{g8:?}"
+    );
+    // The 9th has a download: a gap there can be analyzed.
+    let g9 = gaps(day(9));
+    let open = g9
+        .iter()
+        .find(|g| g["reason"] == "not_analyzed" && g["analyzable"] == true)
+        .unwrap_or_else(|| panic!("{g9:?}"))
+        .clone();
+    let (s, e) = (
+        open["start"].as_i64().unwrap(),
+        open["end"].as_i64().unwrap(),
+    );
+    let to = e.min(s + 59);
+    let r = parse(core.sound_analyze_day(
+        &json!({"camera": cam(&key, 0), "day": day(9), "start": s, "end": to}).to_string(),
+    ));
+    sim_until(&sim, &core, "the span analysis", 60, || {
+        final_state(&rec, &r["request"]).is_some()
+    });
+    let f = final_state(&rec, &r["request"]).unwrap();
+    assert_eq!(f["state"], "done", "{f}");
+    assert_eq!(
+        (f["start"].as_i64(), f["end"].as_i64()),
+        (Some(s), Some(to))
+    );
+    assert!(f["seconds"].as_u64().unwrap() <= (to - s + 1) as u64, "{f}");
+    // Only the span has loudness now.
+    let l = parse(
+        core.recordings_loudness(
+            &json!({"start": day(9), "end": day(9) + 86_399, "bucket_s": 1,
+                    "cameras": [cam(&key, 0)]})
+            .to_string(),
+        ),
+    );
+    let heard: Vec<i64> = l["lanes"][0]["peak_db"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(i, _)| day(9) + i as i64)
+        .collect();
+    assert!(!heard.is_empty());
+    assert!(heard.iter().all(|t| (s..=to).contains(t)), "{heard:?}");
+    // A span outside the day is refused.
+    let bad = core.sound_analyze_day(
+        &json!({"camera": cam(&key, 0), "day": day(9), "start": day(9) - 5, "end": day(9)})
+            .to_string(),
+    );
+    assert!(matches!(bad, Err(RecError::InvalidArgument)));
+    sim.run_free(|| core.shutdown());
+}

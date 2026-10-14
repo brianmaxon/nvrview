@@ -101,8 +101,11 @@ Events from all cameras are grouped into incidents:
 - **Timeline**: one lane per camera, zoomable from a week down to seconds
   with the trackpad or keyboard, events drawn as colored bars by type,
   incidents as bands across lanes, large hit targets, and a thumbnail strip
-  under the cursor. Under each camera's lane, a thin loudness lane shows
-  where something was loud, and sound labels appear as markers like device
+  under the cursor. Under each camera's lane, a loudness lane (taller by
+  default, and draggable to any height) shows
+  where something was loud, and says why a stretch is empty ("Not
+  recorded", "No audio", "Not analyzed yet") with an "Analyze this gap"
+  action where downloaded video covers it, and sound labels appear as markers like device
   events.
 - **Filter and search by sound** as by video type: "barking, last week",
   "any alarm sound today", or "loud moments on this camera".
@@ -178,6 +181,17 @@ monitoring; a missed sound is never shown as "no alarm".
   cameras the user keeps watching for sound) and from recordings as they are
   downloaded or played. Drawn under each timeline lane, it shows at a glance
   where to look, with no classifier at all. About 170 KB per camera per day.
+  An empty stretch is not silence, and the lane says which of three things
+  it is, never guessing: the device has no recording there (`not_recorded`,
+  from the index), the camera or the downloaded video of that span was read
+  and has no sound (`no_audio`, learned from a listener refused after 30 s
+  of video without audio or from an analysis that found none, kept in memory
+  until re-learned), or it was recorded but not measured yet
+  (`not_analyzed`). For the last, the core also says whether a finished
+  download covers it (`analyzable`); then "Analyze this gap" measures just
+  that span from the file, one analysis per device at a time. Replaying a
+  span from the device is not offered: playback carries audio only at 1x
+  (docs/protocol.md), a play slot of the device for the length of the span.
 - **Alarm patterns.** A deterministic detector in the core recognizes the
   standard smoke-alarm (three beeps, T3) and CO-alarm (four beeps, T4)
   rhythms of a tone near 3 kHz, with no model; it is tested on synthetic

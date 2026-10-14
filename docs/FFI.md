@@ -1696,6 +1696,7 @@ symbol at all, so a bound app checks first):
 | 12 | smart alerts (see "Smart alerts"): `nv_alerts_configure`, `nv_alerts_get`, `nv_alerts_trigger_put`, `nv_alert_frames_get`, `nv_alert_detections_put`, `nv_alert_snapshot_put`, `nv_alert_snapshot_get`, `nv_alert_feedback`, `nv_alert_mute`, and the `verify_request`, `verify_request_done`, `verify_step`, `alert`, `alerts_configured`, and `trigger_rejected` events |
 | 13 | `nv_alerts_sun_times` (today's sunrise, sunset, and night window for a location; see "Smart alerts") |
 | 14 | smart-alert debugging and review (see "Smart alerts", "Debugging and review (minor 14)"): `nv_alerts_messages`, `nv_alerts_output_test`, `nv_alert_evidence_put`, `nv_alert_evidence_get`, `nv_alert_evidence_frame_get`, `nv_alert_evidence_pin`, the `alerts_output_test` event, the `test`, `send_to_home_assistant`, and `only_camera` members of `nv_alerts_trigger_put`, the `sensor` and `test` filters of `nv_alerts_get`, and the connection diagnostics in an input's status |
+| 15 | recordings loudness gaps (docs/FFI-RECORDINGS.md, section 2a): the `gaps` member of `nv_recordings_loudness` and `start`/`end` (a span within the day) of `nv_sound_analyze_day`, which its `sound_analyze` events repeat |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Stepping a playback (`nv_playback_step`) takes the next

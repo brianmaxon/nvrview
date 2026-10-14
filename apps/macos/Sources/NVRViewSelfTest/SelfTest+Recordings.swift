@@ -1211,8 +1211,61 @@ extension SelfTest {
             if b.analysis(of: camera) != nil { problems.append("recordings: a failed analysis still shows progress") }
             b.reloadLoudness(force: true)
             if b.loudness(of: camera)?.heard == true { problems.append("recordings: loudness appeared without audio") }
-            recordingsAnalyzeDay(b, fake)
+            recordingsLoudnessGaps(b, fake, camera: camera)
         }
+    }
+
+    /// Empty stretches of a loudness lane say why, from what the core
+    /// knows: nothing downloaded is "not analyzed yet" and cannot be
+    /// analyzed; a camera found without sound says "no audio"; the words
+    /// are the hover text and the label; the strips' height is adjustable,
+    /// clamped, and remembered.
+    func recordingsLoudnessGaps(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera) {
+        // parity: recordings-loudness-gaps
+        let mic = LoudnessScale.microphone(of: camera)
+        b.timeline = TimelineViewport()
+        b.reloadLoudness(force: true)
+        let gaps = b.loudness(of: camera)?.gaps ?? []
+        print("recordings: \(gaps.count) loudness gaps on the first lane: \(gaps.map(\.reason))")
+        if gaps.isEmpty { problems.append("recordings: the loudness lane has no gaps with reasons") }
+        for g in gaps where g.reason != "not_analyzed" || g.analyzable || g.label != "Not analyzed yet" {
+            problems.append("recordings: a gap with nothing downloaded says \(g.reason), analyzable \(g.analyzable)")
+        }
+        if let g = gaps.first, g.help != LoudnessGap(start: g.start, end: g.end, reason: "not_analyzed").help {
+            problems.append("recordings: the gap's hover text is \(g.help)")
+        }
+        // Not analyzable: the action does nothing, so no analysis is queued.
+        if let g = gaps.first { b.analyzeGap(g, of: camera) }
+        if b.model.isAnalyzing(mic, day: b.day) { problems.append("recordings: Analyze this gap queued an analysis for a gap that has no video") }
+        // A camera found to have no sound says so.
+        fake.setLacksSound(camera)
+        b.reloadLoudness(force: true)
+        let reasons = Set((b.loudness(of: camera)?.gaps ?? []).map(\.reason))
+        if reasons != ["no_audio"] { problems.append("recordings: a camera without sound has gaps \(reasons)") }
+        fake.setLacksSound(camera, false)
+        b.reloadLoudness(force: true)
+        recordingsLoudnessHeight(b, fake, camera: camera)
+    }
+
+    /// The loudness strips' height: 28 points by default, dragged within 12
+    /// to 96, kept in the preferences, and the lanes' pane follows it.
+    func recordingsLoudnessHeight(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera) {
+        // parity: recordings-loudness-height
+        let defaults = UserDefaults.standard
+        defer { defaults.removeObject(forKey: RecordingsBrowser.loudnessHeightKey) }
+        b.loudnessHeight = RecordingsPanes.loudnessHeight
+        let tall = RecordingsPanes.lanesHeight(height: 900, lanes: 3, loudness: b.loudnessHeight)
+        b.loudnessHeight = 500
+        if b.loudnessHeight != RecordingsPanes.loudnessMax { problems.append("recordings: a strip of 500 points is \(b.loudnessHeight)") }
+        b.loudnessHeight = 3
+        if b.loudnessHeight != RecordingsPanes.loudnessMin { problems.append("recordings: a strip of 3 points is \(b.loudnessHeight)") }
+        b.loudnessHeight = 40
+        let stored = RecordingsPanes.clampLoudness(defaults.object(forKey: RecordingsBrowser.loudnessHeightKey) as? Double)
+        print("recordings: strip height \(b.loudnessHeight), kept \(stored), lanes \(tall) -> \(RecordingsPanes.lanesHeight(height: 900, lanes: 3, loudness: 40))")
+        if stored != 40 { problems.append("recordings: the strip height is not kept (\(stored))") }
+        if RecordingsPanes.lanesHeight(height: 900, lanes: 3, loudness: 40) <= tall { problems.append("recordings: a taller strip did not grow the lanes") }
+        b.loudnessHeight = RecordingsPanes.loudnessHeight
+        recordingsAnalyzeDay(b, fake)
     }
 
     /// Analyze Sounds after a download: progress, then loudness and a sound
@@ -1228,6 +1281,51 @@ extension SelfTest {
         }
         b.download(incident.key)
         when({ fake.completeRecordingWork(); return rec.downloads.contains { $0.state == "done" } }, timeout: 2) { [self] in
+            recordingsAnalyzeGap(b, fake, camera: camera) { [self] in recordingsAnalyzeWholeDay(b, fake, camera: camera) }
+        }
+    }
+
+    /// "Analyze this gap" on a gap the downloaded video covers: only that
+    /// stretch is measured (progress, then loudness inside it and nowhere
+    /// else), and the gap is no longer empty there.
+    func recordingsAnalyzeGap(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera, then next: @escaping () -> Void) {
+        // parity: recordings-analyze-gap
+        let rec = b.model
+        let mic = LoudnessScale.microphone(of: camera)
+        b.timeline = TimelineViewport()
+        b.reloadLoudness(force: true)
+        guard let gap = b.loudness(of: camera)?.gaps.first(where: \.canAnalyze) else {
+            problems.append("recordings: no analyzable gap after the download")
+            return next()
+        }
+        let span = gap.start...min(gap.end, gap.start + 59)
+        // The hover text on the gap names the action.
+        if !gap.help.contains("Analyze this gap") { problems.append("recordings: the analyzable gap's hover text is \(gap.help)") }
+        b.analyzeGap(LoudnessGap(start: span.lowerBound, end: span.upperBound, reason: gap.reason, analyzable: true), of: camera)
+        if !rec.isAnalyzing(mic, day: b.day) { problems.append("recordings: Analyze this gap shows no progress") }
+        when({ fake.completeRecordingWork(); return rec.analysis(mic, day: b.day)?.state == .done }, timeout: 2) { [self] in
+            let entry = rec.analysis(mic, day: b.day)
+            print("recordings: analyzed the gap \(span): \(entry?.seconds ?? 0) s")
+            if (entry?.seconds ?? 0) <= 0 || (entry?.seconds ?? 0) > Int(span.upperBound - span.lowerBound + 1) {
+                problems.append("recordings: the gap analysis measured \(String(describing: entry?.seconds)) s of \(span.count)")
+            }
+            let fine = rec.loudness(start: span.lowerBound - 600, end: span.upperBound + 600, bucket: 1, cameras: [mic])
+            let lane = fine?.lanes.first
+            var outside = 0
+            for (i, p) in (lane?.peak ?? []).enumerated() where p != nil {
+                if !span.contains((lane?.start ?? 0) + Int64(i)) { outside += 1 }
+            }
+            if lane?.heard != true { problems.append("recordings: no loudness inside the analyzed gap") }
+            if outside != 0 { problems.append("recordings: \(outside) seconds of loudness outside the analyzed gap") }
+            // A finished analysis shows no progress, and the next one may be asked.
+            if b.analysis(of: camera) != nil { problems.append("recordings: a finished gap analysis still shows progress") }
+            next()
+        }
+    }
+
+    func recordingsAnalyzeWholeDay(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera) {
+        let rec = b.model
+        do {
             b.analyzeSound(camera)
             // The day header's action skips the camera that is already being analyzed.
             if !rec.isAnalyzing(camera, day: b.day) { problems.append("recordings: Analyze Sounds shows no progress") }

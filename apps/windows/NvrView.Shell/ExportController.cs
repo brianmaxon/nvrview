@@ -112,7 +112,7 @@ public sealed class RangeDownloadRequest
     public string Name { get; set; } = "";
 }
 
-/// <summary>What export keeps between launches: the share-safe switch, the trim kind, the codec, and the last folder.</summary>
+/// <summary>What the Recordings window keeps between launches: export's share-safe switch, trim kind, codec, and last folder, and the height of the loudness strips.</summary>
 public sealed class ExportSettings(string? path)
 {
     public bool ShareSafe { get; set; }
@@ -128,6 +128,9 @@ public sealed class ExportSettings(string? path)
     /// <summary>Exports go straight into <see cref="Folder"/> with no save picker (the Export tab's "Choose…"; "Ask Each Time" clears it).</summary>
     public bool Direct { get; set; }
 
+    /// <summary>The height of the loudness strips under the lanes (null: the default; kept within <see cref="RecordingsPanes.LoudnessMin"/> to <see cref="RecordingsPanes.LoudnessMax"/>).</summary>
+    public double? LoudnessHeight { get; set; }
+
     /// <summary>Reads the file (defaults when it is missing or unreadable).</summary>
     public void Load()
     {
@@ -140,6 +143,7 @@ public sealed class ExportSettings(string? path)
         Codec = o["codec"] is JsonValue c && c.TryGetValue(out string? name) && name == "hevc" ? ExportCodec.Hevc : ExportCodec.H264;
         Folder = o["folder"] is JsonValue f && f.TryGetValue(out string? dir) && !string.IsNullOrEmpty(dir) ? dir : null;
         Direct = o["direct"] is JsonValue d && d.TryGetValue(out bool direct) && direct;
+        LoudnessHeight = o["loudness_height"] is JsonValue h && h.TryGetValue(out double height) && double.IsFinite(height) ? RecordingsPanes.ClampLoudness(height) : null;
     }
 
     public void Save()
@@ -156,6 +160,10 @@ public sealed class ExportSettings(string? path)
         if (Direct)
         {
             o["direct"] = true;
+        }
+        if (LoudnessHeight is { } loudness)
+        {
+            o["loudness_height"] = loudness;
         }
         try
         {
