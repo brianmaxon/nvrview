@@ -105,6 +105,15 @@ elif [ $# -gt 0 ]; then
   echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
+# A VERSION-only commit after a checked tree (a version bump) needs nothing
+# run: the Windows stamp of the checked tree is carried over to this one
+# (scripts/checked.sh), exactly when this run would have written a stamp.
+if [ "$clean" = 0 ] && [ -z "$package_to" ] && [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] &&
+  [ -z "${NVRVIEW_APP_AREAS:-}" ] && [ "${NVRVIEW_FULL_CHECK:-0}" != 1 ] && [ -z "$(git status --porcelain)" ] &&
+  ! has_stamp windows "$(git rev-parse 'HEAD^{tree}')" && scripts/checked.sh --carry-version windows; then
+  echo "VERSION-only change from a checked tree: nothing to run."
+  exit 0
+fi
 tested_from=""
 if [ -n "$package_to" ]; then
   # Package from the worker and the host whose full check stamped HEAD's tree,

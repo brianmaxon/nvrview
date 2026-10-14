@@ -175,6 +175,26 @@ sh scripts/merge-branch.sh bump2 "merge version and a file" >"$work/carry-merge2
 if grep -q mac "$log"; then pass "a merge that changes VERSION and another file runs the Mac check"; else fail "a merge that changes VERSION and another file runs the Mac check"; fi
 unset NVRVIEW_MERGE_MAC_CMD NVRVIEW_MERGE_WINDOWS_CMD NVRVIEW_WINDOWS_HOST
 
+# scripts/checked.sh --carry-version KIND (what check.sh and windows-check.sh call first).
+r="$work/carry2"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+scripts/checked.sh --record mac 5 "fake mac" none >/dev/null
+scripts/checked.sh --record windows 5 "fake windows" none >/dev/null
+commit_file VERSION 0.2.0
+tv=$(tree HEAD)
+expect "--carry-version mac carries the Mac stamp" scripts/checked.sh --carry-version mac
+expect "...for the tree" has_stamp mac "$tv"
+expect_not "...and only the kind named" has_stamp windows "$tv"
+expect "--carry-version windows carries the Windows stamp" scripts/checked.sh --carry-version windows
+echo 0.3.0 >VERSION
+echo changed >a.txt
+git add -A
+git commit -q -m "version and a file"
+expect_not "--carry-version mac does nothing for VERSION plus another file" scripts/checked.sh --carry-version mac
+expect_not "...and leaves no stamp" has_stamp mac "$(tree HEAD)"
+
 # --- reuse decision ---------------------------------------------------------
 # main: init; branch X changes a.txt; main moves on with b.txt.
 r="$work/dec"

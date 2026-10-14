@@ -20,7 +20,10 @@
 # version bump changes nothing a check looks at. The query writes a stamp for
 # it (carried_from=<the tree whose check ran>, same full or cached status) and
 # says so; the commands below then find it like any other stamp.
-#   scripts/checked.sh --carry-version    does only that, for HEAD's tree
+#   scripts/checked.sh --carry-version [mac|windows]
+#       does only that, for HEAD's tree (both kinds by default); scripts/check.sh
+#       and scripts/windows-check.sh call it first, and a tree that gets its
+#       stamp this way runs nothing at all. Exits 0 when the kinds are covered.
 #
 # A stamp is the file <git common dir>/nvrview-checks/<tree hash>.mac or
 # .windows (inside the git directory, so never committed). It is keyed by the
@@ -58,11 +61,14 @@ if [ "${1:-}" = "--record" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--carry-version" ]; then
+  if [ $# -gt 1 ]; then carry_version_stamps "$tree" "$2"; else carry_version_stamps "$tree"; fi
+  exit $?
+fi
 want_mac=0
 want_windows=0
 for arg in "$@"; do
   case "$arg" in
-    --carry-version) carry_version_stamps "$tree" && exit 0 || exit 1 ;;
     --mac) want_mac=1 ;;
     --windows) want_windows=1 ;;
     *) echo "usage: $0 [--mac] [--windows] | --record mac|windows SECONDS STEPS" >&2; exit 2 ;;
