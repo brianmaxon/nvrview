@@ -9,18 +9,18 @@ import NVRCore
 /// the core's `recording` events. The core writes the files; this only
 /// asks and shows. Main actor only.
 @MainActor
-final class CaptureController {
-    private unowned let model: AppModel
+package final class CaptureController {
+    private unowned let model: any CaptureHost
     /// The running recordings and the latest ended ones.
-    private(set) var board = RecordingBoard()
+    package private(set) var board = RecordingBoard()
     /// The encoder handed to the core (kept by the core until it is freed).
-    private(set) var encoder: AACCaptureEncoder?
+    package private(set) var encoder: AACCaptureEncoder?
     /// Whether the core took the last configuration.
-    private(set) var configured = false
+    package private(set) var configured = false
     /// The settings last sent to the core.
-    private(set) var settings: CaptureSettings
+    package private(set) var settings: CaptureSettings
     /// The self-test's override of the free space a recording needs.
-    var minFreeOverride: UInt64? {
+    package var minFreeOverride: UInt64? {
         didSet { configure() }
     }
     /// Each open call's reserved stem (its recording and transcript share
@@ -28,13 +28,13 @@ final class CaptureController {
     private var callStems: [CameraRef: String] = [:]
     /// Shows a message about a recording in the windows showing `camera`
     /// (else the active one), with an optional button (set by the app).
-    var notice: (_ text: String, _ camera: CameraRef?, _ action: (title: String, handler: () -> Void)?) -> Void = {
+    package var notice: (_ text: String, _ camera: CameraRef?, _ action: (title: String, handler: () -> Void)?) -> Void = {
         _, _, _ in
     }
 
-    init(model: AppModel) {
+    package init(model: any CaptureHost) {
         self.model = model
-        settings = CaptureSettings(liveFolder: AppModel.defaultRecordingsFolder.path)
+        settings = CaptureSettings(liveFolder: CaptureDefaults.recordingsFolder.path)
     }
 
     // MARK: Setup
@@ -44,7 +44,7 @@ final class CaptureController {
     private var started = false
 
     /// Installs the encoder and configures the core (at startup).
-    func start() {
+    package func start() {
         started = true
         if encoder == nil, let core = try? model.bridge.capture() {
             let e = AACCaptureEncoder { recording, track, unit in core.recordAudioEncoded(recording: recording, track: track, unit: unit) }
@@ -59,7 +59,7 @@ final class CaptureController {
     }
 
     /// The settings as the model has them now.
-    var currentSettings: CaptureSettings {
+    package var currentSettings: CaptureSettings {
         var s = CaptureSettings(liveFolder: model.recordingsFolder.path)
         s.quality = model.recordFrom
         s.shareSafe = model.shareSafeNames
@@ -70,7 +70,7 @@ final class CaptureController {
     }
 
     /// Sends the settings to the core (for recordings started afterwards).
-    func configure() {
+    package func configure() {
         guard started else { return }
         let s = currentSettings
         do {
@@ -87,7 +87,7 @@ final class CaptureController {
 
     /// Starts recording `camera` (its tile's stream at `quality`, else the
     /// "Record from" setting). Shows why when it cannot.
-    func startLive(_ camera: CameraRef, quality: RecordQuality? = nil) {
+    package func startLive(_ camera: CameraRef, quality: RecordQuality? = nil) {
         guard let tile = model.leases.tile(for: camera) else {
             return refused(RecordStartError(.unknownID), camera: camera, call: false)
         }
@@ -110,12 +110,12 @@ final class CaptureController {
 
     /// Record or Stop on a grid tile: stops every recording of the camera,
     /// or starts a live one.
-    func toggleLive(_ camera: CameraRef) {
+    package func toggleLive(_ camera: CameraRef) {
         let mine = board.recordings(of: camera)
         if mine.isEmpty { startLive(camera) } else { for r in mine { stop(r.id) } }
     }
 
-    func stop(_ id: UInt64) {
+    package func stop(_ id: UInt64) {
         do {
             try model.bridge.capture().recordStop(id)
         } catch {
@@ -124,19 +124,19 @@ final class CaptureController {
     }
 
     /// Stop All Recordings.
-    func stopAll() { for r in board.list { stop(r.id) } }
+    package func stopAll() { for r in board.list { stop(r.id) } }
 
     /// The recordings of `camera` (the tile's pill and its Record button).
-    func isRecorded(_ camera: CameraRef) -> Bool { !board.recordings(of: camera).isEmpty }
+    package func isRecorded(_ camera: CameraRef) -> Bool { !board.recordings(of: camera).isEmpty }
 
     // MARK: Call recordings
 
     /// The stem the call's recording and transcript share, reserved the
     /// first time either needs it (nil without a call).
-    func callStem(for camera: CameraRef) -> String? {
+    package func callStem(for camera: CameraRef) -> String? {
         let key = camera.firstLens
         if let s = callStems[key] { return s }
-        guard let call = model.calls.call(for: key) else { return nil }
+        guard let call = model.activeCall(for: key) else { return nil }
         let name = CallTranscriptFile.fileName(startedAt: call.startedAt, camera: model.name(of: key), timeZone: .current)
         let taken = Set((try? FileManager.default.contentsOfDirectory(atPath: model.transcripts.folder.path)) ?? [])
         let stem = CallTranscriptFile.sharedStem(name, taken: taken)
@@ -145,15 +145,15 @@ final class CaptureController {
     }
 
     /// The stem reserved for a call, if its recording reserved one.
-    func reservedCallStem(_ camera: CameraRef) -> String? { callStems[camera.firstLens] }
+    package func reservedCallStem(_ camera: CameraRef) -> String? { callStems[camera.firstLens] }
 
     /// The call ended: its stem is free again (after the transcript used it).
-    func callEnded(_ camera: CameraRef) { callStems[camera.firstLens] = nil }
+    package func callEnded(_ camera: CameraRef) { callStems[camera.firstLens] = nil }
 
     /// Starts recording the open call of `camera` beside its transcript.
-    func startCall(_ camera: CameraRef) {
+    package func startCall(_ camera: CameraRef) {
         let key = camera.firstLens
-        guard model.calls.call(for: key) != nil, let tile = model.leases.tile(for: key), let stem = callStem(for: key)
+        guard model.activeCall(for: key) != nil, let tile = model.leases.tile(for: key), let stem = callStem(for: key)
         else { return refused(RecordStartError(.unknownID), camera: camera, call: true) }
         let folder = model.transcripts.folder
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -171,17 +171,17 @@ final class CaptureController {
     }
 
     /// The call window's Record: starts or stops the call recording.
-    func toggleCall(_ camera: CameraRef) {
+    package func toggleCall(_ camera: CameraRef) {
         if let r = board.call(of: camera.firstLens) { stop(r.id) } else { startCall(camera) }
     }
 
     /// The running call recording of a doorbell, if any.
-    func callRecording(_ camera: CameraRef) -> RecordingBoard.Entry? { board.call(of: camera.firstLens) }
+    package func callRecording(_ camera: CameraRef) -> RecordingBoard.Entry? { board.call(of: camera.firstLens) }
 
     // MARK: Events
 
     /// A `recording` event from the core.
-    func apply(_ e: RecordingEvent) {
+    package func apply(_ e: RecordingEvent) {
         guard let ended = board.apply(e) else { return }
         if ended.kind == "call" { model.transcripts.pruneRecordings() }
         model.logEvent(
@@ -196,7 +196,7 @@ final class CaptureController {
         notice(text, camera, exists ? ("Show in Finder", { NSWorkspace.shared.activateFileViewerSelecting([url]) }) : nil)
     }
 
-    func rekey(_ old: String, to new: String) { board.rekey(old, to: new) }
+    package func rekey(_ old: String, to new: String) { board.rekey(old, to: new) }
 
     // MARK: Messages
 
@@ -207,10 +207,10 @@ final class CaptureController {
     }
 
     /// The last refusal's message (self-test).
-    private(set) var lastRefusal: String?
+    package private(set) var lastRefusal: String?
 
     /// "Open Recordings Folder": creates it if needed and shows it.
-    func openFolder() {
+    package func openFolder() {
         try? FileManager.default.createDirectory(at: model.recordingsFolder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(model.recordingsFolder)
     }

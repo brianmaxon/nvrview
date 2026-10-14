@@ -6,10 +6,10 @@ import SwiftUI
 /// share-safe names (docs/CAPTURE.md "Save picture"), and the live
 /// recordings: their folder, "Record from", and when one stops by itself
 /// (docs/CAPTURE.md "Live recording").
-struct CaptureSettingsView: View {
-    let model: AppModel
+package struct CaptureSettingsView: View {
+    package let model: any CaptureHost
 
-    var body: some View {
+    package var body: some View {
         Form {
             Section("Pictures") {
                 HStack {
@@ -20,8 +20,8 @@ struct CaptureSettingsView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Button("Choose…") { chooseFolder() }
-                    Button("Reset") { model.picturesFolder = AppModel.defaultPicturesFolder }
-                        .disabled(model.picturesFolder == AppModel.defaultPicturesFolder)
+                    Button("Reset") { model.picturesFolder = CaptureDefaults.picturesFolder }
+                        .disabled(model.picturesFolder == CaptureDefaults.picturesFolder)
                 }
                 Picker(
                     "Format",
@@ -57,8 +57,8 @@ struct CaptureSettingsView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Button("Choose…") { chooseFolder(model.recordingsFolder) { model.recordingsFolder = $0 } }
-                    Button("Reset") { model.recordingsFolder = AppModel.defaultRecordingsFolder }
-                        .disabled(model.recordingsFolder == AppModel.defaultRecordingsFolder)
+                    Button("Reset") { model.recordingsFolder = CaptureDefaults.recordingsFolder }
+                        .disabled(model.recordingsFolder == CaptureDefaults.recordingsFolder)
                 }
                 Picker("Record from", selection: Binding(get: { model.recordFrom }, set: { model.recordFrom = $0 })) {
                     ForEach(RecordQuality.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -93,5 +93,9 @@ struct CaptureSettingsView: View {
         panel.prompt = "Choose"
         panel.directoryURL = current.deletingLastPathComponent()
         if panel.runModal() == .OK, let url = panel.url { set(url) }
+    }
+
+    package init(model: any CaptureHost) {
+        self.model = model
     }
 }

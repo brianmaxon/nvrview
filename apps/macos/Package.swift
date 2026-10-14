@@ -40,6 +40,8 @@ let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     ("AppUpdates", ["AppBase"]),
     // Doorbell calls: the call sessions, microphone, speech, and transcripts.
     ("AppCalls", ["AppBase"]),
+    // Capture: pictures and live recordings, and their settings page.
+    ("AppCapture", ["AppBase"]),
 ]
 
 let appDependencies: [Target.Dependency] =

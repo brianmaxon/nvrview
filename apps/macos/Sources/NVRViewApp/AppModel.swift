@@ -8,6 +8,7 @@ import VideoKit
 import AppBase
 import AppUpdates
 import AppCalls
+import AppCapture
 
 #if NVRVIEW_REAL_CORE
 import NVRCoreC
@@ -232,14 +233,14 @@ final class AppModel {
     static let shareSafeNamesKey = "shareSafeNames"
 
     /// "Save pictures to": `~/Pictures/NVRView` until the user chooses.
-    var picturesFolder = AppModel.picturesFolder(in: .standard) {
+    var picturesFolder: URL = AppModel.picturesFolder(in: .standard) {
         didSet {
             captureDefaults.set(picturesFolder.path, forKey: Self.picturesFolderKey)
             notify()
         }
     }
     /// PNG (the default) or JPEG.
-    var pictureFormat = AppModel.pictureFormat(in: .standard) {
+    var pictureFormat: PictureFormat = AppModel.pictureFormat(in: .standard) {
         didSet {
             captureDefaults.set(pictureFormat.rawValue, forKey: Self.pictureFormatKey)
             notify()
@@ -247,7 +248,7 @@ final class AppModel {
     }
     /// "Share-safe names": pictures and live recordings name the camera
     /// `Camera A`.
-    var shareSafeNames = UserDefaults.standard.bool(forKey: AppModel.shareSafeNamesKey) {
+    var shareSafeNames: Bool = UserDefaults.standard.bool(forKey: AppModel.shareSafeNamesKey) {
         didSet {
             captureDefaults.set(shareSafeNames, forKey: Self.shareSafeNamesKey)
             capture?.configure()
@@ -257,7 +258,7 @@ final class AppModel {
     static let exportQualityKey = "exportQuality"
     /// "Export from" (Settings > Capture > Recordings window): the stream a
     /// download and an export read until the Export tab says otherwise.
-    var exportQuality = AppModel.exportQuality(in: .standard) {
+    var exportQuality: ExportQuality = AppModel.exportQuality(in: .standard) {
         didSet {
             captureDefaults.set(exportQuality.rawValue, forKey: Self.exportQualityKey)
             notify()
@@ -270,7 +271,7 @@ final class AppModel {
     static let recordCallsKey = "recordCalls"
 
     /// "Save recordings to": `~/Movies/NVRView` until the user chooses.
-    var recordingsFolder = AppModel.recordingsFolder(in: .standard) {
+    var recordingsFolder: URL = AppModel.recordingsFolder(in: .standard) {
         didSet {
             captureDefaults.set(recordingsFolder.path, forKey: Self.recordingsFolderKey)
             capture?.configure()
@@ -278,7 +279,7 @@ final class AppModel {
         }
     }
     /// "Record from": the main stream (default) or the sub-stream.
-    var recordFrom = AppModel.recordFrom(in: .standard) {
+    var recordFrom: RecordQuality = AppModel.recordFrom(in: .standard) {
         didSet {
             captureDefaults.set(recordFrom.rawValue, forKey: Self.recordFromKey)
             capture?.configure()
@@ -286,7 +287,7 @@ final class AppModel {
         }
     }
     /// A live recording stops after this many minutes (1 to 720).
-    var maxRecordingMinutes = AppModel.maxRecordingMinutes(in: .standard) {
+    var maxRecordingMinutes: Int = AppModel.maxRecordingMinutes(in: .standard) {
         didSet {
             captureDefaults.set(maxRecordingMinutes, forKey: Self.maxRecordingMinutesKey)
             capture?.configure()
@@ -294,7 +295,7 @@ final class AppModel {
         }
     }
     /// ... or at this size in GB (0.1 to 64).
-    var maxRecordingGB = AppModel.maxRecordingGB(in: .standard) {
+    var maxRecordingGB: Double = AppModel.maxRecordingGB(in: .standard) {
         didSet {
             captureDefaults.set(maxRecordingGB, forKey: Self.maxRecordingGBKey)
             capture?.configure()
@@ -321,11 +322,7 @@ final class AppModel {
     static let recordCallsConsent =
         "Recording a conversation may need the other person's consent where you live. The visitor is not told that the call is recorded."
 
-    static var defaultRecordingsFolder: URL {
-        FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("NVRView", isDirectory: true)
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Movies/NVRView", isDirectory: true)
-    }
+    static var defaultRecordingsFolder: URL { CaptureDefaults.recordingsFolder }
 
     private static func recordingsFolder(in defaults: UserDefaults) -> URL {
         defaults.string(forKey: recordingsFolderKey).flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
@@ -346,11 +343,7 @@ final class AppModel {
         return g > 0 ? g : 4
     }
 
-    static var defaultPicturesFolder: URL {
-        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("NVRView", isDirectory: true)
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Pictures/NVRView", isDirectory: true)
-    }
+    static var defaultPicturesFolder: URL { CaptureDefaults.picturesFolder }
 
     private static func picturesFolder(in defaults: UserDefaults) -> URL {
         defaults.string(forKey: picturesFolderKey).flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
@@ -1277,6 +1270,10 @@ final class FakeBox: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
+}
+
+extension AppModel: CaptureHost {
+    func activeCall(for camera: CameraRef) -> DoorbellCall? { calls.call(for: camera) }
 }
 
 extension AppModel: AppHost {
