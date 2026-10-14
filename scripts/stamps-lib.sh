@@ -37,15 +37,82 @@ stamp_cached() { # KIND TREE
   sed -n 's/^cached=//p' "$(stamp_dir)/$2.$1" 2>/dev/null || true
 }
 
-# Succeeds when the only file that differs between the two trees is VERSION.
-version_only_diff() { # TREE_A TREE_B
-  [ "$(git diff --name-only "$1" "$2")" = "VERSION" ]
+# Succeeds when the trees differ and the only files that differ between them
+# are VERSION and markdown (*.md) files: nothing compiled, run, or bundled
+# changes (docs/DEVELOPMENT.md, "Docs-only changes"). Markdown is read only by
+# the checks in scripts/check-docs.sh, which still run (docs_checks_ok).
+nonmaterial_diff() { # TREE_A TREE_B
+  nd_files=$(git diff --name-only "$1" "$2")
+  [ -n "$nd_files" ] || return 1
+  ! printf '%s\n' "$nd_files" | grep -qvE '^(VERSION|.*\.md)$'
+}
+
+# Succeeds when a markdown file differs between the two trees.
+docs_in_diff() { # TREE_A TREE_B
+  git diff --name-only "$1" "$2" | grep -q '\.md$'
+}
+
+# "docs-only" when a markdown file differs between the trees, else "VERSION-only".
+nonmaterial_label() { # TREE_A TREE_B
+  if docs_in_diff "$1" "$2"; then echo docs-only; else echo VERSION-only; fi
+}
+
+# Succeeds when the working tree is exactly TREE (index and files, nothing
+# untracked), so the markdown checks can run on it now.
+docs_here() { # TREE
+  [ "$(git write-tree 2>/dev/null)" = "$1" ] && git diff --quiet &&
+    [ -z "$(git ls-files --others --exclude-standard)" ]
+}
+
+# Succeeds when the markdown checks have passed for TREE (a <tree>.docs marker
+# next to the stamps) or can run now, on the working tree.
+docs_ready() { # TREE
+  stamp_dir >/dev/null
+  [ -f "$(stamp_dir)/$1.docs" ] || docs_here "$1"
+}
+
+# Runs the markdown checks (NVRVIEW_DOCS_CHECK, default scripts/check-docs.sh)
+# for TREE unless they passed already, and leaves the marker. They run on the
+# working tree, so it must be TREE. Their output goes to the error stream.
+docs_checks_ok() { # TREE
+  stamp_dir >/dev/null
+  [ -f "$(stamp_dir)/$1.docs" ] && return 0
+  docs_here "$1" || return 1
+  if ${NVRVIEW_DOCS_CHECK:-scripts/check-docs.sh} >&2; then
+    mkdir -p "$(stamp_dir)"
+    echo "markdown checks passed" >"$(stamp_dir)/$1.docs"
+    return 0
+  fi
+  return 1
+}
+
+# Prints the changed files and succeeds when the working tree (tracked changes
+# and untracked files) differs from a tree with a stamp of KIND only in
+# markdown files and VERSION, with at least one markdown file: a docs edit on
+# top of a checked tree, however many unpushed commits that tree is ahead of
+# the upstream. Looks at the newest 20 stamps.
+docs_only_since_stamp() { # KIND
+  ds_kind="$1"
+  stamp_dir >/dev/null
+  # shellcheck disable=SC2012 # stamp names are tree hashes
+  for ds_f in $(ls -t "$(stamp_dir)"/*."$ds_kind" 2>/dev/null | head -n 20); do
+    ds_t=$(basename "$ds_f" ".$ds_kind")
+    git cat-file -e "$ds_t^{tree}" 2>/dev/null || continue
+    ds_changed=$( { git diff --name-only "$ds_t"; git ls-files --others --exclude-standard; } | LC_ALL=C sort -u)
+    printf '%s\n' "$ds_changed" | grep -q '\.md$' || continue
+    printf '%s\n' "$ds_changed" | grep -qvE '^(VERSION|.*\.md)$' && continue
+    printf '%s\n' "$ds_changed"
+    return 0
+  done
+  return 1
 }
 
 # Prints the tree whose stamp of KIND counts for TREE and why, and succeeds:
-# the tree itself, or (the version-only rule) a stamped tree that differs from
-# it in VERSION alone. Only full stamps count (nothing taken from the test
-# result cache). Fails, printing nothing, when there is none.
+# the tree itself, or (the non-material rule) a stamped tree that differs from
+# it in VERSION and markdown files alone ("VERSION-only" when only VERSION
+# differs, else "docs-only"; for the Mac a docs-only tree also needs its
+# markdown checks, docs_ready). Only full stamps count (nothing taken from the
+# test result cache). Fails, printing nothing, when there is none.
 release_stamp_tree() { # KIND TREE
   if full_stamp "$1" "$2"; then
     printf '%s exact\n' "$2"
@@ -56,17 +123,28 @@ release_stamp_tree() { # KIND TREE
     [ -f "$f" ] || continue
     t=$(basename "$f" ".$1")
     full_stamp "$1" "$t" || continue
-    if git cat-file -e "$t^{tree}" 2>/dev/null && version_only_diff "$t" "$2"; then
-      printf '%s version-only\n' "$t"
+    if git cat-file -e "$t^{tree}" 2>/dev/null && nonmaterial_diff "$t" "$2"; then
+      if [ "$1" = mac ] && docs_in_diff "$t" "$2" && ! docs_ready "$2"; then continue; fi
+      printf '%s %s\n' "$t" "$(nonmaterial_label "$t" "$2")"
       return 0
     fi
   done
   return 1
 }
 
+# The tree whose check actually ran for a stamp of KIND on TREE: the stamp's
+# carried_from, or TREE itself.
+stamp_root() { # KIND TREE
+  sr_root=$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$2.$1" 2>/dev/null || true)
+  printf '%s\n' "${sr_root:-$2}"
+}
+
 # The tree of a stamp of KIND (mac or windows) that differs from TREE in
-# VERSION alone, and so counts for it: nothing a check looks at depends on the
-# version's value (docs/DEVELOPMENT.md, "Version bumps"). With MODE "full" (the
+# VERSION and markdown files alone, and so counts for it: nothing a check looks
+# at depends on the version's value, and markdown is read only by the checks in
+# scripts/check-docs.sh (docs/DEVELOPMENT.md, "Version bumps", "Docs-only
+# changes"). For the Mac, when markdown differs from the tree whose check ran,
+# those checks must have passed for TREE or be able to run now (docs_ready). With MODE "full" (the
 # default) only a full stamp (nothing taken from the test result cache) counts;
 # with "any", a full one is still preferred. Prints the tree and succeeds;
 # fails, printing nothing, when there is none. A windows-reused stamp is never
@@ -81,7 +159,8 @@ version_only_source() { # KIND TREE [full|any]
       vs_t=$(basename "$vs_f" ".$vs_kind")
       [ "$vs_t" != "$vs_tree" ] || continue
       if [ "$vs_pass" = full ]; then full_stamp "$vs_kind" "$vs_t" || continue; fi
-      if git cat-file -e "$vs_t^{tree}" 2>/dev/null && version_only_diff "$vs_t" "$vs_tree"; then
+      if git cat-file -e "$vs_t^{tree}" 2>/dev/null && nonmaterial_diff "$vs_t" "$vs_tree"; then
+        if [ "$vs_kind" = mac ] && docs_in_diff "$(stamp_root mac "$vs_t")" "$vs_tree" && ! docs_ready "$vs_tree"; then continue; fi
         printf '%s\n' "$vs_t"
         return 0
       fi
@@ -90,7 +169,7 @@ version_only_source() { # KIND TREE [full|any]
   return 1
 }
 
-# Succeeds when TREE has, or would get by the version-only rule, a stamp of
+# Succeeds when TREE has, or would get by the non-material rule, a stamp of
 # every KIND given (mac, windows). Writes nothing.
 version_carry_possible() { # TREE KIND...
   vc_tree="$1"; shift
@@ -101,9 +180,11 @@ version_carry_possible() { # TREE KIND...
   return 0
 }
 
-# The version-only rule for check stamps: a tree that differs from a stamped
-# tree in VERSION alone gets the same stamps, because a version bump changes
-# nothing a check looks at, so no check runs for it. For each kind (mac,
+# The non-material rule for check stamps: a tree that differs from a stamped
+# tree in VERSION and markdown files alone gets the same stamps, because that
+# changes nothing a build or test looks at. A version bump runs no check; a
+# markdown change first passes the checks that read markdown (docs_checks_ok,
+# scripts/check-docs.sh) for the Mac stamp. For each kind (mac,
 # windows) that TREE lacks, or has only from the test result cache while a
 # full one exists to carry, writes <TREE>.<kind> as a copy of the source stamp
 # with `carried_from=<the tree whose check actually ran>` and a note, and
@@ -124,6 +205,10 @@ carry_version_stamps() { # TREE [KIND...]
     cv_file="$(stamp_dir)/$cv_src.$cv_kind"
     cv_root=$(sed -n 's/^carried_from=//p' "$cv_file")
     [ -n "$cv_root" ] || cv_root="$cv_src"
+    cv_label=$(nonmaterial_label "$cv_root" "$cv_tree")
+    if [ "$cv_kind" = mac ] && [ "$cv_label" = docs-only ]; then
+      docs_checks_ok "$cv_tree" || { cv_ok=1; continue; }
+    fi
     mkdir -p "$(stamp_dir)"
     {
       printf 'date=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -136,10 +221,10 @@ carry_version_stamps() { # TREE [KIND...]
         printf 'full=yes\n'
       fi
       printf 'carried_from=%s\n' "$cv_root"
-      printf 'note=VERSION-only change from a checked tree; no check ran for this tree\n'
+      printf 'change=%s\nnote=%s change from a checked tree; no build or test ran for this tree\n' "$cv_label" "$cv_label"
     } >"$(stamp_dir)/$cv_tree.$cv_kind.tmp.$$"
     mv "$(stamp_dir)/$cv_tree.$cv_kind.tmp.$$" "$(stamp_dir)/$cv_tree.$cv_kind"
-    echo "$cv_kind: carried the check stamp of tree $cv_root to tree $cv_tree (only VERSION differs; no check runs)"
+    echo "$cv_kind: carried the check stamp of tree $cv_root to tree $cv_tree ($cv_label change: only VERSION and markdown files differ; no build or test runs)"
   done
   return "$cv_ok"
 }

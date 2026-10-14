@@ -5,9 +5,11 @@
 #
 #   scripts/branch-ready.sh BRANCH
 #
-# A tip whose tree differs from a checked tree in VERSION alone is ready: the
-# stamps are carried over (scripts/stamps-lib.sh, carry_version_stamps) and the
-# line says "VERSION-only".
+# A tip whose tree differs from a checked tree in VERSION and *.md files alone
+# is ready: the stamps are carried over (scripts/stamps-lib.sh,
+# carry_version_stamps) and the line says "version-only" or "docs-only". For a
+# markdown change the Mac stamp needs the markdown checks to have passed for
+# the tip's tree: run scripts/check.sh in the branch's worktree first.
 #
 # Prints one line (the tree hash and each stamp: full, cached with the suites
 # it took from the cache, or missing) and exits 0 when both stamps exist, 1
@@ -26,7 +28,10 @@ carry_version_stamps "$tree" >/dev/null || true
 describe() { # KIND
   carried=$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$tree.$1" 2>/dev/null || true)
   note=""
-  if [ -n "$carried" ]; then note=", VERSION-only change from the checked tree $carried"; fi
+  if [ -n "$carried" ]; then
+    change=$(sed -n 's/^change=//p' "$(stamp_dir)/$tree.$1")
+    note=", ${change:-VERSION-only} change from the checked tree $carried"
+  fi
   if ! has_stamp "$1" "$tree"; then
     printf 'missing'
   elif full_stamp "$1" "$tree"; then

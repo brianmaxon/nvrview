@@ -64,7 +64,7 @@ commit_file VERSION 0.2.0
 t1=$(tree HEAD)
 expect "version-only difference reuses the stamp" release_stamp_tree windows "$t1"
 case "$(release_stamp_tree mac "$t1")" in
-  "$t0 version-only") pass "the answer names the stamped tree" ;;
+  "$t0 VERSION-only") pass "the answer names the stamped tree" ;;
   *) fail "the answer names the stamped tree" ;;
 esac
 commit_file a.txt changed
@@ -194,6 +194,133 @@ git add -A
 git commit -q -m "version and a file"
 expect_not "--carry-version mac does nothing for VERSION plus another file" scripts/checked.sh --carry-version mac
 expect_not "...and leaves no stamp" has_stamp mac "$(tree HEAD)"
+
+# --- a docs-only commit after a checked tree runs only the markdown checks -----
+# The stamps are carried over like a VERSION bump, but for the Mac stamp the
+# checks that read markdown (NVRVIEW_DOCS_CHECK stands in for
+# scripts/check-docs.sh) pass first. Markdown plus any other file is not covered.
+r="$work/docs"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+docs_log="$work/docs-checks.log"
+cat >"$work/docs-ok.sh" <<SCRIPT
+#!/bin/sh
+echo ran >>"$docs_log"
+SCRIPT
+printf '#!/bin/sh\nexit 1\n' >"$work/docs-fail.sh"
+chmod +x "$work/docs-ok.sh" "$work/docs-fail.sh"
+scripts/checked.sh --record mac 5 "fake mac" none >/dev/null
+scripts/checked.sh --record windows 5 "fake; worker w1; host h1" none >/dev/null
+t0=$(tree HEAD)
+git checkout -q -b docsonly
+echo "# notes" >README.md
+git add -A
+git commit -q -m "docs"
+td=$(tree HEAD)
+: >"$docs_log"
+export NVRVIEW_DOCS_CHECK="$work/docs-fail.sh"
+expect_not "failing markdown checks leave the Mac stamp uncarried" scripts/checked.sh --mac
+expect_not "...so the tree has no Mac stamp" has_stamp mac "$td"
+expect "the Windows stamp needs no markdown check" scripts/checked.sh --windows
+export NVRVIEW_DOCS_CHECK="$work/docs-ok.sh"
+expect "passing markdown checks carry the Mac stamp" scripts/checked.sh --mac
+case "$(scripts/checked.sh --mac --windows 2>&1)" in
+  *"docs-only change: carried from the check of tree $t0"*) pass "the output says docs-only and names the checked tree" ;;
+  *) fail "the output says docs-only and names the checked tree" ;;
+esac
+[ "$(wc -l <"$docs_log" | tr -d ' ')" = 1 ] && pass "the markdown checks ran once (a marker remembers them)" || fail "the markdown checks ran once"
+case "$(sed -n 's/^change=//p' "$(stamp_dir)/$td.mac")" in docs-only) pass "the stamp records the change" ;; *) fail "the stamp records the change" ;; esac
+expect "the carried stamp is full (the source was)" full_stamp mac "$td"
+case "$(release_stamp_tree mac "$td")" in "$td exact") pass "release.sh counts the carried stamp" ;; *) fail "release.sh counts the carried stamp" ;; esac
+# A docs-only tree whose stamp is not carried yet is still accepted for a
+# release, labeled docs-only, while its markdown checks have passed or can run.
+rm -f "$(stamp_dir)/$td.mac" "$(stamp_dir)/$td.windows"
+case "$(release_stamp_tree mac "$td")" in "$t0 docs-only") pass "the release rule names a docs-only source" ;; *) fail "the release rule names a docs-only source" ;; esac
+rm -f "$(stamp_dir)/$td.docs"
+echo dirty >>README.md
+expect_not "without markdown checks that can run here, the release rule refuses a docs-only tree" release_stamp_tree mac "$td"
+git checkout -q -- README.md
+# A second docs commit carries on, naming the tree whose check ran.
+echo more >>README.md
+git add -A
+git commit -q -m "more docs"
+td2=$(tree HEAD)
+expect "a second docs commit carries on" scripts/checked.sh --mac --windows
+case "$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$td2.mac")" in "$t0") pass "...naming the tree whose check ran" ;; *) fail "...naming the tree whose check ran" ;; esac
+# Markdown plus a code file is not covered.
+echo "code" >a.txt
+echo more >>README.md
+git add -A
+git commit -q -m "docs and code"
+tc=$(tree HEAD)
+expect_not "markdown plus another file is not covered" scripts/checked.sh --mac --windows
+expect_not "...and gets no stamp" has_stamp mac "$tc"
+git reset -q --hard HEAD~1
+# VERSION plus markdown is covered; a file merely named like markdown is not.
+echo 0.9.0 >VERSION
+echo versioned >>README.md
+git add -A
+git commit -q -m "version and docs"
+expect "VERSION plus markdown is covered" scripts/checked.sh --mac --windows
+echo "text" >docs.md.txt
+git add -A
+git commit -q -m "a text file"
+expect_not "docs.md.txt is not markdown" scripts/checked.sh --mac --windows
+git reset -q --hard HEAD~1
+
+# The fast path's baseline: an uncommitted markdown edit on top of a stamped
+# tree, however many unpushed commits that tree is ahead of the upstream.
+git checkout -q main
+git checkout -q -b ahead
+echo c1 >c.txt
+git add -A
+git commit -q -m "code 1"
+echo c2 >b.txt
+git add -A
+git commit -q -m "code 2"
+scripts/checked.sh --record mac 5 "fake mac" none >/dev/null
+expect_not "a clean checked tree has no docs-only change" docs_only_since_stamp mac
+echo "edit" >>README.md
+expect "a markdown edit on a checked tree is docs-only since the stamp" docs_only_since_stamp mac
+case "$(docs_only_since_stamp mac | tr '\n' ' ')" in "README.md ") pass "...and names the file" ;; *) fail "...and names the file" ;; esac
+echo "new" >NOTES.md
+case "$(docs_only_since_stamp mac | tr '\n' ' ')" in "NOTES.md README.md ") pass "...an untracked markdown file counts" ;; *) fail "...an untracked markdown file counts" ;; esac
+echo code >d.txt
+expect_not "a markdown edit plus an untracked code file is not docs-only" docs_only_since_stamp mac
+rm -f d.txt NOTES.md
+git add -A
+expect "a staged markdown edit counts" docs_only_since_stamp mac
+echo x >>a.txt
+expect_not "a markdown edit plus a code edit is not docs-only" docs_only_since_stamp mac
+git reset -q --hard HEAD
+unset NVRVIEW_DOCS_CHECK
+
+# A merge of a docs-only branch runs the markdown checks and neither build.
+r="$work/docsmerge"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+scripts/checked.sh --record mac 5 "fake mac" none >/dev/null
+scripts/checked.sh --record windows 5 "fake windows" none >/dev/null
+git checkout -q -b docsbranch
+echo "# notes" >README.md
+git add -A
+git commit -q -m "docs"
+git checkout -q main
+log="$work/docsmerge.log"
+: >"$log"
+printf '#!/bin/sh\necho markdown >>"%s"\n' "$log" >"$work/docs-ok2.sh"
+chmod +x "$work/docs-ok2.sh"
+export NVRVIEW_DOCS_CHECK="$work/docs-ok2.sh"
+export NVRVIEW_WINDOWS_HOST=fake
+export NVRVIEW_MERGE_MAC_CMD="echo mac >>$log"
+export NVRVIEW_MERGE_WINDOWS_CMD="echo windows >>$log"
+sh scripts/merge-branch.sh docsbranch "merge the docs" >"$work/docsmerge.out" 2>&1 || { cat "$work/docsmerge.out" >&2; fail "merging a docs-only branch"; }
+[ "$(cat "$log")" = markdown ] && pass "merging a docs-only branch runs only the markdown checks" || fail "merging a docs-only branch runs only the markdown checks"
+grep -q "docs-only change from a checked tree: no check runs" "$work/docsmerge.out" && pass "the merge output says docs-only" || fail "the merge output says docs-only"
+expect "main's new tree is checked" scripts/checked.sh --mac --windows
+unset NVRVIEW_DOCS_CHECK NVRVIEW_MERGE_MAC_CMD NVRVIEW_MERGE_WINDOWS_CMD NVRVIEW_WINDOWS_HOST
 
 # --- reuse decision ---------------------------------------------------------
 # main: init; branch X changes a.txt; main moves on with b.txt.
