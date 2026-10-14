@@ -4,7 +4,7 @@
 
 use super::api::{core_err, parse_camera, parse_object};
 use super::evidence::{MAX_FRAME_BYTES, MAX_FRAMES};
-use super::seams::TestResult;
+use super::seams::{TargetsResult, TestResult};
 use super::{AlertError, AlertNotice, NoticeState, lock};
 use alerts::model::{Class, Severity};
 use serde_json::{Value, json};
@@ -140,6 +140,59 @@ impl crate::Core {
                 }
             }),
         );
+        Ok(())
+    }
+
+    /// Asks a configured output which targets it offers, for a settings
+    /// menu (Home Assistant: notify entities and legacy notify services,
+    /// fetched with the stored token). `{"output":<index in outputs[]>}`.
+    /// It returns at once; the result arrives as an `alerts_output_targets`
+    /// event: `{"type","output","kind","ok","summary","targets":[{"name",
+    /// "kind":"entity"|"service"}],"at_ms"}`. `summary` is the reason on
+    /// failure. An output with no list reports `ok` false.
+    ///
+    /// # Errors
+    /// [`AlertError::InvalidArgument`], [`AlertError::NotConfigured`],
+    /// [`AlertError::UnknownId`] for no such output,
+    /// [`AlertError::Closed`].
+    pub fn alerts_output_targets(&self, request: &str) -> Result<(), AlertError> {
+        self.check_api().map_err(core_err)?;
+        let v = parse_object(request)?;
+        let bad = AlertError::InvalidArgument;
+        let index = u32::try_from(v["output"].as_u64().ok_or(bad)?).map_err(|_| bad)?;
+        let inner = &self.alerts.inner;
+        let (output, kind) = {
+            let st = lock(&inner.state);
+            if st.engine.is_none() {
+                return Err(AlertError::NotConfigured);
+            }
+            let slot = st
+                .outputs
+                .iter()
+                .find(|o| o.index == index)
+                .ok_or(AlertError::UnknownId)?;
+            (slot.output.clone(), slot.raw["kind"].clone())
+        };
+        let me = std::sync::Arc::downgrade(inner);
+        let clock = inner.clock.clone();
+        output.list_targets(Box::new(move |r: TargetsResult| {
+            if let Some(inner) = me.upgrade() {
+                let targets: Vec<Value> = r
+                    .targets
+                    .iter()
+                    .map(|t| json!({"name": t.name, "kind": t.kind}))
+                    .collect();
+                inner.send(json!({
+                    "type": "alerts_output_targets",
+                    "output": index,
+                    "kind": kind,
+                    "ok": r.ok,
+                    "summary": r.summary,
+                    "targets": targets,
+                    "at_ms": clock.wall_now_us().div_euclid(1000),
+                }));
+            }
+        }));
         Ok(())
     }
 

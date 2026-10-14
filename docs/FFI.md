@@ -720,6 +720,7 @@ Out-buffer rules as `nv_alerts_get`.
 ```c
 NvStatus nv_alerts_messages(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
 NvStatus nv_alerts_output_test(NvCore *core, const char *request);
+NvStatus nv_alerts_output_targets(NvCore *core, const char *request);  /* minor 16 */
 NvStatus nv_alert_evidence_put(NvCore *core, const char *json, const uint8_t *data, size_t len);
 NvStatus nv_alert_evidence_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
 NvStatus nv_alert_evidence_frame_get(NvCore *core, uint64_t trigger_id, uint32_t index,
@@ -728,7 +729,7 @@ NvStatus nv_alert_evidence_pin(NvCore *core, uint64_t trigger_id);
 ```
 
 All answer from memory or the local disk, never wait on a device, and may not
-be called from inside a callback. `NV_ABI_MINOR` is 14; nothing existing
+be called from inside a callback. `NV_ABI_MINOR` is 14 (minor 16 adds `nv_alerts_output_targets`); nothing existing
 changed.
 
 **Message log.** `nv_alerts_messages` takes `{"input":"<id>","after":0,
@@ -780,6 +781,21 @@ is an `alerts_output_test` event `{"type","output","kind","ok","summary",
 ignores its cooldown. NV_ERR_UNKNOWN_ID for no such output (an output the core
 could not build is not one), NV_ERR_NOT_CONFIGURED before the first
 `nv_alerts_configure`.
+
+**Target list (minor 16).** `nv_alerts_output_targets` takes
+`{"output":<index in outputs[]>}` and returns at once; the result is an
+`alerts_output_targets` event `{"type","output","kind","ok","summary",
+"targets":[{"name","kind":"entity"|"service"}],"at_ms"}`. For a Home Assistant
+output the targets are its notify entities and legacy notify services (names
+without the `notify.` prefix, entities first, each sorted), fetched now with
+the stored token; on failure `ok` is false and `summary` says why in
+Home Assistant's own words. An output with nothing to list reports `ok` false.
+NV_ERR_UNKNOWN_ID for no such output, NV_ERR_NOT_CONFIGURED before the first
+`nv_alerts_configure`. A Home Assistant notify rule's `service` may be written
+`notify.<name>`; the core stores `<name>`. In the `alerts_output_test` event,
+`summary` of a notify rule says whether it was sent to the notify entity or
+with the legacy service, and a refused request carries Home Assistant's
+`message`.
 
 **Evidence.** The core keeps, for a short time, the frames a check judged and
 every method's detections, so a person can review why an alert was or was
@@ -1697,6 +1713,7 @@ symbol at all, so a bound app checks first):
 | 13 | `nv_alerts_sun_times` (today's sunrise, sunset, and night window for a location; see "Smart alerts") |
 | 14 | smart-alert debugging and review (see "Smart alerts", "Debugging and review (minor 14)"): `nv_alerts_messages`, `nv_alerts_output_test`, `nv_alert_evidence_put`, `nv_alert_evidence_get`, `nv_alert_evidence_frame_get`, `nv_alert_evidence_pin`, the `alerts_output_test` event, the `test`, `send_to_home_assistant`, and `only_camera` members of `nv_alerts_trigger_put`, the `sensor` and `test` filters of `nv_alerts_get`, and the connection diagnostics in an input's status |
 | 15 | recordings loudness gaps (docs/FFI-RECORDINGS.md, section 2a): the `gaps` member of `nv_recordings_loudness` and `start`/`end` (a span within the day) of `nv_sound_analyze_day`, which its `sound_analyze` events repeat |
+| 16 | notify targets (see "Smart alerts", "Debugging and review (minor 14)", "Target list"): `nv_alerts_output_targets` and the `alerts_output_targets` event |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Stepping a playback (`nv_playback_step`) takes the next

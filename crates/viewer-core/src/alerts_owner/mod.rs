@@ -36,7 +36,8 @@ pub use modules::{home_assistant_factory, mqtt_factory};
 pub use seams::{
     AlertError, AlertFrames, AlertInput, AlertNotice, AlertOutput, DeliveryDone, ExternalTrigger,
     ExternalTriggers, InputContext, InputFactory, NoticeState, OutputContext, OutputFactory,
-    RecordingOutput, Secret, TestDone, TestResult, TriggerRejected,
+    OutputTarget, RecordingOutput, Secret, TargetsDone, TargetsResult, TestDone, TestResult,
+    TriggerRejected,
 };
 
 use crate::clock::HostClock;

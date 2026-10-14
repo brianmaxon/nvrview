@@ -159,7 +159,7 @@ public final class SmartAlertsController {
         case .configured(let json):
             lastConfigured = json
             if case .running = self.state, let issues = Self.issues(in: json) { self.state = .running(issues: issues) }
-        case .verifyRequestDone, .verifyStep, .triggerRejected, .outputTest:
+        case .verifyRequestDone, .verifyStep, .triggerRejected, .outputTest, .outputTargets:
             break
         }
     }

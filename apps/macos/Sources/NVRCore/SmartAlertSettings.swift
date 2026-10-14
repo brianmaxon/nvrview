@@ -578,7 +578,9 @@ public enum HARuleCheck {
         case .pulse, .turnOn: return entity(["input_boolean", "switch"])
         case .script: return entity(["script"])
         case .notify:
-            return !t.isEmpty && t.allSatisfy(Self.identChar) ? nil : "the notify service is lowercase letters, digits and _."
+            // A pasted `notify.example_phone` is fine; the core drops the prefix.
+            let name = t.hasPrefix("notify.") ? String(t.dropFirst("notify.".count)) : t
+            return !name.isEmpty && name.allSatisfy(Self.identChar) ? nil : "the notify target is lowercase letters, digits and _ (a pasted notify.name is fine)."
         }
     }
 

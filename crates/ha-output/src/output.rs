@@ -2,6 +2,8 @@
 
 use crate::config::{self, Action, Config, ConfigError, MatchMode, Rule};
 use crate::http::{Http, HttpRequest, Method, Token, UreqHttp};
+use crate::notify::Route;
+use crate::reply;
 use crate::template::{self, Facts};
 use alerts::{CameraId, Class, Severity};
 use serde::{Deserialize, Serialize};
@@ -155,9 +157,11 @@ pub struct OutputResult {
     pub entities: Vec<EntityResult>,
 }
 
-struct Failure {
-    kind: ErrorKind,
-    status: Option<u16>,
+pub(crate) struct Failure {
+    pub(crate) kind: ErrorKind,
+    pub(crate) status: Option<u16>,
+    /// Home Assistant's own error text, cleaned (see `reply`).
+    pub(crate) detail: Option<String>,
 }
 
 enum Expect {
@@ -174,6 +178,8 @@ pub struct HaOutput {
     http: Arc<dyn Http>,
     clock: Arc<dyn Clock>,
     cooldowns: Mutex<HashMap<String, u64>>,
+    /// How each notify target was last found to be reached.
+    routes: Mutex<HashMap<String, Route>>,
     log: LogSink,
     log_state: Mutex<LogWindow>,
 }
@@ -208,6 +214,7 @@ impl HaOutput {
         http: Arc<dyn Http>,
         clock: Arc<dyn Clock>,
     ) -> Result<HaOutput, ConfigError> {
+        config.normalize();
         config.validate()?;
         let base = config::parse_base(&config.base_url)?.root;
         config.max_attempts = config.max_attempts.clamp(1, 5);
@@ -220,6 +227,7 @@ impl HaOutput {
             http,
             clock,
             cooldowns: Mutex::new(HashMap::new()),
+            routes: Mutex::new(HashMap::new()),
             log: Arc::new(|line| tracing::warn!("{line}")),
             log_state: Mutex::new(LogWindow::default()),
         })
@@ -368,13 +376,8 @@ impl HaOutput {
             }
             Action::Notify { service, title } => {
                 let t = self.facts_text(alert);
-                let mut body = json!({ "message": t.message });
-                if let Some(title) = title {
-                    body["title"] = json!(t.render(title));
-                }
-                let path = format!("/api/services/notify/{service}");
-                self.post(Step::Service, &path, &body, &mut attempts, Expect::List)
-                    .map(|_| "notified (200)".to_string())
+                let title = title.as_ref().map(|title| t.render(title));
+                self.notify(service, title.as_deref(), &t.message, &mut attempts)
             }
         };
         match outcome {
@@ -458,13 +461,47 @@ impl HaOutput {
         let (domain, _) = config::split_entity(entity).ok_or(Failure {
             kind: ErrorKind::Client,
             status: None,
+            detail: None,
         })?;
         let path = format!("/api/services/{domain}/{service}");
         self.post(step, &path, body, rec, Expect::List).map(|_| ())
     }
 
-    fn get(&self, step: Step, path: &str, rec: &mut Vec<Attempt>) -> Result<Value, Failure> {
+    pub(crate) fn get(
+        &self,
+        step: Step,
+        path: &str,
+        rec: &mut Vec<Attempt>,
+    ) -> Result<Value, Failure> {
         self.call(step, Method::Get, path, None, rec, Expect::State)
+    }
+
+    /// A GET whose reply is a JSON list (`/api/states`, `/api/services`).
+    pub(crate) fn get_list(&self, path: &str, rec: &mut Vec<Attempt>) -> Result<Value, Failure> {
+        self.call(Step::ReadState, Method::Get, path, None, rec, Expect::List)
+    }
+
+    /// A service call: the reply is a JSON list of changed states.
+    pub(crate) fn post_list(
+        &self,
+        step: Step,
+        path: &str,
+        body: &Value,
+        rec: &mut Vec<Attempt>,
+    ) -> Result<Value, Failure> {
+        self.post(step, path, body, rec, Expect::List)
+    }
+
+    pub(crate) fn route_of(&self, name: &str) -> Option<Route> {
+        self.routes.lock().unwrap().get(name).copied()
+    }
+
+    pub(crate) fn remember_route(&self, name: &str, route: Route) {
+        self.routes.lock().unwrap().insert(name.to_owned(), route);
+    }
+
+    pub(crate) fn forget_route(&self, name: &str) {
+        self.routes.lock().unwrap().remove(name);
     }
 
     fn post(
@@ -503,6 +540,7 @@ impl HaOutput {
             };
             let result = self.http.send(&req);
             let at_ms = self.clock.now_ms();
+            let mut detail = None;
             let (status, failure) = match result {
                 Err(e) => {
                     let kind = match e {
@@ -514,6 +552,9 @@ impl HaOutput {
                 }
                 Ok(resp) => {
                     let status = Some(resp.status);
+                    if resp.status != 200 {
+                        detail = reply::error_message(&resp.body);
+                    }
                     match resp.status {
                         200 => match parse_reply(&resp.body, &expect) {
                             Some(v) => {
@@ -549,7 +590,11 @@ impl HaOutput {
                 ErrorKind::Timeout | ErrorKind::Connect | ErrorKind::Network | ErrorKind::Server
             );
             if !retry || n >= max {
-                return Err(Failure { kind, status });
+                return Err(Failure {
+                    kind,
+                    status,
+                    detail,
+                });
             }
             let wait = (self.config.backoff_ms << (n - 1)).min(MAX_BACKOFF_MS);
             self.clock.sleep(Duration::from_millis(wait));
@@ -647,7 +692,7 @@ fn parse_reply(body: &[u8], expect: &Expect) -> Option<Value> {
     }
 }
 
-fn describe(f: &Failure, step: Step) -> String {
+pub(crate) fn describe(f: &Failure, step: Step) -> String {
     let what = match f.kind {
         ErrorKind::Timeout => "timed out".to_string(),
         ErrorKind::Connect => "could not connect".to_string(),
@@ -666,9 +711,14 @@ fn describe(f: &Failure, step: Step) -> String {
     } else {
         ""
     };
+    let why = f
+        .detail
+        .as_ref()
+        .map(|d| format!(": {d}"))
+        .unwrap_or_default();
     match f.status {
-        Some(s) => format!("{what} ({s}){left_on}"),
-        None => format!("{what}{left_on}"),
+        Some(s) => format!("{what} ({s}){why}{left_on}"),
+        None => format!("{what}{why}{left_on}"),
     }
 }
 

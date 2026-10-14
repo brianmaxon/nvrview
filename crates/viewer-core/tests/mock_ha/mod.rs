@@ -17,6 +17,9 @@ struct State {
     /// "METHOD path", plus " (bad token)" for a wrong bearer token.
     log: Vec<String>,
     token: String,
+    /// Legacy notify services by bare name; notify entities are
+    /// `notify.<name>` keys of `states`.
+    legacy: Vec<String>,
 }
 
 pub struct MockHa {
@@ -56,6 +59,16 @@ impl MockHa {
         lock(&self.state)
             .states
             .insert(entity.to_owned(), state.to_owned());
+    }
+
+    /// A notify entity `notify.<name>` (reached with `notify.send_message`).
+    pub fn add_notify_entity(&self, name: &str) {
+        self.set(&format!("notify.{name}"), "unknown");
+    }
+
+    /// A legacy notify service `notify.<name>`.
+    pub fn add_legacy(&self, name: &str) {
+        lock(&self.state).legacy.push(name.to_owned());
     }
 
     pub fn state_of(&self, entity: &str) -> Option<String> {
@@ -128,6 +141,21 @@ fn serve(stream: TcpStream, st: &Mutex<State>) {
                 Some(v) => (200, json!({"entity_id": id, "state": v})),
                 None => (404, json!({"message": "Entity not found."})),
             }
+        } else if path == "/api/states" {
+            let list: Vec<Value> = s
+                .states
+                .iter()
+                .map(|(k, v)| json!({"entity_id": k, "state": v}))
+                .collect();
+            (200, json!(list))
+        } else if path == "/api/services" {
+            let mut notify = serde_json::Map::new();
+            notify.insert("send_message".into(), json!({}));
+            notify.insert("persistent_notification".into(), json!({}));
+            for n in &s.legacy {
+                notify.insert(n.clone(), json!({}));
+            }
+            (200, json!([{"domain": "notify", "services": notify}]))
         } else if let Some(svc) = path.strip_prefix("/api/services/") {
             match svc.rsplit_once('/') {
                 Some((_, "turn_on")) if s.states.contains_key(&entity) => {
@@ -138,6 +166,14 @@ fn serve(stream: TcpStream, st: &Mutex<State>) {
                     s.states.insert(entity.clone(), "off".into());
                     (200, json!([{"entity_id": entity, "state": "off"}]))
                 }
+                Some(("notify", "send_message")) if s.states.contains_key(&entity) => {
+                    (200, json!([]))
+                }
+                Some(("notify", name)) if s.legacy.iter().any(|n| n == name) => (200, json!([])),
+                Some(("notify", name)) => (
+                    400,
+                    json!({"message": format!("Service notify.{name} not found.")}),
+                ),
                 _ => (404, json!({"message": "Service not found."})),
             }
         } else {

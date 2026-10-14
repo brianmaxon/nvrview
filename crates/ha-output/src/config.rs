@@ -2,6 +2,7 @@
 //! drive which entities.
 
 use crate::http::host_is_local;
+use crate::notify;
 use crate::output::DecisionKind;
 use crate::template;
 use alerts::{CameraId, Class, Severity};
@@ -20,7 +21,9 @@ pub enum Action {
     TurnOn { entity_id: String },
     /// `script.turn_on` with the alert facts as script variables.
     Script { entity_id: String },
-    /// `notify.<service>` with a message built from the template.
+    /// A notification with a message built from the template, to a notify
+    /// entity (`notify.send_message`) or a legacy notify service, found
+    /// automatically; `service` is the name after `notify.`.
     Notify {
         service: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +149,20 @@ impl Config {
         }
     }
 
+    /// Tidies what people paste: a notify target written as
+    /// `notify.example_phone` is stored as `example_phone`. [`HaOutput`]
+    /// does this before validating; [`Config::validate`] also accepts the
+    /// prefixed form.
+    ///
+    /// [`HaOutput`]: crate::HaOutput
+    pub fn normalize(&mut self) {
+        for rule in &mut self.rules {
+            if let Action::Notify { service, .. } = &mut rule.action {
+                *service = notify::bare_name(service).to_owned();
+            }
+        }
+    }
+
     /// Checks everything that would otherwise reach a request path or body:
     /// the URL, entity ids, service names, the template. Numbers are
     /// clamped by the output, not rejected.
@@ -170,7 +187,7 @@ impl Config {
                     _ => return Err(bad("script entity must look like script.name")),
                 },
                 Action::Notify { service, title } => {
-                    if !is_ident(service) {
+                    if !is_ident(notify::bare_name(service)) {
                         return Err(bad("notify service must be lowercase letters, digits, _"));
                     }
                     if let Some(t) = title {

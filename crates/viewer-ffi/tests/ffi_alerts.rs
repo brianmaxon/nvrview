@@ -386,6 +386,10 @@ fn smart_alerts_through_the_c_interface() {
             nv_alerts_output_test(core, c(r#"{"output":3}"#).as_ptr()),
             NvStatus::NV_ERR_UNKNOWN_ID
         );
+        assert_eq!(
+            nv_alerts_output_targets(core, c(r#"{"output":3}"#).as_ptr()),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
 
         // Feedback and mute.
         let fb = c(

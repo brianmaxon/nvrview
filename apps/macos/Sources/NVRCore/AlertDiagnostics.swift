@@ -251,6 +251,36 @@ public struct SensorMessageLog: Sendable, Equatable {
     }
 }
 
+/// The notify targets Home Assistant offers (the `alerts_output_targets`
+/// event): entities first, then legacy services, as the core sorted them.
+public struct NotifyTargetList: Sendable, Equatable {
+    public struct Target: Sendable, Equatable, Hashable {
+        /// What a rule's target field holds (no `notify.` prefix).
+        public var name: String
+        public var isEntity: Bool
+    }
+
+    public var output: Int
+    public var ok: Bool
+    /// The reason, when `ok` is false.
+    public var summary: String
+    public var targets: [Target]
+
+    public init?(json: String) {
+        guard let v = JSONValue.parse(json), let output = v["output"]?.int64 else { return nil }
+        self.output = Int(output)
+        ok = v["ok"]?.bool ?? false
+        summary = v["summary"]?.string ?? ""
+        targets = (v["targets"]?.array ?? []).compactMap { t in
+            guard let name = t["name"]?.string, !name.isEmpty else { return nil }
+            return Target(name: name, isEntity: t["kind"]?.string == "entity")
+        }
+    }
+
+    public var entities: [Target] { targets.filter(\.isEntity) }
+    public var services: [Target] { targets.filter { !$0.isEntity } }
+}
+
 /// The result of "Send test alert" (the `alerts_output_test` event).
 public struct OutputTestResult: Sendable, Equatable {
     public var output: Int
@@ -277,7 +307,7 @@ public struct OutputTestResult: Sendable, Equatable {
         f.dateStyle = .none
         let time = f.string(from: Date(timeIntervalSince1970: Double(atMs) / 1000))
         let status = httpStatus.map { " (HTTP \($0))" } ?? ""
-        if ok { return "Delivered\(status) at \(time)" }
+        if ok { return "Delivered\(status) at \(time)" + (summary.isEmpty ? "" : ": \(summary)") }
         return "Not delivered\(status) at \(time)" + (summary.isEmpty ? "" : ": \(summary)")
     }
 }

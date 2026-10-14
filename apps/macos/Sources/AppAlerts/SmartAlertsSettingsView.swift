@@ -764,7 +764,8 @@ package struct HARuleRow: View {
                 .frame(width: 170)
                 TextField(
                     "", text: b(\.target),
-                    prompt: Text(r.action == .notify ? "notify service" : r.action == .script ? "script.example" : "input_boolean.example_alert"))
+                    prompt: Text(r.action == .notify ? "notify target (for example example_phone)" : r.action == .script ? "script.example" : "input_boolean.example_alert"))
+                if r.action == .notify { targetMenu }
                 Button {
                     alerts.update { $0.homeAssistant.rules.remove(at: index) }
                 } label: {
@@ -796,7 +797,37 @@ package struct HARuleRow: View {
                 .frame(width: 170)
             }
             if let why = HARuleCheck.problem(r), !r.target.isEmpty { Text(why).font(.caption).foregroundStyle(.orange) }
+            if r.action == .notify, let status = alerts.notifyTargetsStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
         }
+    }
+
+    /// The notify targets Home Assistant offers, fetched on demand; typing a
+    /// name stays possible.
+    @ViewBuilder private var targetMenu: some View {
+        Menu {
+            if let list = alerts.notifyTargets {
+                if !list.entities.isEmpty {
+                    Section("Notify entities") {
+                        ForEach(list.entities, id: \.self) { t in Button(t.name) { b(\.target).wrappedValue = t.name } }
+                    }
+                }
+                if !list.services.isEmpty {
+                    Section("Legacy notify services") {
+                        ForEach(list.services, id: \.self) { t in Button(t.name) { b(\.target).wrappedValue = t.name } }
+                    }
+                }
+                Divider()
+            }
+            Button(alerts.notifyTargets == nil ? "Load from Home Assistant" : "Reload") { alerts.loadNotifyTargets() }
+        } label: {
+            Image(systemName: "list.bullet")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityLabel("Notify targets")
+        .help("Choose a notify target from Home Assistant (it asks with the saved address and token)")
     }
 
     private func toggle<T: Equatable>(_ path: WritableKeyPath<HARule, [T]>, _ value: T, _ on: Bool) {

@@ -47,7 +47,8 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// review (nv_alerts_messages, nv_alerts_output_test, nv_alert_evidence_*).
 /// Minor 15: loudness gaps with their reasons ("gaps" in
 /// nv_recordings_loudness) and a span within the day for nv_sound_analyze_day.
-pub const NV_ABI_MINOR: u32 = 15;
+/// Minor 16: nv_alerts_output_targets and the alerts_output_targets event.
+pub const NV_ABI_MINOR: u32 = 16;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -3707,6 +3708,25 @@ pub unsafe extern "C" fn nv_alerts_output_test(
 ) -> NvStatus {
     // SAFETY: per the caller.
     unsafe { rec_call(core, |c| Ok(c.alerts_output_test(arg(request)?)?)) }
+}
+
+/// Asks a configured output which targets it offers (minor 16): `request` is
+/// {"output":<index in outputs[]>}. Returns at once; the result arrives as an
+/// `alerts_output_targets` event {"type","output","kind","ok","summary",
+/// "targets":[{"name","kind":"entity"|"service"}],"at_ms"}. For Home
+/// Assistant the targets are its notify entities and legacy notify services.
+/// NV_ERR_UNKNOWN_ID for no such output, NV_ERR_NOT_CONFIGURED before the
+/// first nv_alerts_configure.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alerts_output_targets(
+    core: *mut NvCore,
+    request: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.alerts_output_targets(arg(request)?)?)) }
 }
 
 /// Stores evidence of a check (minor 14): `json` is {"trigger_id":N,

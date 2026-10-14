@@ -52,6 +52,11 @@ extension FakeCore {
         alertsWorld.locked { $0.outputTestResult = (ok, httpStatus, summary) }
     }
 
+    /// What the next "list targets" reports.
+    public func setOutputTargets(ok: Bool, summary: String, targets: [(name: String, kind: String)]) {
+        alertsWorld.locked { $0.outputTargets = (ok, summary, targets.map { ($0.name, $0.kind) }) }
+    }
+
     // MARK: The calls
 
     public func alertsMessages(request: String) throws(CoreStatus) -> String {
@@ -95,6 +100,30 @@ extension FakeCore {
             ]
             if let s = w.outputTestResult.status { e["http_status"] = s }
             w.events.append(Self.diagJSON(e))
+        }
+        scheduleAlertWorkNow()
+    }
+
+    public func alertsOutputTargets(request: String) throws(CoreStatus) {
+        checkOutsideCallback("nv_alerts_output_targets")
+        if isFreed { throw .closed }
+        guard let o = (try? JSONSerialization.jsonObject(with: Data(request.utf8))) as? [String: Any],
+            let index = (o["output"] as? NSNumber)?.intValue
+        else { throw .invalidArgument }
+        try alertsWorld.locked { w throws(CoreStatus) in
+            guard w.configured else { throw .notConfigured }
+            guard let config = w.lastConfiguration,
+                let doc = (try? JSONSerialization.jsonObject(with: Data(config.utf8))) as? [String: Any],
+                let outputs = doc["outputs"] as? [[String: Any]], outputs.indices.contains(index)
+            else { throw .unknownID }
+            let r = w.outputTargets
+            w.events.append(
+                Self.diagJSON([
+                    "type": "alerts_output_targets", "output": index, "kind": outputs[index]["kind"] ?? "desktop",
+                    "ok": r.ok, "summary": r.summary,
+                    "targets": r.targets.map { ["name": $0.0, "kind": $0.1] },
+                    "at_ms": Int(Date().timeIntervalSince1970 * 1000),
+                ]))
         }
         scheduleAlertWorkNow()
     }

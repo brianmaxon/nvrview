@@ -224,7 +224,11 @@ private func context(secrets: Bool) -> SmartAlertSettings.CoreContext {
         r.action = .notify
         r.target = "mobile_app_example"
         #expect(HARuleCheck.problem(r) == nil)
+        r.target = "notify.example_phone"  // a pasted full name is accepted
+        #expect(HARuleCheck.problem(r) == nil)
         r.target = "Bad Name"
+        #expect(HARuleCheck.problem(r) != nil)
+        r.target = "notify."
         #expect(HARuleCheck.problem(r) != nil)
     }
 }
