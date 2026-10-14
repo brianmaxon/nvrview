@@ -30,7 +30,8 @@ public sealed partial class RecordingsService
     /// Queues a range download of <paramref name="cameras"/> (<c>nv_download_range</c>); null with
     /// <see cref="Notice"/> set when it was refused.
     /// </summary>
-    public QueuedDownload? DownloadRange(IEnumerable<RecordingCamera> cameras, long startMs, long endMs, string? name, ExportOptions options)
+    public QueuedDownload? DownloadRange(IEnumerable<RecordingCamera> cameras, long startMs, long endMs, string? name, ExportOptions options,
+        ExportQuality quality = ExportQuality.Main)
     {
         if (_closed || _core is not IExport export)
         {
@@ -38,7 +39,7 @@ public sealed partial class RecordingsService
         }
         try
         {
-            QueuedDownload? answer = QueuedDownload.Parse(export.DownloadRange(ExportRequest.Range(startMs, endMs, cameras, name, options)));
+            QueuedDownload? answer = QueuedDownload.Parse(export.DownloadRange(ExportRequest.Range(startMs, endMs, cameras, name, options, quality)));
             Notice = answer?.Existing == true ? "Already downloaded or downloading" : null;
             return answer;
         }

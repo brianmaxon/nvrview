@@ -213,6 +213,9 @@ public sealed partial class FakeRecordings
     }
 
     /// <inheritdoc/>
+    /// <summary>The tier of each camera in the last range download request (the Export tab's tests and self-test).</summary>
+    public IReadOnlyList<string> LastRangeTiers { get; private set; } = [];
+
     public string DownloadRange(string request)
     {
         const string F = "nv_download_range";
@@ -229,12 +232,19 @@ public sealed partial class FakeRecordings
         string? dest = Destination(o["dest"], F);
         bool shareSafe = Flag(o, "share_safe");
         var cameras = new List<RecordingCamera>();
+        var tiers = new List<string>();
         foreach (JsonNode? n in list)
         {
             RecordingCamera c = Camera(n?["camera"], F);
+            string tier = n?["tier"] is JsonValue tv && tv.TryGetValue(out string? t) ? t : "main";
+            if (tier is not ("main" or "sub"))
+            {
+                throw Error(NvStatus.InvalidArgument, F);
+            }
             if (!cameras.Contains(c))
             {
                 cameras.Add(c);
+                tiers.Add(tier);
             }
         }
         JsonObject answer;
@@ -255,8 +265,9 @@ public sealed partial class FakeRecordings
             {
                 throw Error(NvStatus.InvalidArgument, F);
             }
+            LastRangeTiers = tiers;
             ulong h = 0xcbf29ce484222325;
-            string canonical = string.Join(',', cameras.Select(c => $"{c.Device}/{c.Channel}/{c.Lens}").Order(StringComparer.Ordinal));
+            string canonical = string.Join(',', cameras.Select((c, i) => $"{c.Device}/{c.Channel}/{c.Lens}/{tiers[i]}").Order(StringComparer.Ordinal));
             foreach (byte b in System.Text.Encoding.UTF8.GetBytes($"{start}-{end}-{canonical}"))
             {
                 h = unchecked((h ^ b) * 0x100000001b3);

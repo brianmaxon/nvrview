@@ -101,7 +101,7 @@ internal static class ExportTests
             return new ExportOutcome(ExportResult.Done, path, null, 640, 360, 0, 3);
         }
 
-        public ExportOutcome ExportEdit(string planJson, ExportCodec codec, string partialPath, ExportControl control) =>
+        public ExportOutcome ExportEdit(string planJson, ExportCodec codec, string partialPath, ExportControl control, bool withSound = true) =>
             ExportOutcome.Failed(partialPath, "no renderer");
     }
 
@@ -455,13 +455,11 @@ internal static class ExportTests
             {
                 rig.Browser.Click(rig.Browser.DayIncidents.OrderBy(i => i.Start).First().Key, extend: false);
                 rig.Work();
-                rig.Browser.Export.BeginRangeDownload();
-                RangeDownloadRequest request = T.NotNull(rig.Browser.Export.RangeRequest);
-                T.Check(request.Cameras.Count >= 1);
-                request.Cameras = [rig.Cameras[0], rig.Cameras[1]];
+                (long lo, long hi) = rig.Scrub;
+                var request = new RangeDownloadRequest { StartMs = lo, EndMs = hi, Cameras = [rig.Cameras[0], rig.Cameras[1]] };
                 rig.Browser.Export.DownloadRange(request);
                 rig.Work();
-                T.Check(rig.Browser.Export.RangeRequest is null && rig.Browser.Center == RecordingsCenter.Downloads);
+                T.Check(rig.Browser.Message == "Download queued; its progress is in Downloads");
                 DownloadProgress d = T.NotNull(rig.Service.Downloads.LastOrDefault(x => x.Range is not null));
                 T.Equal("done", d.State);
                 T.Equal(2, d.Cameras.Count);
@@ -486,9 +484,13 @@ internal static class ExportTests
                 ExportController export = rig.Browser.Export;
                 Incident first = rig.PlayAndDownload();
                 (long lo, _) = rig.Scrub;
-                // No points yet.
+                // No points yet: the whole range is trimmed.
                 export.TrimAsync(null).GetAwaiter().GetResult();
-                T.Equal("Set an in point and an out point first (I and O)", rig.Browser.Message);
+                ExportJob whole = T.NotNull(export.Job);
+                whole.Completion.GetAwaiter().GetResult();
+                T.Check(whole.Files.Count >= 1 && rig.Writers.Trims[0].Output.SourceInMs >= 0, whole.Result);
+                export.DismissJob();
+                rig.Writers.Trims.Clear();
                 export.RawPoints = new InOutPoints(lo + 3_000, lo + 9_000);
                 T.Check(export.PointsWindow == (lo + 3_000, lo + 9_000));
                 export.ShareSafe = true;
@@ -605,6 +607,120 @@ internal static class ExportTests
                 rig.Browser.Player.Close();
                 export.SaveStillsAsync(eachCamera: true).GetAwaiter().GetResult();
                 T.Equal("Play an incident or a camera to save its picture", rig.Browser.Message);
+            }
+            finally
+            {
+                rig.Dispose();
+            }
+        });
+
+        T.Run("export tab: the kinds, the range and the times follow what is open", () =>
+        {
+            var rig = new Rig();
+            try
+            {
+                ExportController export = rig.Browser.Export;
+                T.Equal(0, export.Kinds.Count);
+                T.Equal("Play an incident or a camera to export from it", export.Problem);
+                Incident first = rig.Browser.DayIncidents.OrderBy(i => i.Start).First();
+                rig.Browser.Click(first.Key, extend: false);
+                rig.Work();
+                T.Check(export.Kinds.Contains(ExportKind.TrimCopy) && export.Kinds.Contains(ExportKind.Download), "trims and downloads apply");
+                T.Check(!export.Kinds.Contains(ExportKind.FollowCut), "a follow cut needs a renderer and a download");
+                T.Equal(ExportKind.TrimCopy, export.Kind);
+                export.KindChoice = ExportKind.Download;
+                T.Equal(ExportKind.Download, export.Kind);
+                T.Equal(export.SourceCameras.Count, export.Checked.Count);
+                // The whole range until points are set; typed times and I and O move the points.
+                (long lo, long hi) = rig.Scrub;
+                T.Check(export.Window == (lo, hi));
+                T.Equal(ExportPanel.TimeText(lo), export.StartText);
+                T.Check(export.SetStart(ExportPanel.TimeText(lo + 2_000)) && export.Points.InMs == lo + 2_000, "a typed start sets the in point");
+                T.Check(export.SetEnd(ExportPanel.TimeText(lo + 6_000)) && export.PointsWindow == (lo + 2_000, lo + 6_000));
+                T.Equal(ExportPanel.TimeText(lo + 6_000), export.EndText);
+                T.Check(!export.SetEnd("99:99") && !export.SetStart(ExportPanel.TimeText(hi + 5_000)), "times that are not inside the range are refused");
+                T.Check(export.Summary.Contains(", 0:04"), export.Summary);
+                export.MovePoint(PointHandle.Out, lo + 5_000);
+                T.Equal(ExportPanel.TimeText(lo + 5_000), export.EndText);
+                export.ClearPoints();
+                T.Check(export.PointsWindow is null && export.Window == (lo, hi));
+                // Unchecking every camera stops the export before it starts.
+                foreach (RecordingCamera c in export.SourceCameras)
+                {
+                    export.SetCamera(c, false);
+                }
+                T.Equal("Choose at least one camera", export.Problem);
+                export.CameraChoice = null;
+                T.Equal(export.SourceCameras.Count, export.Checked.Count);
+                // The tab is kept when another incident is selected.
+                rig.Browser.OpenExportTab();
+                rig.Browser.Click(rig.Browser.DayIncidents.OrderBy(i => i.Start).Last().Key, extend: false);
+                T.Check(rig.Browser.InspectorTab == InspectorTab.Export && rig.Browser.ShowInspector);
+            }
+            finally
+            {
+                rig.Dispose();
+            }
+        });
+
+        T.Run("export tab: the stream chosen reaches the core's download request", () =>
+        {
+            var rig = new Rig();
+            try
+            {
+                ExportController export = rig.Browser.Export;
+                Incident first = rig.Browser.DayIncidents.OrderBy(i => i.Start).First();
+                rig.Browser.Click(first.Key, extend: false);
+                rig.Work();
+                (long lo, _) = rig.Scrub;
+                export.RawPoints = new InOutPoints(lo + 3_000, lo + 9_000);
+                export.KindChoice = ExportKind.Download;
+                export.StartAsync().GetAwaiter().GetResult();
+                T.Check(rig.Recordings.LastRangeTiers.Count > 0 && rig.Recordings.LastRangeTiers.All(t => t == "main"), "main is the default");
+                export.DefaultQuality = () => ExportQuality.Sub;
+                T.Equal(ExportQuality.Sub, export.Quality);
+                export.RawPoints = new InOutPoints(lo + 3_500, lo + 9_000);
+                export.StartAsync().GetAwaiter().GetResult();
+                T.Check(rig.Recordings.LastRangeTiers.All(t => t == "sub"), "Settings' choice is the tab's default");
+                export.QualityChoice = ExportQuality.Main;
+                export.RawPoints = new InOutPoints(lo + 4_000, lo + 9_000);
+                export.StartAsync().GetAwaiter().GetResult();
+                T.Check(rig.Recordings.LastRangeTiers.All(t => t == "main"), "the tab's choice wins");
+                // A trim of an incident that is not downloaded downloads its range first, in the stream chosen.
+                export.QualityChoice = ExportQuality.Sub;
+                export.KindChoice = ExportKind.TrimCopy;
+                export.RawPoints = new InOutPoints(lo + 4_500, lo + 9_000);
+                export.StartAsync().GetAwaiter().GetResult();
+                T.Check(rig.Recordings.LastRangeTiers.All(t => t == "sub"), "the trim's own download is in the stream chosen");
+            }
+            finally
+            {
+                rig.Dispose();
+            }
+        });
+
+        T.Run("export tab: a chosen folder is used with no picker, until Ask Each Time", () =>
+        {
+            var rig = new Rig();
+            try
+            {
+                ExportController export = rig.Browser.Export;
+                rig.PlayAndDownload();
+                (long lo, _) = rig.Scrub;
+                export.RawPoints = new InOutPoints(lo + 3_000, lo + 9_000);
+                export.ChooseFolder(rig.Folder);
+                T.Equal(rig.Folder, export.DirectFolder);
+                export.KindChoice = ExportKind.TrimCopy;
+                export.StartAsync().GetAwaiter().GetResult();
+                T.NotNull(export.Job).Completion.GetAwaiter().GetResult();
+                T.Equal(0, rig.Dialogs.Asked.Count);
+                T.Check(export.Job!.Files.Count >= 1 && export.Job.Files.All(f => Path.GetDirectoryName(f) == rig.Folder), export.Job.Result);
+                export.DismissJob();
+                export.AskEachTime();
+                T.Check(export.DirectFolder is null);
+                export.StartAsync().GetAwaiter().GetResult();
+                T.NotNull(export.Job).Completion.GetAwaiter().GetResult();
+                T.Check(rig.Dialogs.Asked.Count > 0, "the picker asks again");
             }
             finally
             {
