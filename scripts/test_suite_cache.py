@@ -202,6 +202,22 @@ sh("git", "add", "-A")
 sh("git", "commit", "-q", "-m", "version and swift")
 same("VERSION plus a Swift change reruns the Swift suite", fake_check(), "cached test=none swift=run")
 
+# Markdown is never an input of a suite: a docs change (also with VERSION)
+# reruns nothing. The markdown checks themselves are not suites; they run
+# through scripts/check-docs.sh (scripts/test-stamps.sh).
+commit_file("docs/NOTES.md", "# notes\n")
+same("a markdown-only change reruns nothing", fake_check(), "cached test=none swift=cached")
+write("VERSION", "0.2.2\n")
+write("README.md", "# readme\n")
+sh("git", "add", "-A")
+sh("git", "commit", "-q", "-m", "version and docs")
+same("VERSION plus markdown reruns nothing", fake_check(), "cached test=none swift=cached")
+write("apps/macos/App.swift", "// app 2c\n")
+write("README.md", "# readme 2\n")
+sh("git", "add", "-A")
+sh("git", "commit", "-q", "-m", "docs and swift")
+same("markdown plus a Swift change reruns the Swift suite", fake_check(), "cached test=none swift=run")
+
 # Failures are never cached.
 commit_file("apps/macos/App.swift", "// app 3")
 same("a failing suite runs", fake_check(fail_swift=True), "cached test=none swift=run")
