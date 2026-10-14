@@ -12,7 +12,7 @@
 // - here, end to end in the running app: the real core against the mock, the real decoder, and the real renderer. The
 //   verdict is taken on the decode times shown by an ideal 60 Hz display (PacingRefresh), so it does not depend on
 //   how many refreshes the real display gave a window behind the others; the real display's share of drawn pictures
-//   is checked as wiring. The steps wait for picture counts, never for a fixed time.
+//   is checked as wiring in the playback step only (the live step prints it: a covered or minimized window gets few refreshes). The steps wait for picture counts, never for a fixed time.
 
 using NvrView.Shell;
 using NvrView.Video;
@@ -57,7 +57,6 @@ internal sealed partial class SelfTest
             $"{r.Frames - frames} frames in {watch.Elapsed.TotalSeconds:0.0} s; first tile: {(reports.Length > 0 ? reports[0].ToString() : "none")}");
         Expect(enough, $"live pacing: the tiles did not each deliver {LivePictures} pictures");
         Expect(simRatio >= PacingVerdict.ShownRatio, $"live pacing: {simulated} of {delivered} delivered pictures would be shown at 60 Hz");
-        Expect(ratio >= RealShownRatio, $"live pacing: {shown} of {delivered} delivered pictures were drawn");
     }
 
     private async Task PlaybackPacingStep(Viewer v)

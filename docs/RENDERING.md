@@ -222,7 +222,7 @@ refresh at 60 Hz is 33.4 ms) or is too loose to mean anything. The
 self-tests therefore judge the decode times the trace recorded as an ideal
 60 Hz display shows them (`PacingRefresh`: at each refresh the newest decoded
 picture is drawn, as both renderers do), and check the real display only as
-wiring (at least 80% of the released pictures drawn). The bounds
+wiring (at least 80% of the released pictures drawn) in the playback step; the live step prints the real display's count and judges only the simulated display. The bounds
 (`PacingVerdict`, the same constants and test vectors in `PacingStats.cs` and
 `PacingStats.swift`): shown pairs' jitter p95 at most 20 ms; at most two
 pairs over two and a half refreshes (one late picture, or one stall of any
