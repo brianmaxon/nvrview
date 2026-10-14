@@ -388,7 +388,8 @@ public sealed class ExportController
             }
             // A follow cut may name fewer cameras than the incident has; the playback still holds all of them.
             List<RecordingCamera> edit = [.. _browser.EditPlayer.Plan?.Sources.Select(x => x.Camera) ?? []];
-            return edit.Count >= playing.Count ? edit : playing;
+            List<RecordingCamera> incident = [.. _browser.Editable?.Incident.Cameras.Select(x => x.Camera) ?? []];
+            return new[] { edit, playing, incident }.MaxBy(l => l.Count)!;
         }
     }
 
