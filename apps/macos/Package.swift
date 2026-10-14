@@ -32,9 +32,13 @@ let cInterface: Target =
 let selfTest = ProcessInfo.processInfo.environment["NVRVIEW_SELFTEST"] != nil
 
 // The app's feature modules (Sources/<Module>), each depending only on the
-// ones below it: AppBase first, then the features, then NVRViewApp on top.
-// They share one access rule: `package` for what another module uses.
+// ones below it: AppBase first, the features next, then NVRViewApp on top (the
+// app model, the windows, and the wiring). A feature never names the app
+// model: it asks for what it needs through a host protocol (AppHost in
+// AppBase, and a narrower one per feature) that the app model conforms to.
+// What another module uses is `package`, not public.
 let appModules: [(name: String, dependencies: [Target.Dependency])] = [
+    // Shared by all: the stores, options, device types, AppHost, and helpers.
     ("AppBase", ["NVRCore", "VideoKit"]),
     // Updates: checking, downloading, release notes, and their settings page.
     ("AppUpdates", ["AppBase"]),
@@ -44,10 +48,10 @@ let appModules: [(name: String, dependencies: [Target.Dependency])] = [
     ("AppCapture", ["AppBase"]),
     // Camera motion: the pan, tilt, zoom, lens, and preset model and controls.
     ("AppPTZ", ["AppBase"]),
-    // Smart alerts on this computer: settings, the events window, evidence
-    // and verification views, and the model behind them.
     // Recordings: browsing, playback, editing, and export.
     ("AppRecordings", ["AppBase", "AppCapture"]),
+    // Smart alerts on this computer: settings, the events window, evidence
+    // and verification views, and the model behind them.
     ("AppAlerts", ["AppBase", "AppCapture", "AlertHost", "DetectorKit"]),
     // The stage: the tile grid, headers, insets, and the call window.
     ("AppStage", ["AppBase", "AppCalls", "AppCapture", "AppPTZ", "AppAlerts"]),
@@ -59,8 +63,12 @@ let appDependencies: [Target.Dependency] =
 let coreDefine: [SwiftSetting] = realCore ? [.define("NVRVIEW_REAL_CORE")] : []
 // `-enable-testing` in release lets the self-test module use internals
 // (`@testable import`) without every declaration being package or public.
+// `-disable-cmo` keeps cross-module optimization from copying function bodies
+// into a module's interface: without it every edit in a feature module
+// rebuilt everything above it (about 30 s in release); with it only the
+// edited module and the final link run.
 let appSwiftSettings: [SwiftSetting] =
-    coreDefine + [.unsafeFlags(["-enable-testing"], .when(configuration: .release))]
+    coreDefine + [.unsafeFlags(["-enable-testing", "-disable-cmo"], .when(configuration: .release))]
 
 let package = Package(
     name: "NVRView",
