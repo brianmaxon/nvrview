@@ -19,7 +19,10 @@
 #
 # A newer start supersedes an older one: the older check's process group is
 # stopped and its Windows locks given back before the new one begins. Nothing
-# starts when COMMIT's tree already has full Mac and Windows stamps. A check that
+# starts when COMMIT's tree already has full Mac and Windows stamps, or differs
+# from a tree that has them in VERSION alone (a version bump: the stamps are
+# carried over, scripts/stamps-lib.sh carry_version_stamps, and nothing runs).
+# A check that
 # was stopped or failed leaves no stamps; a release then needs --full-check.
 #
 # State (common git directory, nvrview-checks/fullcheck/): pid, commit, tree,
@@ -86,6 +89,8 @@ case "$cmd" in
       exit 0
     fi
     stop_running
+    # A VERSION-only commit after a fully checked tree: record its pass, run nothing.
+    carry_version_stamps "$tree" || true
     if full_stamp mac "$tree" && full_stamp windows "$tree"; then
       echo "full check: tree $tree already has full Mac and Windows stamps; nothing to start"
       exit 0

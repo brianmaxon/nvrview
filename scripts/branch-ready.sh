@@ -5,6 +5,10 @@
 #
 #   scripts/branch-ready.sh BRANCH
 #
+# A tip whose tree differs from a checked tree in VERSION alone is ready: the
+# stamps are carried over (scripts/stamps-lib.sh, carry_version_stamps) and the
+# line says "VERSION-only".
+#
 # Prints one line (the tree hash and each stamp: full, cached with the suites
 # it took from the cache, or missing) and exits 0 when both stamps exist, 1
 # when one is missing. Used by scripts/merge-branch.sh and
@@ -17,13 +21,18 @@ cd "$(git rev-parse --show-toplevel)"
 tip=$(git rev-parse --verify "$1^{commit}") || { echo "branch-ready: no such branch: $1" >&2; exit 2; }
 tree=$(git rev-parse "$tip^{tree}")
 
+carry_version_stamps "$tree" >/dev/null || true
+
 describe() { # KIND
+  carried=$(sed -n 's/^carried_from=//p' "$(stamp_dir)/$tree.$1" 2>/dev/null || true)
+  note=""
+  if [ -n "$carried" ]; then note=", VERSION-only change from the checked tree $carried"; fi
   if ! has_stamp "$1" "$tree"; then
     printf 'missing'
   elif full_stamp "$1" "$tree"; then
-    printf 'full'
+    printf 'full%s' "$note"
   else
-    printf 'cached (%s)' "$(stamp_cached "$1" "$tree")"
+    printf 'cached (%s%s)' "$(stamp_cached "$1" "$tree")" "$note"
   fi
 }
 

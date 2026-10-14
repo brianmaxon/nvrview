@@ -50,7 +50,16 @@ build() {
   dotnet build apps/windows/NvrView.App -c Release --artifacts-path "$out" -v quiet -clp:ErrorsOnly -nologo
   # The app finds nvrview.dll next to itself.
   cp target/release/nvrview.dll "$(dirname "$exe")/"
+  write_version
   ls -l "$exe"
+}
+
+# The app's version is not compiled in (apps/windows/Directory.Build.props): it
+# reads version.txt next to the executable. Written here from VERSION after a
+# build, and again at packaging, so a version bump changes this one file and
+# nothing is rebuilt. The tested-build fingerprint leaves the file out.
+write_version() {
+  tr -d '[:space:]' <VERSION >"$(dirname "$exe")/version.txt"
 }
 
 # The release layout: the trimmed, self-contained publish output without
@@ -61,6 +70,7 @@ publish() {
   dotnet publish apps/windows/NvrView.App -c Release --artifacts-path "$out" -v quiet -clp:ErrorsOnly -nologo \
     -p:DebugType=none -p:DebugSymbols=false
   cp target/release/nvrview.dll "$(dirname "$exe")/"
+  write_version
   kept_whole
   find "$(dirname "$exe")" -type f | wc -l
   du -sk "$(dirname "$exe")"
@@ -105,11 +115,12 @@ tree_known() {
   return 0
 }
 
-# The tree line, then one "sha256  ./path" line per file of the publish
-# output, in a fixed order.
-publish_fingerprint() {
-  printf 'tree=%s\n' "$NVRVIEW_TREE"
-  (cd "$(dirname "$exe")" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
+# The tree line (the tree given, default the one being checked), then one
+# "sha256  ./path" line per file of the publish output, in a fixed order.
+# version.txt is left out: it is the one file a version bump changes.
+publish_fingerprint() { # [TREE]
+  printf 'tree=%s\n' "${1:-$NVRVIEW_TREE}"
+  (cd "$(dirname "$exe")" && find . -type f ! -path ./version.txt -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
 }
 
 # Called by the worker after every test on the publish output passed: the
@@ -131,10 +142,16 @@ mark_tested() {
 }
 
 # True when the publish output on disk is, file by file, the build that passed
-# the tests for the tree being packaged.
+# the tests for the tree being packaged, or for the tree NVRVIEW_VERSION_ONLY_OF
+# names (scripts/windows-check.sh passes it when the tree being packaged
+# differs from a tested one in VERSION alone; the version is not compiled in,
+# so the build is the same).
 tested_publish_reusable() {
+  local tested
   tree_known && [ -f "$out/publish.tested" ] && [ -f "$exe" ] || return 1
-  [ "$(cat "$out/publish.tested")" = "$(publish_fingerprint)" ]
+  tested=$(sed -n 's/^tree=//p' "$out/publish.tested")
+  if [ "$tested" != "$NVRVIEW_TREE" ] && [ "$tested" != "${NVRVIEW_VERSION_ONLY_OF:-}" ]; then return 1; fi
+  [ "$(cat "$out/publish.tested")" = "$(publish_fingerprint "$tested")" ]
 }
 
 # Runs a .cmd file as a one-time scheduled task in the logged-on user's
@@ -235,11 +252,12 @@ package() {
   NVRVIEW_APP_PUBLISHED=1
   exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"
   if tested_publish_reusable; then
-    echo "reusing the publish output that passed the tests for tree $NVRVIEW_TREE (hashes of all files match)"
+    echo "reusing the publish output that passed the tests for tree $NVRVIEW_TREE or its version-only ancestor ${NVRVIEW_VERSION_ONLY_OF:-none} (hashes of all files match); only version.txt is written"
   else
     echo "no matching tested publish output; building it"
     publish
   fi
+  write_version
   rm -rf "$out/package"
   make_zip "$PWD/$out/package/NvrView-$version-win-x64.zip"
   ls -l "$out/package"
@@ -252,6 +270,7 @@ update() {
   version="$(tr -d '[:space:]' <VERSION)"
   dir="$out/update-test"
   app_dir="$(dirname "$exe")"
+  write_version
   rm -rf "$dir"
   mkdir -p "$dir/source" "$dir/keys" "$dir/Apps"
   cargo build -q -p sign-update

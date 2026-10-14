@@ -17,8 +17,10 @@
     <!-- Keep the build machine's paths out of the binaries. -->
     <PathMap>$(MSBuildThisFileDirectory)=apps/windows/</PathMap>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- One version for every app (and the macOS bundle): the VERSION file at the repository root. -->
-    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</Version>
+    <!-- The version is not compiled in: a version bump must not change the build, so nothing is rebuilt or
+         retested for it. The app reads it from version.txt next to the executable (AppVersion.Installed),
+         which scripts/windows-app.sh writes from the VERSION file at the repository root. -->
+    <Version>0.0.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 </Project>

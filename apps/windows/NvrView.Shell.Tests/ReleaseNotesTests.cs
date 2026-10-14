@@ -22,6 +22,25 @@ internal static class ReleaseNotesTests
             }
         });
 
+        T.Run("version: read from version.txt next to the executable, never compiled in", () =>
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "nvrview-version-tests-" + Guid.NewGuid().ToString("N")[..8]);
+            Directory.CreateDirectory(dir);
+            try
+            {
+                T.Equal("0.0.0", AppVersion.Read(dir));
+                File.WriteAllText(Path.Combine(dir, AppVersion.FileName), "1.4.2\n");
+                T.Equal("1.4.2", AppVersion.Read(dir));
+                File.WriteAllText(Path.Combine(dir, AppVersion.FileName), "not a version");
+                T.Equal("0.0.0", AppVersion.Read(dir));
+                T.Equal("0.0.0", AppVersion.Read(Path.Combine(dir, "missing")));
+            }
+            finally
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        });
+
         T.Run("release notes: the file is read leniently, newest first", () =>
         {
             BundledReleaseNotes n = BundledReleaseNotes.Parse(Json);

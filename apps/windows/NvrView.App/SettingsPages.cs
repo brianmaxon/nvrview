@@ -746,7 +746,7 @@ internal sealed class SettingsPages
 
         var aboutPage = new StackPanel { Spacing = 6 };
         aboutPage.Children.Add(new TextBlock { Text = "NvrView", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, FontSize = 18 });
-        aboutPage.Children.Add(new TextBlock { Text = $"Version {App.Instance.Updater?.Current ?? typeof(SettingsPages).Assembly.GetName().Version?.ToString(3) ?? "0.0.0"}" });
+        aboutPage.Children.Add(new TextBlock { Text = $"Version {App.Instance.Updater?.Current ?? AppVersion.Installed}" });
         aboutPage.Children.Add(new TextBlock { Text = "A native viewer for Reolink NVRs and cameras.", Opacity = 0.8 });
         aboutPage.Children.Add(new TextBlock { Text = "Licensed MIT OR Apache-2.0. Press F1 in a viewer window for the keyboard shortcuts.", Opacity = 0.8, TextWrapping = TextWrapping.Wrap });
 

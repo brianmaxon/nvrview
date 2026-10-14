@@ -64,6 +64,86 @@ release_stamp_tree() { # KIND TREE
   return 1
 }
 
+# The tree of a stamp of KIND (mac or windows) that differs from TREE in
+# VERSION alone, and so counts for it: nothing a check looks at depends on the
+# version's value (docs/DEVELOPMENT.md, "Version bumps"). With MODE "full" (the
+# default) only a full stamp (nothing taken from the test result cache) counts;
+# with "any", a full one is still preferred. Prints the tree and succeeds;
+# fails, printing nothing, when there is none. A windows-reused stamp is never
+# looked at (its file names differ).
+version_only_source() { # KIND TREE [full|any]
+  vs_kind="$1"; vs_tree="$2"; vs_mode="${3:-full}"
+  stamp_dir >/dev/null
+  for vs_pass in full any; do
+    if [ "$vs_mode" = full ] && [ "$vs_pass" = any ]; then break; fi
+    for vs_f in "$(stamp_dir)"/*."$vs_kind"; do
+      [ -f "$vs_f" ] || continue
+      vs_t=$(basename "$vs_f" ".$vs_kind")
+      [ "$vs_t" != "$vs_tree" ] || continue
+      if [ "$vs_pass" = full ]; then full_stamp "$vs_kind" "$vs_t" || continue; fi
+      if git cat-file -e "$vs_t^{tree}" 2>/dev/null && version_only_diff "$vs_t" "$vs_tree"; then
+        printf '%s\n' "$vs_t"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# Succeeds when TREE has, or would get by the version-only rule, a stamp of
+# every KIND given (mac, windows). Writes nothing.
+version_carry_possible() { # TREE KIND...
+  vc_tree="$1"; shift
+  for vc_kind in "$@"; do
+    has_stamp "$vc_kind" "$vc_tree" && continue
+    version_only_source "$vc_kind" "$vc_tree" any >/dev/null || return 1
+  done
+  return 0
+}
+
+# The version-only rule for check stamps: a tree that differs from a stamped
+# tree in VERSION alone gets the same stamps, because a version bump changes
+# nothing a check looks at, so no check runs for it. For each kind (mac,
+# windows) that TREE lacks, or has only from the test result cache while a
+# full one exists to carry, writes <TREE>.<kind> as a copy of the source stamp
+# with `carried_from=<the tree whose check actually ran>` and a note, and
+# prints one line saying so. A carried stamp is full exactly when its source is.
+# Succeeds when TREE ends up with every kind given (default: mac and windows).
+carry_version_stamps() { # TREE [KIND...]
+  cv_tree="$1"; shift
+  [ $# -gt 0 ] || set -- mac windows
+  stamp_dir >/dev/null
+  cv_ok=0
+  for cv_kind in "$@"; do
+    if full_stamp "$cv_kind" "$cv_tree"; then continue; fi
+    if cv_src=$(version_only_source "$cv_kind" "$cv_tree" full); then :
+    elif has_stamp "$cv_kind" "$cv_tree"; then continue
+    elif cv_src=$(version_only_source "$cv_kind" "$cv_tree" any); then :
+    else cv_ok=1; continue
+    fi
+    cv_file="$(stamp_dir)/$cv_src.$cv_kind"
+    cv_root=$(sed -n 's/^carried_from=//p' "$cv_file")
+    [ -n "$cv_root" ] || cv_root="$cv_src"
+    mkdir -p "$(stamp_dir)"
+    {
+      printf 'date=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'duration=0s\n'
+      printf 'tree=%s\n' "$cv_tree"
+      printf 'steps=%s\n' "$(sed -n 's/^steps=//p' "$cv_file")"
+      if grep -q '^full=no$' "$cv_file"; then
+        printf 'full=no\ncached=%s\n' "$(sed -n 's/^cached=//p' "$cv_file")"
+      else
+        printf 'full=yes\n'
+      fi
+      printf 'carried_from=%s\n' "$cv_root"
+      printf 'note=VERSION-only change from a checked tree; no check ran for this tree\n'
+    } >"$(stamp_dir)/$cv_tree.$cv_kind.tmp.$$"
+    mv "$(stamp_dir)/$cv_tree.$cv_kind.tmp.$$" "$(stamp_dir)/$cv_tree.$cv_kind"
+    echo "$cv_kind: carried the check stamp of tree $cv_root to tree $cv_tree (only VERSION differs; no check runs)"
+  done
+  return "$cv_ok"
+}
+
 # Files that differ between two trees/commits, one per line, sorted.
 changed_files() { # A B
   git diff --name-only "$1" "$2" | LC_ALL=C sort

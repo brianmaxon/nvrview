@@ -15,6 +15,13 @@
 #       merge accepted on a branch's earlier Windows result; --windows and
 #       scripts/release.sh never count it. Rules: scripts/stamps-lib.sh.
 #
+# Version-only rule (scripts/stamps-lib.sh, carry_version_stamps): a tree that
+# differs from a stamped tree in VERSION alone counts as checked, because a
+# version bump changes nothing a check looks at. The query writes a stamp for
+# it (carried_from=<the tree whose check ran>, same full or cached status) and
+# says so; the commands below then find it like any other stamp.
+#   scripts/checked.sh --carry-version    does only that, for HEAD's tree
+#
 # A stamp is the file <git common dir>/nvrview-checks/<tree hash>.mac or
 # .windows (inside the git directory, so never committed). It is keyed by the
 # tree hash, not the commit, so an amended or rebased commit with the same
@@ -22,6 +29,7 @@
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 
+. scripts/stamps-lib.sh
 tree=$(git rev-parse 'HEAD^{tree}')
 dir="$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-checks"
 
@@ -54,6 +62,7 @@ want_mac=0
 want_windows=0
 for arg in "$@"; do
   case "$arg" in
+    --carry-version) carry_version_stamps "$tree" && exit 0 || exit 1 ;;
     --mac) want_mac=1 ;;
     --windows) want_windows=1 ;;
     *) echo "usage: $0 [--mac] [--windows] | --record mac|windows SECONDS STEPS" >&2; exit 2 ;;
@@ -67,9 +76,11 @@ fi
 missing=0
 report() {
   kind="$1"
+  carry_version_stamps "$tree" "$kind" >/dev/null || true
   if [ -f "$dir/$tree.$kind" ]; then
     cached=$(sed -n 's/^cached=//p' "$dir/$tree.$kind")
-    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind")${cached:+; cached suites: $cached})"
+    carried=$(sed -n 's/^carried_from=//p' "$dir/$tree.$kind")
+    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind")${cached:+; cached suites: $cached}${carried:+; VERSION-only change: carried from the check of tree $carried})"
   else
     echo "$kind: NOT checked for tree $tree" >&2
     missing=1
