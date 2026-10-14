@@ -397,6 +397,7 @@ internal sealed partial class SelfTest
 
             // parity: export-range-download
             export.RawPoints = new InOutPoints(lo + 1_000, lo + 4_200);
+            export.CameraChoice = null;
             // The tab offers the playing cameras, checked; the stream is Settings' choice until the tab says otherwise.
             Expect(export.Checked.Count == p.Cameras.Count, $"export: the tab checks {export.Checked.Count} cameras, expected {p.Cameras.Count}");
             ViewSettings settings = app.Viewer!.Settings;

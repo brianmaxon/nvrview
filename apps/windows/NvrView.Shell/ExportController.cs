@@ -377,9 +377,20 @@ public sealed class ExportController
     private bool _sound = true;
 
     /// <summary>The cameras the range has: the ones playing, or the follow cut's or grid's.</summary>
-    public IReadOnlyList<RecordingCamera> SourceCameras => _browser.PlayerView == PlayerView.Cameras
-        ? [.. _browser.Player.Cameras]
-        : [.. _browser.EditPlayer.Plan?.Sources.Select(x => x.Camera) ?? []];
+    public IReadOnlyList<RecordingCamera> SourceCameras
+    {
+        get
+        {
+            List<RecordingCamera> playing = [.. _browser.Player.Cameras];
+            if (_browser.PlayerView == PlayerView.Cameras)
+            {
+                return playing;
+            }
+            // A follow cut may name fewer cameras than the incident has; the playback still holds all of them.
+            List<RecordingCamera> edit = [.. _browser.EditPlayer.Plan?.Sources.Select(x => x.Camera) ?? []];
+            return edit.Count >= playing.Count ? edit : playing;
+        }
+    }
 
     /// <summary>The cameras checked: the source's, unless the user unchecked some.</summary>
     public HashSet<RecordingCamera> Checked
