@@ -39,6 +39,7 @@ viewer  live-pacing
 tiles  zoom-auto-quality
 tiles  fullscreen-chrome-autohide
 tiles  corner-*
+tiles  frame-rates-*
 tiles  indicator-*
 tiles  alert-raise
 tiles  alert-reduce-motion

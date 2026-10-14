@@ -121,3 +121,4 @@ alerts-night-evidence-expiry macos    gap: Windows has no Smart Alerts host or s
 alerts-cooldown-always-alert macos    gap: Windows has no Smart Alerts host or screen yet (the core is shared; NOTIFICATIONS.md slice S7)
 alerts-events-image          macos    gap: Windows has no Smart Alerts screen yet (the calls are bound; NOTIFICATIONS.md slice S7)
 fill-focused-tile-menu  macos  gap: Windows should check that a full-screen tile keeps its right-click menu (picture items, exit full screen)
+frame-rates-readout       windows  gap: the macOS self-test does not check View > Show Frame Rates (shown in the app only)
