@@ -179,7 +179,7 @@ proptest! {
             e.tick(now(t));
             let d = run(&mut e, device(i as u64 + 1, cam(0), "people", t), seen(cam(0), 0.8), DecideInputs::default());
             let cd = e.cooldown_ms(cam(0), Class::Person);
-            if let Outcome::Alert { alert_id, .. } = d.outcome {
+            if let Outcome::Alert { alert_id, quieted: None, .. } = d.outcome {
                 if let Some((id, when, cool)) = last_alert
                     && id == alert_id
                 {

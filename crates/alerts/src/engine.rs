@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::decision::{Decision, Outcome, QuietReason, SuppressReason};
+use crate::decision::{Decision, Outcome, QuietReason, Quieted, SuppressReason};
 use crate::episode::{Admission, EpisodeKey, EpisodeState, Timeliness};
 use crate::explain::explain;
 use crate::external::{SourceHealth, Window};
@@ -582,7 +582,14 @@ impl Engine {
                     reason: SuppressReason::ClassOff,
                 },
             ))
-        } else if let Some(left) = self.timeliness.cooldown_left(&key, now.ms) {
+        } else if let Some(left) = self.timeliness.cooldown_left(&key, now.ms)
+            && !self
+                .timeliness
+                .probe_due(&key, now.ms, self.settings.timing.check_spacing_ms())
+        {
+            // Inside the cooldown, and a check for this camera and class
+            // started moments ago: a repeat of the same event. (Later ones
+            // are looked at and logged; see `probe_due`.)
             let since = self
                 .timeliness
                 .get(&key)
@@ -610,9 +617,13 @@ impl Engine {
                 next,
             };
         }
-        let result = match could {
-            Some(rule) => GateResult::PassAlways { rule },
-            None => GateResult::Pass,
+        let result = match (could, self.timeliness.cooldown_left(&key, now.ms)) {
+            (Some(rule), _) => GateResult::PassAlways { rule },
+            (None, Some(left_ms)) => {
+                self.timeliness.note_probe(&key, now.ms);
+                GateResult::PassCooldown { left_ms }
+            }
+            (None, None) => GateResult::Pass,
         };
         steps.push(trace.push(now.ms, StepKind::Gate { result }));
 
@@ -1023,6 +1034,7 @@ impl Engine {
                 late,
                 unverified: rules.unverified,
                 always: rules.always,
+                quieted: None,
             },
             Admission::Update { alert_id, rev, .. } => Outcome::Alert {
                 severity,
@@ -1031,11 +1043,23 @@ impl Engine {
                 late,
                 unverified: rules.unverified,
                 always: rules.always,
+                quieted: None,
             },
+            // A real detection inside the cooldown: logged with its
+            // evidence as an alert, but nothing interrupts the user.
             Admission::Cooldown {
-                left_ms, since_ms, ..
-            } => Outcome::Suppress {
-                reason: SuppressReason::Cooldown { left_ms, since_ms },
+                alert_id,
+                rev,
+                left_ms,
+                since_ms,
+            } => Outcome::Alert {
+                severity,
+                alert_id,
+                rev,
+                late,
+                unverified: rules.unverified,
+                always: rules.always,
+                quieted: Some(Quieted::Cooldown { left_ms, since_ms }),
             },
         };
         self.finish(trace, Some(cam), class, outcome, incident, now)

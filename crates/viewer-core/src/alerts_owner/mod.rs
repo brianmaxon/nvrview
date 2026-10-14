@@ -1207,6 +1207,11 @@ impl Inner {
             .map(|(_, k)| k.clone());
         let decision = serde_json::to_value(&d).unwrap_or(Value::Null);
         let state = match &d.outcome {
+            // A real detection inside a cooldown: logged with its evidence,
+            // but no output is interrupted.
+            Outcome::Alert {
+                quieted: Some(_), ..
+            } => "quieted",
             Outcome::Alert { rev: 1, .. } => "new",
             Outcome::Alert { .. } => "update",
             _ => "logged",
@@ -1259,7 +1264,7 @@ impl Inner {
         // Only alerts carry the full trace in events (it stays in the log and
         // in `alerts_get`); quiet and suppressed decisions carry a summary.
         let mut event_decision = decision.clone();
-        if state == "logged"
+        if matches!(state, "logged" | "quieted")
             && let Some(o) = event_decision.as_object_mut()
         {
             o.remove("trace");
@@ -1290,9 +1295,16 @@ impl Inner {
             late,
             unverified,
             always,
+            quieted,
         } = &d.outcome
         {
             st.next_alert_id = st.next_alert_id.max(alert_id + 1);
+            if quieted.is_some() {
+                // Logged and kept as evidence; no sound, notification, or
+                // outside message, and the episode's re-checks stay those
+                // of the alert that started it.
+                return;
+            }
             if let Some(to_ha) = test_flag {
                 st.test_alerts.insert(*alert_id, to_ha);
                 while st.test_alerts.len() > MAX_TESTS {

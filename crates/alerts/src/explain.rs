@@ -3,7 +3,7 @@
 //! (cameras, sensors) and numbers appear; nothing from a trigger's payload
 //! does.
 
-use crate::decision::{Outcome, QuietReason, SuppressReason};
+use crate::decision::{Outcome, QuietReason, Quieted, SuppressReason};
 use crate::episode::{Admission, UpdateWhy};
 use crate::model::{CameraId, Class, Mode};
 use crate::rules::Support;
@@ -218,6 +218,13 @@ pub fn explain(trace: &Trace, settings: &AlertSettings, offset_min: i32) -> Stri
                 duration_words(late.unwrap_or_default())
             ));
         }
+        Some(Outcome::Alert {
+            quieted: Some(Quieted::Cooldown { since_ms, .. }),
+            ..
+        }) => out.push(format!(
+            "Not notified: already alerted {} ago.",
+            duration_words(since_ms)
+        )),
         Some(Outcome::Alert { .. }) | None => {}
         Some(Outcome::Quiet { reason }) => out.push(format!(
             "Not alerted: {}.",

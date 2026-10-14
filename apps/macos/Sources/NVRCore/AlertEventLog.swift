@@ -21,6 +21,9 @@ public struct SmartAlertLogEntry: Sendable, Equatable, Identifiable {
     public var unverified: Bool
     public var late: Bool
     public var always: String?
+    /// Why a real, verified detection did not notify (`cooldown`): it is
+    /// logged and its pictures kept, but nothing interrupted the user.
+    public var quieted: String?
     public var steps: [TraceStep]
     public var deliveries: [TraceStep]
     public var hasSnapshot: Bool
@@ -52,6 +55,7 @@ public struct SmartAlertLogEntry: Sendable, Equatable, Identifiable {
         unverified = d["unverified"]?.bool ?? false
         late = d["late"]?.bool ?? false
         always = d["always"]?.string
+        quieted = d["quieted"]?["why"]?.string
         steps = (d["trace"]?["steps"]?.array ?? []).compactMap(TraceStep.init)
         deliveries = (json["deliveries"]?.array ?? []).compactMap { TraceStep($0) ?? $0["step"].flatMap(TraceStep.init) }
         hasSnapshot = json["snapshot"]?.bool ?? false
@@ -70,6 +74,9 @@ public struct SmartAlertLogEntry: Sendable, Equatable, Identifiable {
         return decision
     }
 
+    /// "not notified: cooldown" for a quieted alert, else nil.
+    public var notNotified: String? { quieted.map { "not notified: \($0)" } }
+
     /// The explanation's first sentence (the list's line).
     public var firstSentence: String {
         let text = explanation.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -84,6 +91,85 @@ public struct SmartAlertLogEntry: Sendable, Equatable, Identifiable {
     public var allSteps: [TraceStep] {
         let have = Set(steps.filter { $0.step == "delivery" }.map { $0.fields["output"]?.int64 ?? -1 })
         return steps + deliveries.filter { !have.contains($0.fields["output"]?.int64 ?? -1) }
+    }
+}
+
+/// A row of the Events list: one decision, or a burst of alerts for the same
+/// camera and class that follow each other within the cooldown ("3 vehicles
+/// in 40 s"), which expands to its members.
+public enum SmartAlertLogRow: Sendable, Equatable, Identifiable {
+    case single(SmartAlertLogEntry)
+    case burst(SmartAlertBurst)
+
+    public var id: String {
+        switch self {
+        case .single(let e): e.id
+        case .burst(let b): "burst-" + b.members[0].id
+        }
+    }
+}
+
+public struct SmartAlertBurst: Sendable, Equatable {
+    /// Newest first, as the list is.
+    public var members: [SmartAlertLogEntry]
+
+    public init(members: [SmartAlertLogEntry]) { self.members = members }
+
+    public var camera: AlertCamera? { members[0].camera }
+    public var className: String { members[0].className ?? "alert" }
+    /// From the oldest member's decision to the newest's.
+    public var spanMs: Int64 { max(members.first!.decidedMs - members.last!.decidedMs, 0) }
+    /// How many of the members notified.
+    public var notified: Int { members.filter { $0.quieted == nil }.count }
+
+    /// "3 vehicles in 40 s".
+    public var title: String {
+        "\(members.count) \(Self.plural(className)) in \(Self.span(spanMs))"
+    }
+
+    static func plural(_ cls: String) -> String {
+        switch cls {
+        case "person": "people"
+        case "co": "CO alarms"
+        case "smoke": "smoke alarms"
+        case "visitor": "doorbell presses"
+        case "motion": "motion events"
+        default: cls + "s"
+        }
+    }
+
+    static func span(_ ms: Int64) -> String {
+        let s = Int((Double(ms) / 1000).rounded())
+        return s < 90 ? "\(max(s, 1)) s" : "\((s + 30) / 60) min"
+    }
+}
+
+public enum SmartAlertLogGrouping {
+    /// Groups consecutive alert decisions (newest first) for the same
+    /// camera and class whose neighbors are at most `gapMs` apart (the
+    /// cooldown) into bursts of two or more. Tests and other decisions stay
+    /// single rows.
+    public static func rows(_ entries: [SmartAlertLogEntry], gapMs: Int64 = 60_000) -> [SmartAlertLogRow] {
+        var rows: [SmartAlertLogRow] = []
+        var run: [SmartAlertLogEntry] = []
+        func flush() {
+            if run.count >= 2 { rows.append(.burst(SmartAlertBurst(members: run))) } else { rows += run.map { .single($0) } }
+            run = []
+        }
+        func joins(_ e: SmartAlertLogEntry, _ last: SmartAlertLogEntry) -> Bool {
+            e.decision == "alert" && !e.isTest && last.decision == "alert" && !last.isTest
+                && e.camera == last.camera && e.className == last.className && abs(last.decidedMs - e.decidedMs) <= gapMs
+        }
+        for e in entries {
+            if let last = run.last, joins(e, last) {
+                run.append(e)
+                continue
+            }
+            flush()
+            if e.decision == "alert", !e.isTest { run = [e] } else { rows.append(.single(e)) }
+        }
+        flush()
+        return rows
     }
 }
 

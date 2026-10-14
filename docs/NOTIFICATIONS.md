@@ -253,8 +253,11 @@ retained messages in place.
 Cheap, before any picture is fetched, in this order: camera **muted**; the
 kind is unknown; then, unless an always-alert rule could apply, the camera's
 **schedule**; motion on a camera that does not check motion; the **class is
-off** for the camera; a **cooldown** for this camera and class. A trigger
-stopped at the gate is still logged, with its reason. An always-alert
+off** for the camera. A trigger stopped at the gate is still logged, with its
+reason. A **cooldown** for this camera and class does not stop a trigger from
+being looked at (see "Timeliness: episodes"): only a repeat that arrives within
+`check_spacing_s` (default 5 s) of the alert or of the last check inside the
+cooldown is stopped here, as a repeat of one event. An always-alert
 candidate (smoke or CO; a doorbell press at night; a person or motion on an
 outside camera at night) passes everything but a mute.
 
@@ -411,11 +414,22 @@ Pending ──alert──► Active ──seen again──► Lingering ──mi
 ```
 
 - **Cooldown** per camera and class escalates: 1 min after the first alert,
-  then 5 min while activity continues. Within a cooldown a trigger is
-  suppressed ("already alerted 28 s ago") unless it breaks through: a higher
-  severity, or the episode's first always-alert outcome. Always-alert
-  outcomes are never suppressed: inside a cooldown they update the existing
-  alert instead of starting a new one.
+  then 5 min while activity continues. **The cooldown governs what interrupts
+  the user (sound, desktop notification, Home Assistant and every other
+  output), not what is recorded.** A second car 10 s after the first is
+  checked like any trigger, and when it is verified it is logged as its own
+  decision with its own kept evidence: an alert of the same alert ID and
+  revision that carries `quieted: {"why":"cooldown","left_ms","since_ms"}`
+  ("Not notified: already alerted 10 s ago"), event state `quieted`, and no
+  output. (Before this, the gate stopped such a trigger before any picture was
+  fetched, so the second car left no decision and no pictures.) A higher
+  severity, or the episode's first always-alert outcome, breaks through the
+  cooldown as before. Always-alert outcomes are never quieted: inside a
+  cooldown they update the existing alert instead of starting a new one.
+  Checks inside a cooldown are bounded: triggers for one camera and class
+  closer than `check_spacing_s` (default 5, 0 to 60) to the alert or the
+  last such check are repeats and are dropped at the gate; the engine's
+  bounded open-check count applies as always.
 - **Updates, not new alerts:** "still present" after the cooldown, a higher
   severity, the same class on another camera of the same incident ("Also seen
   after Camera 1"), each raises the alert's revision.
@@ -650,8 +664,17 @@ detector's boxes, classes and scores per crop, and any other verifier that
 ran, together with the decision. The core owns storage and expiry:
 
 - **Retention:** 2 hours by default (Settings, 30 minutes to 24 hours), capped
-  at 300 sets and 200 MiB, whichever comes first, oldest first, under
-  `data_dir/alerts/evidence/`.
+  at 600 sets and 400 MiB, whichever comes first, oldest first, under
+  `data_dir/alerts/evidence/`. Pinned sets are never dropped by the caps.
+- **Retention by time of day:** a set made during the night (the alerts'
+  night: sunset and sunrise at the location with the margins, or the fixed
+  night hours; household night mode does not count) is kept until
+  **N hours after that night ends** (Settings, 0 to 12, default 4), if that is
+  later than the ordinary retention, so a night can be reviewed the next
+  morning. Where the sun does not rise for days (polar night) the fixed hours'
+  end stands in; polar day has no night. The core works out each set's
+  `expires_ms` when it is created and again whenever the settings change.
+  Every verified detection has a set, including those quieted by a cooldown.
 - **Keep** moves a set into the per-alert snapshot store's limits (7 days, 256
   sets, 64 MiB).
 - **Privacy:** local only, never sent anywhere, deleted automatically when the

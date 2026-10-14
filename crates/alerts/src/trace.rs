@@ -45,6 +45,11 @@ pub enum GateResult {
     Cooldown {
         left_ms: Millis,
     },
+    /// Passed although a cooldown is running: the detection is checked and
+    /// logged, but will not interrupt the user.
+    PassCooldown {
+        left_ms: Millis,
+    },
     MotionOnly,
     UnknownKind,
     UnknownSource,

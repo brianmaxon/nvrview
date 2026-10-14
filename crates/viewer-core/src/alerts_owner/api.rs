@@ -210,6 +210,17 @@ impl crate::Core {
                 m.as_i64().ok_or(AlertError::InvalidArgument)?,
             )),
         };
+        let night_hold_h = match v.pointer("/evidence/night_hold_h") {
+            None | Some(Value::Null) => None,
+            Some(h) => Some(
+                u32::try_from(
+                    h.as_i64()
+                        .ok_or(AlertError::InvalidArgument)?
+                        .clamp(0, i64::from(super::evidence::MAX_NIGHT_HOLD_H)),
+                )
+                .unwrap_or(super::evidence::DEFAULT_NIGHT_HOLD_H),
+            ),
+        };
         let mut issues: Vec<String> = Vec::new();
 
         // Outputs the engine knows; others are reported and left out.
@@ -382,6 +393,11 @@ impl crate::Core {
             }
         };
         issues.extend(engine_issues.iter().map(ToString::to_string));
+        let night_plan = st.engine.as_ref().map(|e| super::evidence::NightPlan {
+            location: e.settings().location,
+            night: e.settings().night,
+            offset_min,
+        });
         st.enabled = enabled;
         st.offset_min = offset_min;
         st.acq = acq;
@@ -389,6 +405,11 @@ impl crate::Core {
             let now_ms = inner.clock.wall_now_us().div_euclid(1000);
             st.evidence.set_retention_min(
                 evidence_min.unwrap_or(super::evidence::DEFAULT_RETENTION_MIN),
+                now_ms,
+            );
+            st.evidence.set_night(
+                night_hold_h.unwrap_or(super::evidence::DEFAULT_NIGHT_HOLD_H),
+                night_plan,
                 now_ms,
             );
         }
@@ -896,6 +917,7 @@ impl crate::Core {
                 "pinned": st.evidence.counts().1,
                 "bytes": st.evidence.counts().2,
                 "retention_min": st.evidence.retention_min(),
+                "night_hold_h": st.evidence.night_hold_h(),
             },
             "input_status": st.inputs.iter().enumerate().map(|(i, s)| json!({
                 "index": i,

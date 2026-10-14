@@ -455,12 +455,15 @@ public struct SmartAlertSettings: Codable, Equatable, Sendable {
     /// How long the frames and detections of a check are kept for review
     /// (30 minutes to 24 hours).
     public var evidenceRetentionMinutes = 120
+    /// How long after a night ends the pictures made during it are kept, in
+    /// hours (0 to 12), so the night can be reviewed the next morning.
+    public var evidenceNightHoldHours = 4
 
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
         case enabled, mode, location, night, alwaysAlert, minAlertSeverity, verification, cameras, sensors, desktop,
-            homeAssistant, view, standbyOnBattery, evidenceRetentionMinutes
+            homeAssistant, view, standbyOnBattery, evidenceRetentionMinutes, evidenceNightHoldHours
     }
 
     /// Every field is optional in the file: a missing or unreadable part
@@ -483,6 +486,7 @@ public struct SmartAlertSettings: Codable, Equatable, Sendable {
         view = get(VerifyViewSettings.self, .view) ?? d.view
         standbyOnBattery = get(Bool.self, .standbyOnBattery) ?? d.standbyOnBattery
         evidenceRetentionMinutes = min(max(get(Int.self, .evidenceRetentionMinutes) ?? d.evidenceRetentionMinutes, 30), 1440)
+        evidenceNightHoldHours = min(max(get(Int.self, .evidenceNightHoldHours) ?? d.evidenceNightHoldHours, 0), 12)
     }
 
     // MARK: Editing helpers
@@ -720,7 +724,10 @@ extension SmartAlertSettings {
                 "window_before_s": verification.windowBeforeS, "window_after_s": verification.windowAfterS,
             ],
             "standby": ["auto_on_battery": standbyOnBattery, "max_wake_per_device": 4],
-            "evidence": ["retention_min": min(max(evidenceRetentionMinutes, 30), 1440)],
+            "evidence": [
+                "retention_min": min(max(evidenceRetentionMinutes, 30), 1440),
+                "night_hold_h": min(max(evidenceNightHoldHours, 0), 12),
+            ],
         ]
         doc["location"] = location.map { ["lat": $0.lat, "lon": $0.lon] } ?? NSNull()
         let listed = Set(cameras.map(\.camera))

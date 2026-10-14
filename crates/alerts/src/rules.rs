@@ -7,9 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Class, Exposure, Mode, Severity, Source};
-use crate::settings::{AlertSettings, AlwaysAlertSettings, Schedule};
-use crate::sun::{is_fixed_night, is_night};
-use crate::time::{LocalTime, Millis, local};
+use crate::settings::{AlertSettings, AlwaysAlertSettings, Location, NightSettings, Schedule};
+use crate::sun::{SunDay, is_fixed_night, is_night, sun_day};
+use crate::time::{LocalTime, MINUTE_MS, Millis, local};
 
 /// What decided whether it is night.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,60 @@ pub struct Context {
     pub night: bool,
     pub basis: NightBasis,
     pub local: LocalTime,
+}
+
+/// When the night that includes `at_ms` ends, or `None` in daytime. The night
+/// is the one the alerts use: sunset and sunrise at the location (with the
+/// margins), or the fixed hours without one. Household night mode is not part
+/// of it. At a location with no sunrise ahead (polar night) the fixed hours'
+/// end stands in, so a night is never open-ended.
+pub fn night_end_ms(
+    location: Option<Location>,
+    night: &NightSettings,
+    at_ms: Millis,
+    offset_min: i32,
+) -> Option<Millis> {
+    let fixed_end = || {
+        let m = i64::from(local(at_ms, offset_min).minute_of_day);
+        let mut delta = (i64::from(night.fallback_end_min % 1440) - m).rem_euclid(1440);
+        if delta == 0 {
+            delta = 1440;
+        }
+        at_ms - at_ms.rem_euclid(MINUTE_MS) + delta * MINUTE_MS
+    };
+    match location {
+        Some(loc) => {
+            if !is_night(
+                at_ms,
+                loc.lat,
+                loc.lon,
+                offset_min,
+                night.after_sunset_min,
+                night.before_sunrise_min,
+            ) {
+                return None;
+            }
+            let today = local(at_ms, offset_min).date;
+            let rise = (-1..=3)
+                .filter_map(|d| match sun_day(today.add_days(d), loc.lat, loc.lon) {
+                    SunDay::Normal { rise_ms, .. } => Some(rise_ms),
+                    _ => None,
+                })
+                .filter(|&r| r > at_ms)
+                .min();
+            Some(match rise {
+                Some(r) => (r - Millis::from(night.before_sunrise_min) * MINUTE_MS).max(at_ms),
+                None => fixed_end(),
+            })
+        }
+        None => is_fixed_night(
+            at_ms,
+            offset_min,
+            night.fallback_start_min,
+            night.fallback_end_min,
+        )
+        .then(fixed_end),
+    }
 }
 
 pub fn context(settings: &AlertSettings, at_ms: Millis, offset_min: i32) -> Context {
@@ -391,5 +445,50 @@ mod tests {
             &Schedule::Windows { windows: vec![] },
             &ctx
         ));
+    }
+
+    #[test]
+    fn night_end_by_sun_fixed_hours_and_polar_fallback() {
+        let n = NightSettings::default();
+        let date = Date::new(2024, 12, 21);
+        let noon = date.utc_midnight_ms() + 12 * HOUR_MS;
+        let london = Some(Location {
+            lat: 51.5,
+            lon: 0.0,
+        });
+        // Day: no night to end.
+        assert_eq!(night_end_ms(london, &n, noon, 0), None);
+        // 17:00 (after sunset + 30 min): the night ends 30 min before the
+        // next sunrise, about 07:30 UTC.
+        let end = night_end_ms(london, &n, noon + 5 * HOUR_MS, 0).unwrap();
+        let next_midnight = date.add_days(1).utc_midnight_ms();
+        let off = end - next_midnight;
+        assert!(
+            (6 * HOUR_MS + 50 * MINUTE_MS..7 * HOUR_MS + 40 * MINUTE_MS).contains(&off),
+            "{off}"
+        );
+        // The same night seen after midnight ends at the same instant.
+        assert_eq!(
+            night_end_ms(london, &n, next_midnight + HOUR_MS, 0),
+            Some(end)
+        );
+        // Fixed hours, 22:00 to 06:00: from 23:00 the end is 06:00 next day,
+        // from 02:00 it is 06:00 the same day, and 12:00 is day.
+        let fixed = |h: i64| night_end_ms(None, &n, date.utc_midnight_ms() + h * HOUR_MS, 0);
+        assert_eq!(fixed(23), Some(next_midnight + 6 * HOUR_MS));
+        assert_eq!(fixed(2), Some(date.utc_midnight_ms() + 6 * HOUR_MS));
+        assert_eq!(fixed(12), None);
+        // Polar night (no sunrise ahead): the fixed hours' end stands in.
+        let arctic = Some(Location {
+            lat: 80.0,
+            lon: 0.0,
+        });
+        assert_eq!(
+            night_end_ms(arctic, &n, noon, 0),
+            Some(next_midnight + 6 * HOUR_MS)
+        );
+        // Polar day: never night.
+        let summer = Date::new(2024, 6, 21).utc_midnight_ms() + 23 * HOUR_MS;
+        assert_eq!(night_end_ms(arctic, &n, summer, 0), None);
     }
 }

@@ -152,6 +152,8 @@ public struct VerifyCheck: Sendable, Equatable, Identifiable {
     /// `alert`, `quiet`, or `suppress` once decided.
     public var decision: String?
     public var severity: String?
+    /// Why an alert was logged but did not notify (`cooldown`).
+    public var quieted: String?
     public var reason: String?
     public var explanation: String?
     public var alertID: UInt64?
@@ -181,7 +183,8 @@ public struct VerifyCheck: Sendable, Equatable, Identifiable {
         if let c = primaryCamera { parts.append(cameraName(c)) } else if source == "external" { parts.append("sensor") }
         switch decision {
         case nil: parts.append("checking…")
-        case "alert": parts.append("alert" + (severity.map { " (\($0))" } ?? ""))
+        case "alert":
+            parts.append("alert" + (severity.map { " (\($0))" } ?? "") + (quieted == nil ? "" : ", not notified"))
         case "quiet": parts.append("quiet log")
         default: parts.append("suppressed")
         }
@@ -314,6 +317,7 @@ public struct VerificationBoard: Sendable, Equatable {
         with(UInt64(t), now: now, create: true) { c in
             c.decision = d["decision"]?.string
             c.severity = d["severity"]?.string
+            c.quieted = d["quieted"]?["why"]?.string
             c.reason = d["reason"]?.string
             c.explanation = d["explanation"]?.string
             c.alertID = d["alert_id"]?.int64.map { UInt64($0) }
@@ -454,6 +458,8 @@ public enum TraceText {
             case "schedule": return "Gate: outside the camera's schedule"
             case "class_off": return "Gate: this class is off for the camera"
             case "cooldown": return "Gate: cooldown, \(Int((f["left_ms"]?.double ?? 0) / 1000)) s left"
+            case "pass_cooldown":
+                return "Gate: passed, checked and logged but not notified (cooldown, \(Int((f["left_ms"]?.double ?? 0) / 1000)) s left)"
             case "motion_only": return "Gate: motion only (the camera does not check motion)"
             case "duplicate": return "Gate: a duplicate trigger"
             case let other: return "Gate: \((other ?? "?").replacingOccurrences(of: "_", with: " "))"
@@ -560,6 +566,7 @@ public enum TraceText {
                 var t = "Decision: alert (\(f["severity"]?.string ?? "?"))"
                 if f["late"]?.bool == true { t += ", late" }
                 if f["unverified"]?.bool == true { t += ", unverified" }
+                if f["quieted"]?["why"]?.string == "cooldown" { t += "; not notified: cooldown" }
                 return t
             case "quiet": return "Decision: quiet log (\(reasonWords(f["reason"]?.string)))"
             case "suppress": return "Decision: suppressed (\(reasonWords(f["reason"]?.string)))"

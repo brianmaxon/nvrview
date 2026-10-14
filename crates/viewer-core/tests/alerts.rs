@@ -31,6 +31,8 @@ const NIGHT_S: i64 = 1_781_132_400;
 enum Answer {
     /// A person standing in the middle of the picture.
     Person,
+    /// A vehicle in the middle of the picture.
+    Vehicle,
     /// Nothing found.
     Nothing,
     /// No answer at all (the app could not check it).
@@ -171,6 +173,9 @@ impl Harness {
             let boxes = match answer {
                 Answer::Silent => continue,
                 Answer::Nothing => json!({"detections": []}),
+                Answer::Vehicle => json!({"detections": [
+                    {"class": "vehicle", "score": 0.8, "box": {"x": 0.3, "y": 0.4, "w": 0.3, "h": 0.2}}
+                ]}),
                 Answer::Person => json!({"detections": [
                     {"class": "person", "score": 0.8, "box": {"x": 0.4, "y": 0.3, "w": 0.1, "h": 0.4}},
                     {"label": "kite", "score": 0.9, "box": {"x": 0.0, "y": 0.0, "w": 0.1, "h": 0.1}}
@@ -1280,4 +1285,143 @@ mod property {
             prop_assert!(h.max_logins <= 1);
         }
     }
+}
+
+/// The cooldown governs what interrupts the user, not what is recorded: a
+/// second car 10 s after the first is checked and logged with its own
+/// evidence, as an alert that is quieted ("quieted" state, no notice), and
+/// only the first car notifies.
+#[test]
+fn a_second_vehicle_inside_the_cooldown_is_logged_with_evidence_but_not_notified() {
+    let mut h = Harness::new(1, NOON_S, true);
+    h.configure(
+        json!({"cameras": [{"camera": h.cam(0), "exposure": "outside"}],
+                       "acquisition": {"recheck": false}}),
+    );
+    let jpeg = b"\xff\xd8example-frame\xff\xd9";
+    let mut ids = Vec::new();
+    for n in 1..=2usize {
+        let id = h
+            .core
+            .alerts_trigger_put(
+                &json!({"source": "device", "camera": h.cam(0), "kind": "vehicle"}).to_string(),
+            )
+            .unwrap();
+        h.core
+            .alert_evidence_put(
+                &json!({"trigger_id": id, "frame": 0, "doc": {"methods": {}}}).to_string(),
+                jpeg,
+            )
+            .unwrap();
+        h.run_until_with("a decision", 20, &mut |_, _| Answer::Vehicle, |h| {
+            h.decisions().len() == n
+        });
+        ids.push(id);
+        h.sim.advance(Duration::from_secs(10));
+    }
+    let states: Vec<String> = h
+        .rec
+        .events_of("alert")
+        .iter()
+        .map(|e| e["state"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(states, ["new", "quieted"], "{states:?}");
+    let second = &h.decisions()[1];
+    assert_eq!(second["decision"], "alert", "{second}");
+    assert_eq!(second["quieted"]["why"], "cooldown", "{second}");
+    assert_eq!(second["alert_id"], h.decisions()[0]["alert_id"]);
+    // Both are in the log, each with its own evidence set.
+    let log: Value =
+        serde_json::from_str(&h.core.alerts_get(r#"{"decision":["alert"]}"#).unwrap()).unwrap();
+    assert_eq!(log["entries"].as_array().unwrap().len(), 2, "{log}");
+    for id in ids {
+        let set: Value = serde_json::from_str(
+            &h.core
+                .alert_evidence_get(&json!({"trigger_id": id}).to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(set["decision"]["decision"], "alert", "{set}");
+        assert_eq!(set["frames"][0]["bytes"], jpeg.len());
+    }
+}
+
+/// An always-alert case inside a cooldown still notifies (an update of the
+/// same alert), as before.
+#[test]
+fn an_always_alert_case_inside_the_cooldown_still_notifies() {
+    let mut h = Harness::new(1, NIGHT_S, false);
+    h.configure(
+        json!({"cameras": [{"camera": h.cam(0), "exposure": "outside"}],
+                       "acquisition": {"recheck": false}}),
+    );
+    for n in 1..=2usize {
+        h.core
+            .alerts_trigger_put(
+                &json!({"source": "device", "camera": h.cam(0), "kind": "people"}).to_string(),
+            )
+            .unwrap();
+        h.run_until_with("a decision", 20, &mut |_, _| Answer::Person, |h| {
+            h.decisions().len() == n
+        });
+        h.sim.advance(Duration::from_secs(10));
+    }
+    let states: Vec<String> = h
+        .rec
+        .events_of("alert")
+        .iter()
+        .map(|e| e["state"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(states, ["new", "update"], "{states:?}");
+}
+
+/// Evidence from the night is kept until the set number of hours after the
+/// night ends (fixed hours 22:00 to 06:00 here, the clock at 23:00).
+#[test]
+fn night_evidence_is_kept_until_hours_after_the_night_ends() {
+    let mut h = Harness::new(1, NIGHT_S, true);
+    h.configure(
+        json!({"cameras": [{"camera": h.cam(0), "exposure": "outside"}],
+                       "evidence": {"retention_min": 30, "night_hold_h": 3},
+                       "acquisition": {"recheck": false}}),
+    );
+    let id = h
+        .core
+        .alerts_trigger_put(
+            &json!({"source": "device", "camera": h.cam(0), "kind": "people"}).to_string(),
+        )
+        .unwrap();
+    h.core
+        .alert_evidence_put(
+            &json!({"trigger_id": id, "frame": 0, "doc": {"methods": {}}}).to_string(),
+            b"\xff\xd8example-frame\xff\xd9",
+        )
+        .unwrap();
+    h.run_until_with("a decision", 20, &mut |_, _| Answer::Person, |h| {
+        h.decisions().len() == 1
+    });
+    let get = |h: &Harness| -> Value {
+        serde_json::from_str(
+            &h.core
+                .alert_evidence_get(&json!({"trigger_id": id}).to_string())
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    // 06:00 the next morning plus 3 hours.
+    let expires_ms = (NIGHT_S + 7 * 3600 + 3 * 3600) * 1000;
+    assert_eq!(get(&h)["expires_ms"], json!(expires_ms));
+    // Past the 30 minute retention, through the night: still there.
+    h.sim.advance(Duration::from_secs(8 * 3600));
+    assert_eq!(get(&h)["trigger_id"], json!(id));
+    // Past 09:00: gone.
+    h.sim.advance(Duration::from_secs(2 * 3600));
+    assert_eq!(
+        h.core
+            .alert_evidence_get(&json!({"trigger_id": id}).to_string()),
+        Err(AlertError::UnknownId)
+    );
+    // The setting is reported.
+    let status: Value = serde_json::from_str(&h.core.alerts_get("{}").unwrap()).unwrap();
+    assert_eq!(status["status"]["evidence"]["night_hold_h"], 3, "{status}");
 }

@@ -522,3 +522,68 @@ private func decision(_ trigger: UInt64, _ kind: String, alertID: UInt64? = nil,
         #expect(AlertMuteChoice.minutes15.seconds(now: evening) == 900 && AlertMuteChoice.hour1.seconds(now: evening) == 3600)
     }
 }
+
+@Suite struct SmartAlertBurstTests {
+    private func entry(_ trigger: Int, at ms: Int64, channel: Int = 0, cls: String = "vehicle", decision: String = "alert", quieted: Bool = false) -> SmartAlertLogEntry {
+        let q = quieted ? #","quieted":{"why":"cooldown","left_ms":20000,"since_ms":10000}"# : ""
+        let json = #"{"logged_ms":\#(ms),"source":"device","decision":{"trigger_id":\#(trigger),"camera":{"device":1,"channel":\#(channel),"lens":0},"class":"\#(cls)","decision":"\#(decision)","severity":"normal","alert_id":1,"rev":1\#(q),"explanation":"E.","decided_ms":\#(ms)}}"#
+        return SmartAlertLogEntry(JSONValue.parse(json)!)!
+    }
+
+    @Test func aQuietedAlertSaysItWasNotNotified() {
+        let e = entry(1, at: 1000, quieted: true)
+        #expect(e.decision == "alert" && e.category == "alert")
+        #expect(e.notNotified == "not notified: cooldown")
+        #expect(entry(2, at: 1000).notNotified == nil)
+    }
+
+    @Test func closeAlertsForTheSameCameraAndClassFoldIntoABurst() {
+        // Newest first, as the log answers.
+        let list = [
+            entry(4, at: 100_000, quieted: true), entry(3, at: 70_000, quieted: true), entry(2, at: 60_000, quieted: true),
+            entry(1, at: 0),
+        ]
+        let rows = SmartAlertLogGrouping.rows(list, gapMs: 60_000)
+        #expect(rows.count == 1)  // the last gap, 60 s, is exactly the cooldown, so it joins too
+        guard case .burst(let b) = rows[0] else { Issue.record("no burst"); return }
+        #expect(b.members.count == 4 && b.notified == 1)
+        #expect(b.title == "4 vehicles in 2 min")
+        #expect(rows[0].id == "burst-" + list[0].id)
+    }
+
+    @Test func differentCamerasClassesAndDecisionsStayApart() {
+        let list = [
+            entry(5, at: 50_000, channel: 1),
+            entry(4, at: 49_000, cls: "person"),
+            entry(3, at: 48_000, decision: "quiet"),
+            entry(2, at: 47_000),
+            entry(1, at: 40_000),
+        ]
+        let rows = SmartAlertLogGrouping.rows(list, gapMs: 60_000)
+        #expect(rows.count == 4)
+        guard case .burst(let b) = rows[3] else { Issue.record("no burst of the last two"); return }
+        #expect(b.title == "2 vehicles in 7 s")
+    }
+
+    @Test func aLoneAlertAndAFarGapStaySingle() {
+        let rows = SmartAlertLogGrouping.rows([entry(2, at: 500_000), entry(1, at: 0)], gapMs: 60_000)
+        #expect(rows.count == 2)
+        for r in rows { if case .burst = r { Issue.record("unexpected burst") } }
+    }
+
+    @Test func peopleAndTheGateWords() {
+        let people = SmartAlertBurst(members: [entry(2, at: 30_000, cls: "person"), entry(1, at: 0, cls: "person")])
+        #expect(people.title == "2 people in 30 s")
+        let gate = TraceStep(step(#"{"at_ms":1,"step":"gate","result":"pass_cooldown","left_ms":28000}"#))!
+        #expect(TraceText.line(gate, cameraName: { _ in "C" }, time: { "t\($0)" }).contains("not notified"))
+    }
+
+    @Test func theNightHoldIsASettingFromZeroToTwelveHours() throws {
+        var s = SmartAlertSettings()
+        s.enabled = true
+        #expect(s.evidenceNightHoldHours == 4)
+        s.evidenceNightHoldHours = 99
+        let evidence = try #require(s.coreDocument(context(secrets: false))["evidence"] as? [String: Any])
+        #expect(evidence["night_hold_h"] as? Int == 12 && evidence["retention_min"] as? Int == 120)
+    }
+}

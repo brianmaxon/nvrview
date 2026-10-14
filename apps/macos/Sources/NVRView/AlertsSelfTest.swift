@@ -71,6 +71,9 @@ final class AlertsSelfTest {
         // Step alerts-ui-real-core, on a camera without an open episode (an
         // alert on the first one would be an update of the first step's).
         await uiScenario(device: device, channel: channels.count > 2 ? channels[2] : channels[1], ha: ha)
+        // Steps alerts-cooldown-logs-second, alerts-night-evidence-expiry and
+        // alerts-cooldown-always-alert.
+        await cooldownScenario(device: device, channel: channels[0])
         return problems
     }
 
@@ -84,6 +87,7 @@ final class AlertsSelfTest {
         let camera = #"{"device_key":"\#(device.key)","channel":\#(channel)}"#
         let settings = """
             {"enabled":true,"cameras":[{"camera":\(camera)}],
+             "always_alert":{"night_outside_person":false,"doorbell_night":false},
              "sources":[{"key":"sensor-1","name":"Sensor 1","cameras":[{"camera":\(camera)}]}],
              "outputs":[{"kind":"desktop"},{"kind":"home_assistant","id":"ha","endpoint":"\(ha.url)",
                "min_severity":"low","pulse_gap_ms":0,"cooldown_ms":0,
@@ -266,6 +270,122 @@ final class AlertsSelfTest {
             alerts: alerts, core: core, ha: ha, events: events, stub: stub, controller: controller, shown: shown,
             sensor: "sensor-ui", camera: camera,
             other: device.channels.map(\.channel).sorted().dropFirst().first.map { CameraRef(device: device.key, channel: $0) })
+    }
+
+    /// A detection inside a cooldown is logged with its evidence but does not
+    /// notify; night evidence outlives the ordinary retention; an always-alert
+    /// case inside a cooldown still alerts. Device-source triggers (the camera
+    /// AI's path) on one outside camera, the cooldown's spacing between
+    /// checks set to zero so that no step waits on the real clock (the
+    /// spacing and the 10 s case are tested on the simulated clock in the
+    /// core's tests); the night is the whole day (equal fixed hours).
+    private func cooldownScenario(device: AppModel.DeviceRuntime, channel: Int) async {
+        let logsSecond = "alerts-cooldown-logs-second"
+        let expiry = "alerts-night-evidence-expiry"
+        let always = "alerts-cooldown-always-alert"
+        guard let deviceID = device.deviceID else { return fail(logsSecond, "the device has no core ID") }
+        let camera = #"{"device_key":"\#(device.key)","channel":\#(channel)}"#
+        let settings = """
+            {"enabled":true,"cameras":[{"camera":\(camera),"exposure":"outside"}],
+             "night":{"fallback_start_min":360,"fallback_end_min":360},
+             "timing":{"check_spacing_s":0},
+             "evidence":{"retention_min":30,"night_hold_h":6},
+             "outputs":[{"kind":"desktop"}]}
+            """
+        let notifier = RecordingNotifier()
+        let bridge = model.bridge
+        let modelDevice = model
+        let environment = SmartAlertsController.Environment(
+            core: { try bridge.smartAlerts() },
+            storedSettings: { Data(settings.utf8) },
+            deviceID: { key in modelDevice.runtime(key)?.deviceID },
+            secrets: MemorySecrets([:]))
+        let stub = StubDetector(person: true)
+        stub.classID = 2  // car
+        let handle = DetectorHandle(service: DetectorService(detector: stub), labels: DetectorProvider.cocoLabels)
+        let controller = SmartAlertsController(
+            environment: environment, installer: ModelInstaller(manifest: nil, locate: { nil }), notifier: notifier,
+            detector: { handle })
+        model.smartAlerts = controller
+        controller.configure()
+        guard await wait(30, { if case .running = controller.state { true } else { false } }) else {
+            return fail(logsSecond, "the core was not configured (\(controller.state))")
+        }
+        guard let core = try? bridge.smartAlerts() else { return fail(logsSecond, "no core") }
+        let cam = #"{"device":\#(deviceID),"channel":\#(channel)}"#
+
+        // Decision of one trigger, as the log answers it.
+        func decided(_ trigger: UInt64) async -> [String: Any]? {
+            var found: [String: Any]?
+            _ = await wait(60) {
+                guard let text = try? core.alertsGet(query: #"{"trigger_id":\#(trigger)}"#),
+                    let o = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any],
+                    let d = ((o["entries"] as? [[String: Any]])?.first)?["decision"] as? [String: Any]
+                else { return false }
+                found = d
+                return true
+            }
+            return found
+        }
+        func put(_ kind: String) -> UInt64? {
+            try? core.alertsTriggerPut(json: #"{"source":"device","camera":\#(cam),"kind":"\#(kind)","state":"start"}"#)
+        }
+
+        // alerts-cooldown-logs-second: two vehicles, one after the other.
+        guard let t1 = put("vehicle"), let first = await decided(t1) else { return fail(logsSecond, "no decision for the first vehicle") }
+        guard first["decision"] as? String == "alert", first["quieted"] == nil else {
+            return fail(logsSecond, "the first vehicle is \(first["decision"] ?? "?") \(first["quieted"] ?? "")")
+        }
+        guard await wait(15, { notifier.notifications.count == 1 }) else { return fail(logsSecond, "the first vehicle did not notify") }
+        guard let t2 = put("vehicle"), let second = await decided(t2) else { return fail(logsSecond, "no decision for the second vehicle") }
+        let why = (second["quieted"] as? [String: Any])?["why"] as? String
+        if second["decision"] as? String != "alert" || why != "cooldown" || second["alert_id"] as? Int != first["alert_id"] as? Int {
+            fail(logsSecond, "the second vehicle is \(second["decision"] ?? "?"), quieted \(why ?? "no"), alert \(second["alert_id"] ?? "?")")
+        }
+        let alerts = model.alertsModel!
+        var sets: [AlertEvidence] = []
+        let kept = await wait(20) {
+            sets = [t1, t2].compactMap { alerts.evidence(trigger: $0) }
+            return sets.count == 2 && sets.allSatisfy { $0.decision == "alert" && !$0.frames.isEmpty }
+        }
+        if !kept { fail(logsSecond, "evidence kept for \(sets.count) of 2 detections") }
+        // Nothing more happens for the quieted one: a fixed short wait proves
+        // that no second notification follows.
+        try? await Task.sleep(for: .milliseconds(400))
+        if notifier.notifications.count != 1 { fail(logsSecond, "\(notifier.notifications.count) notifications for two vehicles, not one") }
+        print("\(logsSecond): two vehicles logged with evidence, the second quieted by the cooldown, one notification")
+
+        // alerts-night-evidence-expiry: the night is the whole day, so the set
+        // lasts until the next 06:00 local plus 6 h, not the 30 minutes.
+        if let set = sets.first {
+            let created = Date(timeIntervalSince1970: Double(set.createdMs) / 1000)
+            let morning = Calendar.current.nextDate(
+                after: created, matching: DateComponents(hour: 6, minute: 0, second: 0), matchingPolicy: .nextTime)
+            let want = (morning?.timeIntervalSince1970 ?? 0) * 1000 + 6 * 3_600_000
+            let got = Double(set.expiresMs ?? 0)
+            if abs(got - want) > 120_000 || got - Double(set.createdMs) < 3_600_000 {
+                fail(expiry, "the night set expires at \(Int64(got)), expected \(Int64(want)) (created \(set.createdMs))")
+            } else {
+                print("\(expiry): a night set made now is kept \(Int((got - Double(set.createdMs)) / 3_600_000)) h, past the 30 minute retention")
+            }
+        } else {
+            fail(expiry, "no evidence set to check")
+        }
+
+        // alerts-cooldown-always-alert: a person on an outside camera at night
+        // alerts as before, even inside its own cooldown (an update of the
+        // same alert, not a quieted one).
+        stub.classID = 0
+        guard let p1 = put("people"), let firstPerson = await decided(p1) else { return fail(always, "no decision for the first person") }
+        guard let p2 = put("people"), let secondPerson = await decided(p2) else { return fail(always, "no decision for the second person") }
+        if firstPerson["always"] as? String != "night_outside_person" { fail(always, "the first person is not an always-alert case: \(firstPerson["always"] ?? "-")") }
+        if secondPerson["decision"] as? String != "alert" || secondPerson["quieted"] != nil
+            || secondPerson["always"] as? String != "night_outside_person" || secondPerson["alert_id"] as? Int != firstPerson["alert_id"] as? Int
+        {
+            fail(always, "the second person is \(secondPerson["decision"] ?? "?"), quieted \(secondPerson["quieted"] ?? "no"), always \(secondPerson["always"] ?? "-")")
+        } else {
+            print("\(always): the second person inside the cooldown still alerted (revision \(secondPerson["rev"] ?? "?"))")
+        }
     }
 
     /// Evidence for an outdoor person check is kept with its decision and

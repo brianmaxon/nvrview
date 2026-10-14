@@ -25,6 +25,8 @@ final class SmartAlertEventsModel {
     /// The log could not be read (a core without smart alerts).
     private(set) var unavailable = false
     var selection: SmartAlertLogEntry.ID?
+    /// Bursts opened to show their members.
+    var expandedBursts: Set<String> = []
     /// The opened entry's snapshot.
     private(set) var snapshot: NSImage?
     /// The opened entry's kept evidence (frames and every method's boxes),
@@ -153,6 +155,13 @@ final class SmartAlertEventsModel {
     }
 
     var selected: SmartAlertLogEntry? { entries.first { $0.id == selection } }
+
+    /// The list's rows: decisions, bursts folded.
+    var rows: [SmartAlertLogRow] { SmartAlertLogGrouping.rows(entries) }
+
+    func toggleBurst(_ id: String) {
+        if expandedBursts.contains(id) { expandedBursts.remove(id) } else { expandedBursts.insert(id) }
+    }
 
     func select(_ id: SmartAlertLogEntry.ID?) {
         selection = id
@@ -381,7 +390,16 @@ struct SmartAlertEventsView: View {
                 Text("No decisions match.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(selection: Binding(get: { events.selection }, set: { events.select($0) })) {
-                    ForEach(events.entries) { e in row(e).tag(e.id) }
+                    ForEach(events.rows) { r in
+                        switch r {
+                        case .single(let e): row(e).tag(e.id)
+                        case .burst(let b):
+                            burstRow(r.id, b)
+                            if events.expandedBursts.contains(r.id) {
+                                ForEach(b.members) { e in row(e).padding(.leading, 18).tag(e.id) }
+                            }
+                        }
+                    }
                     if events.more {
                         Button("Older…") { events.loadMore() }
                     }
@@ -390,12 +408,44 @@ struct SmartAlertEventsView: View {
         }
     }
 
+    /// A folded burst: the count and span, the camera, whether all notified,
+    /// and a picture icon when any member's pictures are kept.
+    private func burstRow(_ id: String, _ b: SmartAlertBurst) -> some View {
+        let open = events.expandedBursts.contains(id)
+        let kept = b.members.contains { events.badge($0) != nil }
+        return Button {
+            events.toggleBurst(id)
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: open ? "chevron.down" : "chevron.right").frame(width: 12)
+                Text(Self.time(b.members[0].decidedMs)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .frame(width: 98, alignment: .leading)
+                Text(b.camera.map(events.cameraName) ?? "—").frame(width: 110, alignment: .leading).lineLimit(1)
+                Text(b.title).bold()
+                Text(b.notified == b.members.count ? "all notified" : "\(b.notified) notified")
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if kept {
+                    Image(systemName: "photo").foregroundStyle(.secondary).accessibilityLabel("Pictures kept")
+                }
+            }
+            .font(.callout)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(b.title), \(open ? "expanded" : "collapsed")")
+        .accessibilityHint("Shows or hides the individual detections")
+    }
+
     private func row(_ e: SmartAlertLogEntry) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(Self.time(e.decidedMs)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
             Text(events.place(e)).frame(width: 110, alignment: .leading).lineLimit(1)
             Text(e.className ?? "—").frame(width: 60, alignment: .leading)
             Text(Self.decisionLabel(e)).foregroundStyle(e.decision == "alert" ? .primary : .secondary).frame(width: 120, alignment: .leading)
+            if let q = e.notNotified {
+                Text(q).font(.caption).foregroundStyle(.orange)
+            }
             Text(e.firstSentence).lineLimit(1).foregroundStyle(.secondary)
             Spacer(minLength: 0)
             if let badge = events.badge(e) {
@@ -453,6 +503,11 @@ struct SmartAlertEventsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("\(Self.decisionLabel(e)) · \(events.place(e)) · \(Self.time(e.decidedMs))").font(.headline)
+                    if let q = e.notNotified {
+                        Text("This detection was logged and its pictures kept, but nothing notified you: an earlier alert for this camera and class was still in its cooldown.")
+                            .font(.caption).foregroundStyle(.orange)
+                        Text(q.prefix(1).uppercased() + q.dropFirst()).font(.caption.bold()).foregroundStyle(.orange)
+                    }
                     if e.unverified || e.late || e.always != nil {
                         Text(
                             [
