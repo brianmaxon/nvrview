@@ -227,7 +227,6 @@ the Credential Manager store only.
 
 What the table shows that is not just a platform difference:
 
-- The layout preset lists on the two apps were not compared.
 - Windows' frame-rate readout shows the decoded rate where the Mac shows the drawn (shown) rate and the display's refresh rate.
 - Windows' captions use an older engine than the Mac's.
 
