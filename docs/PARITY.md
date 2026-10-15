@@ -109,7 +109,7 @@ less than that. Nothing here was run on a Windows machine.
 | Allow talk-back per camera (off by default) | yes | yes | macOS: Settings > Cameras; Windows: tile menu and Settings > Cameras. |
 | "Allow talk-back for <camera>?" prompt on Talk or Send when it is off (Allow saves and continues, Cancel sends nothing and keeps the typed text) | yes | yes | Self-test step `call-talk-permission-prompt`. macOS: alert sheet; Windows: ContentDialog. |
 | Typed reply spoken by the system voice | yes | yes | |
-| Live captions of both sides | yes | partial (older desktop recognizer; none where Windows lacks one for the language) | macOS: Apple SpeechTranscriber; Windows: `System.Speech` stand-in for the planned Moonshine engine. |
+| Live captions of both sides | yes | yes | macOS: Apple SpeechTranscriber; Windows: Moonshine streaming (small English model), a first-use download from the update source's `models` folder, with the desktop recognizer (`System.Speech`, far less accurate) until it is installed or where it cannot load; in the app as built that fallback cannot start (built-in COM is off in the trimmed build; apps/windows/README.md "Captions"), so a call without the download has no captions. Measured on degraded speech: apps/windows/README.md "Captions". Self-test steps `call-moonshine-recognizer` (on a local copy of the download) and `call-caption-engines` (the download and the fallback). |
 | Caption echo filter: the visitor caption that repeats our own talk-back or typed reply (the doorbell hears its speaker) is hidden, not saved, not activity | yes | yes | UX.md "Captions and echo". Pure `CaptionEcho` (NVRCore) and `CaptionEcho` (NvrView.Tiles) with the same test vectors; self-test step `call-caption-echo`. |
 | Call ends after 60 s of inactivity, gives audio back | yes | yes | |
 | Unmute on ring even when not listening (per doorbell) | yes | yes | macOS: Settings > Cameras (`CameraOptions.unmuteOnRing`). Windows: Settings, "Unmute on ring even when not listening, per doorbell" (a check box per camera), kept in `view-settings.json` as `unmuteOnRing`; `CallAudio.Press`. Windows self-test step `unmute-on-ring`. |
@@ -227,8 +227,8 @@ the Credential Manager store only.
 
 What the table shows that is not just a platform difference:
 
+- Windows' fallback recognizer (`System.Speech`) cannot start in the app as built (built-in COM is off), so Windows has captions only once the Moonshine download is installed.
 - Windows' frame-rate readout shows the decoded rate where the Mac shows the drawn (shown) rate and the display's refresh rate.
-- Windows' captions use an older engine than the Mac's.
 
 ## The self-test comparison
 

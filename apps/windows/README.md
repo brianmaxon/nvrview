@@ -546,9 +546,11 @@ InteractiveExperiences, WinUI) at the exact versions that release's
 `Microsoft.WindowsAppSDK` metapackage pins, not the metapackage, so Windows ML
 (`Microsoft.WindowsAppSDK.ML`: `onnxruntime.dll` and `DirectML.dll`, about
 40 MB) and the AI, Widgets, and DWrite components are not deployed. Nothing in
-the app runs a model today; Windows ML comes back (referenced again) with the
-first feature that does, and moving to a new Windows App SDK release means
-moving those four pins together. Unpackaged (`WindowsPackageType` `None`) and
+the package runs a model today (the captions engine brings its own ONNX
+Runtime in its download, "Captions" below); Windows ML comes back (referenced
+again) with the first packaged feature that does, the captions then share its
+`onnxruntime.dll`, and moving to a new Windows App SDK release means moving
+those four pins together. Unpackaged (`WindowsPackageType` `None`) and
 self-contained (`WindowsAppSDKSelfContained`): the SDK's files are copied
 next to the executable, so there is no installer, no framework package, and
 no bootstrapper. It is **not** under an open-source license: the NuGet
@@ -571,7 +573,7 @@ restored from NuGet at build time, never committed), but a published binary
 build of the Windows app would ship Microsoft's redistributables under
 those terms, and its release would need an end-user notice that carries
 them. The package's `NOTICE.txt` lists the open-source components inside
-it. `TerraFX.Interop.Windows` and `System.Speech` (both MIT) are the only other packages.
+it. `TerraFX.Interop.Windows` and `System.Speech` (both MIT) are the only other packages. The captions download (Moonshine and ONNX Runtime, both MIT, with their third-party notices) is not in the package ("Captions").
 
 ### Save picture
 
@@ -625,17 +627,109 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   the text to a WAV in memory (never played on this computer), read as mono
   float at the voice's own rate (`Pcm.TryReadWav`); the core resamples what
   it sends. Pushed in one go and ended with a draining stop.
-- **Captions.** `SapiTranscriber`: the desktop recognizer of Windows
-  (`System.Speech`, SAPI) with the dictation grammar, fed 16 kHz PCM through a
-  blocking pipe; one session per source. It is local and needs no model to
-  ship, but it is the older engine: [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)
-  plans Moonshine on Windows, and nothing in the core transcribes. Where
-  Windows has no desktop recognizer for a language (`reg query
-  HKLM\SOFTWARE\Microsoft\Speech\Recognizers\Tokens`), or it cannot start,
-  the call says "No transcript: ..." and goes on. Because the app runs with
-  invariant globalization, `PredefinedCulturesOnly` is off in the project file
-  (System.Speech names its recognizers by culture, and without this it
-  finds none).
+- **Captions.** `CaptionEngines` picks the recognizer for each session (one
+  per source): `MoonshineTranscriber` when the captions download is
+  installed, else `SapiTranscriber`. Both recognize English, as the Mac's
+  does, and nothing in the core transcribes.
+  - *Moonshine* (MIT; `MoonshineTranscriber.cs`, `MoonshineNative.cs`): the
+    small English streaming model through Moonshine's C API (`moonshine.dll`
+    on ONNX Runtime), one stream per source on one shared model, loaded when
+    the first session starts (about 0.5 s) and freed when the last ends.
+    Audio is queued from any thread (bounded; a session that falls about 25 s
+    behind drops new blocks, counted); the session's thread hands it to the
+    stream and asks for the transcript after every 200 ms of new audio, and
+    `StreamingCaptions` (NvrView.Tiles, tested there) turns the growing list
+    of lines into partials and one final per line. ONNX Runtime runs one
+    thread per model session (`MOONSHINE_ORT_SINGLE_THREAD`): with its
+    default pool, as wide as the computer and spinning between calls, a
+    stream cost about 1.8 cores on the test laptop for the same captions.
+  - *The download* (`CaptionModel.cs` in NvrView.Shell, tested there):
+    `moonshine-small-streaming-en.zip` (about 133 MB: the model,
+    `moonshine.dll`, `onnxruntime.dll`, and their licenses) from the
+    `models` folder next to `updates.json` on the update source, fetched in
+    the background on the first call (that call captions with the desktop
+    recognizer), checked against the size and SHA-256 the build pins
+    (`NvrView.App/caption-model.json`, embedded in the app), unpacked into
+    `Models\moonshine-small-streaming-en` in the data folder. A mismatch
+    installs nothing; a failed or impossible download (no update source) is
+    logged and tried again on the next start. Same rules as the macOS
+    detector model: a folder, `file://`, `https://`, or local `http://`
+    source, redirects never down to `http://`. Not bundled: it would grow
+    the package by about 11 MB for the libraries alone, and they are useless
+    without the 120 MB model.
+  - *ONNX Runtime is shared*: `MoonshineNative` loads `onnxruntime.dll` by
+    full path before `moonshine.dll` (so never an older copy some Windows
+    versions keep in System32), from the app folder when the app ships one
+    (Windows ML, or ONNX Runtime with DirectML, for the detector), else from
+    the download. Moonshine needs ONNX Runtime 1.23 or newer (C API version
+    23); the download's copy is Microsoft's 1.23.2 (byte-identical to the
+    `Microsoft.ML.OnnxRuntime` 1.23.2 package), and the same test set gave the
+    same text on Windows ML's 1.23.5 (Windows App SDK 1.8 ML package) and on
+    ONNX Runtime 1.24.4 with DirectML. Both DLLs need the Visual C++
+    2015-2022 runtime; where it is missing, the load fails, is logged, and
+    the desktop recognizer takes over.
+  - *Fallback*: a Moonshine session whose model or libraries cannot load
+    hands its callbacks and the audio queued so far to `SapiTranscriber`, so
+    a call never loses its captions to a broken download.
+  - *Desktop recognizer*: `SapiTranscriber`, the desktop recognizer of
+    Windows (`System.Speech`, SAPI) with the dictation grammar, fed 16 kHz
+    PCM through a blocking pipe. Where Windows has no desktop recognizer for
+    English (`reg query HKLM\SOFTWARE\Microsoft\Speech\Recognizers\Tokens`),
+    or it cannot start, the call says "No transcript: ..." and goes on.
+    Because the app runs with invariant globalization,
+    `PredefinedCulturesOnly` is off in the project file (System.Speech names
+    its recognizers by culture, and without this it finds none). **Known
+    problem:** in the app as built, System.Speech cannot start at all
+    ("NotSupportedException: Built-in COM has been disabled via a feature
+    switch" in the app's log): the trimmed build turns off built-in COM
+    interop, which System.Speech needs, and the self-test step
+    `call-desktop-recognizer` reports it as unavailable. Until that is fixed,
+    a call without the Moonshine download has no captions.
+  - *Measured* (2026-10-15, Windows 11 on a 2019 laptop processor, 4 cores, 8 threads):
+    32 short English utterances from Mozilla Common Voice 17's English test
+    set (CC0), clean (16 kHz mono) and as a doorbell might deliver them:
+    pink, brown, and gusty low-frequency "wind" noise at 20, 10, and 5 dB
+    SNR, band-limited to 250-3800 Hz, AAC at 32, 32, and 24 kbit/s
+    (ffmpeg), decoded. Word errors after lowercasing and dropping
+    punctuation; latency fed in real time in 20 ms blocks, transcripts every
+    200 ms, on the 10 dB set, from the start of speech (first partial) and
+    from its end (final text); CPU per stream as a share of one core, one
+    ONNX Runtime thread.
+
+    | Engine | Clean | 20 dB | 10 dB | 5 dB | First partial | Final, median (90th pct.) | CPU per stream | Working set |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | Desktop recognizer (SAPI dictation) | 72% | 85% | 99% | 108% | under 0.1 s | 1.3 s (1.4 s) | 15% | 27 MB |
+    | Moonshine tiny streaming | 21% | 32% | 34% | 44% | 1.3 s | 0.5 s (1.0 s) | 18% | 104 MB |
+    | **Moonshine small streaming** | **9%** | **11%** | **22%** | **32%** | 1.5 s | 0.8 s (1.3 s) | 39% | 221 MB |
+    | Moonshine medium streaming | 3% | 10% | 17% | 29% | 1.6 s | 1.3 s (2.3 s) | 60% | 364 MB |
+
+    Small is the one shipped: medium is better only on the noisiest copies,
+    for half again the CPU (a call runs two streams), a final up to a second
+    later, and twice the download. The Mac's SpeechAnalyzer measured about
+    4% on clean speech of this kind. These recordings are read sentences, not
+    a real doorbell; nothing here was heard on a real call.
+  - *Publishing the download*: `python3 -I scripts/caption-model.py build`
+    makes `build/caption-model/moonshine-small-streaming-en.zip` from the
+    pinned sources (the model from Moonshine's download site, `moonshine.dll`
+    from the Moonshine 0.1.5 Windows wheel on PyPI, `onnxruntime.dll` from
+    Microsoft's NuGet package, the licenses from Moonshine's 0.1.5 tag),
+    refusing any file whose SHA-256 differs from the pin; the same sources
+    give the same bytes. `--write` records the size and SHA-256 in
+    `caption-model.json`. Copy the zip into `models/` next to `updates.json`
+    on the update source before the release that pins it.
+  - *Licenses*: Moonshine's code and every streaming and English model are
+    MIT (its LICENSE lists the non-English, non-streaming models that are
+    under its non-commercial community license; none of them is fetched).
+    `moonshine.dll` also contains Eigen (MPL-2.0), kaldi-native-fbank
+    (Apache-2.0), KISS FFT (BSD-3-Clause), nlohmann/json, utf8proc, and
+    utfcpp (MIT-style), and the Silero voice activity detector (MIT); their
+    texts are in the download's `licenses` folder.
+  - *Self-test*: `call-moonshine-recognizer` runs Moonshine on the system
+    voice's sentence from a copy of the download already on the computer
+    (`NVRVIEW_CAPTION_MODEL`, else `%USERPROFILE%\nvrview\models\<name>`;
+    without one it is skipped and says so: checks never download it);
+    `call-caption-engines` installs a synthetic archive from a folder source
+    and checks the choice of engine and the fallback with its audio.
 - **Where it shows.** An inset per call in every window (`CallPanel.cs`), in
   the window's alert board with the smoke, CO and entrance insets (below),
   stacked from the inset corner (Settings > "Alert insets", else opposite

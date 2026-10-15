@@ -8,10 +8,10 @@
 //   memory (never played here; the camera's speaker plays it), read as mono float at the voice's
 //   own rate (the core resamples what talk-back sends);
 // - the speech recognizer, one session per source (the camera's tapped audio, the microphone):
-//   the desktop recognizer of Windows through System.Speech (SAPI) with the dictation grammar,
-//   fed 16 kHz PCM. It is local and needs no model to ship, but it is an older engine than the
-//   one docs/ARCHITECTURE.md plans (Moonshine); where no recognizer is installed, or it cannot
-//   start, the call goes on without a transcript and says why.
+//   Moonshine streaming once its download is installed (MoonshineTranscriber.cs,
+//   CaptionEngines.cs), else the desktop recognizer of Windows through System.Speech (SAPI) with
+//   the dictation grammar, fed 16 kHz PCM (SapiTranscriber below). Where neither can run, the
+//   call goes on without a transcript and says why.
 
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
@@ -96,9 +96,12 @@ internal sealed class CallServices(IMicrophone microphone, ISpeechRenderer speec
 
     public ITranscriptionEngine MakeTranscriber() => transcriber();
 
-    /// <summary>The real ones: WASAPI, the system voice, the desktop recognizer.</summary>
-    public static CallServices Real() =>
-        new(new WasapiMicrophone(() => App.Instance.Audio?.DeviceId), new WindowsSpeech(), () => new SapiTranscriber());
+    /// <summary>The real ones: WASAPI, the system voice, Moonshine or the desktop recognizer (CaptionEngines.cs).</summary>
+    public static CallServices Real()
+    {
+        CaptionEngines engines = CaptionEngines.Real(Program.Options.ResolvedDataDir);
+        return new(new WasapiMicrophone(() => App.Instance.Audio?.DeviceId), new WindowsSpeech(), engines.Make);
+    }
 }
 
 // ---- speech synthesis ----

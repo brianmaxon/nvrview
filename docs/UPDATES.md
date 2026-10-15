@@ -35,7 +35,18 @@ updates.json                     the manifest
 updates.json.sig                 its detached signature(s)
 NVRView-0.4.0-macos-arm64.zip    the macOS package
 NvrView-0.4.0-win-x64.zip        the Windows package
+models/                          downloads the apps fetch on first use
 ```
+
+The `models` folder holds files the apps fetch when a feature first needs
+them, each checked against a size and SHA-256 the build pins (never signed
+separately: the pin is inside the signed package):
+`rtdetr_r18vd.mlmodelc.zip`, the macOS detector (NOTIFICATIONS.md), and
+`moonshine-small-streaming-en.zip`, the Windows captions engine
+(`scripts/caption-model.py build`; apps/windows/README.md, "Captions"). An app
+whose model is missing goes on without it (the detector fails open; captions
+use the desktop recognizer of Windows). Copy a new model file in before the
+release that pins it.
 
 ### The manifest
 
