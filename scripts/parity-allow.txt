@@ -11,7 +11,9 @@
 
 # ---- on Windows only, platform specific -------------------------------------
 audio-output-renders        windows  n/a: checks the WASAPI render; the macOS self-test runs muted and does not look at the audio engine
+call-caption-engines        windows  n/a: the Windows captions download (Moonshine) and its fallback to the desktop recognizer; macOS uses Apple's recognizer, which Apple installs
 call-desktop-recognizer     windows  n/a: the Windows desktop recognizer (System.Speech); the macOS self-test uses a fake engine and never prompts
+call-moonshine-recognizer   windows  n/a: Moonshine on a local copy of the captions download; the macOS self-test uses a fake engine and never prompts
 call-microphone             windows  n/a: opens the real WASAPI microphone with --mic-test; the macOS self-test uses a fake microphone, no permission prompt
 call-system-voice           windows  n/a: renders a sentence with the Windows voice; the macOS self-test uses a fake voice
 header-actions              windows  n/a: the Windows header replaces the title bar and the context menu's app-wide items; macOS keeps its menu bar (docs/PARITY.md)

@@ -8,3 +8,5 @@ da9a3bd2bfd62cac2c740a08c8667f5eef1b9907:apps/windows/NvrView.Shell.Tests/Layout
 a2483754073e955f57ea03802585007670dc8816:docs/FFI-RECORDINGS.md:generic-api-key:317
 # The same example incident key in the macOS recordings tests:
 2d465da3f2f63ca75f28b16704f42dfa6e84cdcf:apps/macos/Tests/NVRCoreTests/RecordingsBrowseTests.swift:generic-api-key:54
+# A pinned SHA-256 of Moonshine's public tokenizer.bin in the captions download manifest (not a secret):
+bb325b9d3bf38614594c9c5edc3977dc05c7415c:apps/windows/NvrView.App/caption-model.json:generic-api-key:31

@@ -72,9 +72,15 @@
     <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="1.8.260803002" />
     <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="1.8.260708001" />
     <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="1.8.260803003" />
-    <!-- MIT; the desktop speech recognizer of Windows for the call's live captions
-         (apps/windows/README.md, "Calls"). -->
+    <!-- MIT; the desktop speech recognizer of Windows, the call captions' fallback until the
+         Moonshine download is installed (apps/windows/README.md, "Captions"). -->
     <PackageReference Include="System.Speech" Version="10.0.0" />
+  </ItemGroup>
+  <!-- What this build pins for the captions download (Moonshine with its libraries, fetched on
+       first use from the update source's models folder; CaptionEngines.cs and
+       scripts/caption-model.py). Nothing of Moonshine or ONNX Runtime is in the package. -->
+  <ItemGroup>
+    <EmbeddedResource Include="caption-model.json" LogicalName="caption-model.json" />
   </ItemGroup>
   <!-- No debugger or crash-dump support files in the package (about 6 MB): the runtime
        does not need them to run, only a debugger attached to the process does. -->

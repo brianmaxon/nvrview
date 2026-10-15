@@ -11,7 +11,7 @@ internal static class Program
     private static int Main()
     {
         int failed = 0, run = 0;
-        foreach ((string name, Action test) in Tests.All().Concat(FisheyeTests.All()).Concat(CallTests.All()).Concat(RetryTests.All()).Concat(InsetTests.All()).Concat(AlertInsetTests.All()).Concat(PresentationTests.All()).Concat(ZoomTests.All()).Concat(TranscriptFileTests.All()).Concat(CaptionEchoTests.All()).Concat(EchoCancellationTests.All()).Concat(TileHeaderTests.All()).Concat(HeaderTests.All()).Concat(TileViewsTests.All()).Concat(PictureTests.All()))
+        foreach ((string name, Action test) in Tests.All().Concat(FisheyeTests.All()).Concat(CallTests.All()).Concat(RetryTests.All()).Concat(InsetTests.All()).Concat(AlertInsetTests.All()).Concat(PresentationTests.All()).Concat(ZoomTests.All()).Concat(TranscriptFileTests.All()).Concat(CaptionEchoTests.All()).Concat(EchoCancellationTests.All()).Concat(TileHeaderTests.All()).Concat(HeaderTests.All()).Concat(TileViewsTests.All()).Concat(PictureTests.All()).Concat(StreamingCaptionsTests.All()))
         {
             run++;
             try

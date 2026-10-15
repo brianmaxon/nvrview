@@ -934,12 +934,16 @@ the same call themselves without a press ("Start Conversation", below):
   when the user cannot unmute (in a meeting, for example). Engines: Apple's
   SpeechAnalyzer on macOS (about 4% word errors on clean speech, measured
   2026-10-10 on doorbell-quality speech: 16 kHz, outdoor noise, low-bitrate
-  AAC; about 1% of a core, no model to ship). Windows today uses the desktop
-  recognizer of Windows (`System.Speech`, SAPI, dictation grammar), which is
-  older and less accurate, and gives no captions where Windows has no
-  recognizer for the language; Moonshine streaming models (MIT) are the
-  planned replacement (ARCHITECTURE.md, "Live transcription"). Both sit
-  behind one engine interface in each app. One session per
+  AAC; about 1% of a core, no model to ship). Windows uses Moonshine's small
+  English streaming model (MIT; about 9% word errors on clean speech of this
+  kind, 11% at 20 dB SNR, 22% at 10 dB, measured 2026-10-15 on a 4-core
+  laptop, about 40% of one core per side), fetched once from the update
+  source's `models` folder; until it is installed, or where it cannot load,
+  the desktop recognizer of Windows (`System.Speech`, SAPI, dictation
+  grammar) stands in, which is far less accurate (72% word errors on the same
+  clean speech) and gives no captions where Windows has no recognizer for
+  English (ARCHITECTURE.md, "Live transcription"). Both sit behind one engine
+  interface in each app. One session per
   source (doorbell, microphone), so the speaker label is the source. While
   the user talks, the operating system's echo cancellation removes the
   doorbell's audio playing through the speakers from the microphone, so the
@@ -1087,14 +1091,18 @@ Details settled while building it (Windows):
   Windows allows it (AUDIO.md, "Echo cancellation"); the call's status says
   "Echo cancellation on" or "No echo cancellation", and the caption gate
   follows the Mac's rules for each.
-- Captions use the desktop speech recognizer of Windows (`System.Speech`,
-  local, no model to ship), one session per source, fed the same 16 kHz audio
-  as on the Mac. It is a stand-in for the engine docs/ARCHITECTURE.md plans
-  (Moonshine, measured on doorbell-quality speech before it replaces this):
-  where Windows has no recognizer for the language, the call says "No
-  transcript" and goes on. Partial results show with an ellipsis until the
-  recognizer settles on a phrase, and a phrase it is not sure of stays a
-  partial.
+- Captions use Moonshine streaming (local; its model and libraries are a
+  download of about 130 MB fetched on first use from the update source's
+  `models` folder, checked against the size and SHA-256 the build pins), one
+  session per source, fed the same 16 kHz audio as on the Mac. The call that
+  starts the download, a computer without an update source, and a session
+  whose model cannot load use the desktop speech recognizer of Windows
+  (`System.Speech`) instead (which, as built today, cannot start: apps/windows/README.md
+  "Captions", known problem); where Windows has no recognizer for English
+  either, the call says "No transcript" and goes on. The call does not name
+  the engine (the Mac names none); the app's log does. Partial results show
+  with an ellipsis until the recognizer settles on a phrase (with the desktop
+  recognizer, a phrase it is not sure of stays a partial).
 - "Save call transcripts" is in Settings with an "Open transcripts folder"
   button, kept in `view-settings.json`: the transcript goes into the app's
   log and into a transcript file, as on the Mac.

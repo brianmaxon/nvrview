@@ -1,0 +1,84 @@
+{
+  "name": "moonshine-small-streaming-en",
+  "model_arch": 4,
+  "format": "zip of the folder <name>: the Moonshine streaming model, moonshine.dll, onnxruntime.dll, and their licenses (scripts/caption-model.py build)",
+  "license": "MIT (Moonshine code and English models; ONNX Runtime); third-party notices in the archive",
+  "bytes": 132594927,
+  "sha256": "9ba2781fc57ae953da89bef6b91957019098bcdbef1f7d6ef63b6c92e3062eaf",
+  "files": [
+    "adapter.ort",
+    "cross_kv.ort",
+    "decoder_kv.ort",
+    "encoder.ort",
+    "frontend.model.ort",
+    "frontend.weights.ort",
+    "streaming_config.json",
+    "tokenizer.bin",
+    "moonshine.dll",
+    "onnxruntime.dll"
+  ],
+  "sources": {
+    "model": {
+      "base_url": "https://download.moonshine.ai/model/small-streaming-en/quantized_26_08_21/",
+      "sha256": {
+        "adapter.ort": "c665f742364febad597cc9ac1e0b341ffbee0e24a1466e2f3bde95e6e4771762",
+        "cross_kv.ort": "e2d3417144e9514055ebfefe8dcc4c0a55a55adcb8530435844c75c53e352bf6",
+        "decoder_kv.ort": "1a05465b1dd955858dfcbee039c0020fb5dd982b0f5094c34e61735d518d771b",
+        "encoder.ort": "2d4d973e91e8aca08c51e7e7efa28a46ab265b63d809d5294d18b86bcd85b993",
+        "frontend.model.ort": "09b1210ae30dc5f0f3e45f0ebab914c254741323114f53fbbe5ae62cca35058f",
+        "frontend.weights.ort": "7ef97521bd4bad3928f5bb6808586f4fcc6e92bd5990394112eed7d4052ec338",
+        "streaming_config.json": "26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a",
+        "tokenizer.bin": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"
+      }
+    },
+    "moonshine": {
+      "url": "https://files.pythonhosted.org/packages/ea/05/ad3457baa56170a13829c98327598a4d99d6cd4bdff8ae59df4c47ebdd11/moonshine_voice-0.1.5-py3-none-win_amd64.whl",
+      "sha256": "7fc9a84e827360ddb85c2735f44a1502c5575c27dcb476a2555646cd20a70e9d",
+      "extract": {
+        "moonshine_voice/moonshine.dll": "moonshine.dll"
+      }
+    },
+    "onnxruntime": {
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.23.2/microsoft.ml.onnxruntime.1.23.2.nupkg",
+      "sha256": "25fe172f7fcdf34f2b5b02c8b997f6b88abc282956849d4af4335af23d0c4e4a",
+      "extract": {
+        "runtimes/win-x64/native/onnxruntime.dll": "onnxruntime.dll",
+        "LICENSE": "licenses/onnxruntime-LICENSE.txt",
+        "ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    },
+    "licenses": {
+      "base_url": "https://raw.githubusercontent.com/moonshine-ai/moonshine/v0.1.5/",
+      "files": {
+        "LICENSE": [
+          "licenses/moonshine-LICENSE.txt",
+          "fa7d1174dd8af6a7cd280be20b80d10095ed4c19b5b20b61a7715c3ad790dc5f"
+        ],
+        "core/third-party/Eigen/COPYING.MPL2": [
+          "licenses/eigen-COPYING.MPL2.txt",
+          "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+        ],
+        "core/third-party/kaldi-native-fbank/LICENSE": [
+          "licenses/kaldi-native-fbank-LICENSE.txt",
+          "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        ],
+        "core/third-party/kissfft/COPYING": [
+          "licenses/kissfft-COPYING.txt",
+          "a2840585f8411be8e6826a31ef15ae65c950bd74a2437a73b013398a934ad0c6"
+        ],
+        "core/third-party/nlohmann/LICENSE.MIT": [
+          "licenses/nlohmann-json-LICENSE.txt",
+          "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14"
+        ],
+        "core/third-party/utf-8/LICENSE.txt": [
+          "licenses/utfcpp-LICENSE.txt",
+          "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+        ],
+        "core/third-party/utf8proc/LICENSE.md": [
+          "licenses/utf8proc-LICENSE.txt",
+          "3b510150d34f248a221bb88e1d811238d6c6c18b51231822c42974c39bb07256"
+        ]
+      }
+    }
+  }
+}
