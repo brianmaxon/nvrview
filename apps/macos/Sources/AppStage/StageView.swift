@@ -191,6 +191,9 @@ package final class StageView: NSView {
     /// inset): it keeps that place until it ends, however the stage changes
     /// (focus, a swap, another layout), so it does not jump around.
     package var verifyPlaced: [UInt64: VerifyPlace] = [:]
+    /// The elapsed-time words last drawn for each shown check, to redraw
+    /// only when one changes (`tickVerificationElapsed`).
+    package var verifyElapsed: [UInt64: String] = [:]
     /// The placement setting `verifyPlaced` was decided under (choosing another
     /// in Settings places the live checks again).
     package var verifyPlacedFor: VerifyPlacementSetting?
@@ -686,6 +689,7 @@ package final class StageView: NSView {
         stepZoom(now: now)
         stepFisheye(now: now)
         tickInsets(now: now)
+        tickVerificationElapsed(now: now)
         tickToast(now: now)
         if idle.tick(now: now) { hideChrome() }
         for view in chromes.values { view.tick(now: now) }

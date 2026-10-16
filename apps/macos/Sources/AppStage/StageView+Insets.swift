@@ -429,20 +429,20 @@ extension StageView {
         }
     }
 
-    private func refreshInsetContents() {
+    package func refreshInsetContents() {
         let now = Date()
         for item in insetBoard.shown {
             guard let view = alertInsetViews[item.camera] else { continue }
             view.apply(
                 InsetContent(
-                    header: item.header(now: now),
+                    header: insetHeader(item, now: now),
                     cameraName: item.showsLayout ? layoutName : model.name(of: item.camera), critical: item.kind.isCritical,
                     isReturn: item.isReturn, call: item.kind.isCall ? callContent(item.camera) : nil,
                     showsLayout: item.showsLayout))
         }
         // Over the stage: the swapped-in camera's header, and the call of a
         // doorbell that fills the stage.
-        var banner = insetBoard.swap.map { "\($0.item.header(now: now)) · \(model.name(of: $0.shown)) · click the inset or Tab to swap back" }
+        var banner = insetBoard.swap.map { "\(insetHeader($0.item, now: now)) · \(model.name(of: $0.shown)) · click the inset or Tab to swap back" }
         let call = stageFillingCamera.flatMap { callContent($0) }
         if banner == nil, let filling = stageFillingCamera, call?.isConversation == true {
             // A conversation over the stage has no inset to close: a header with a close control.

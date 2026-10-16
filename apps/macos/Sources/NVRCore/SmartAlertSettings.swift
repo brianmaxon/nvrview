@@ -334,6 +334,36 @@ public enum VerifyPlacementSetting: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// How much of a check the live view shows (docs/UX.md "Live checks").
+public enum VerifyDetailSetting: String, Codable, CaseIterable, Sendable {
+    /// The headline and the latest steps (the default).
+    case fullLog
+    /// One line that leads with the verdict ("Confirmed: person at ...").
+    case headline
+
+    public var title: String {
+        switch self {
+        case .fullLog: "The full step log"
+        case .headline: "A single headline"
+        }
+    }
+}
+
+/// When a check opens an inset (or the small window).
+public enum VerifyPopUpSetting: String, Codable, CaseIterable, Sendable {
+    /// As soon as the check starts (the default).
+    case always
+    /// Only once the check confirms the alert.
+    case confirmedOnly
+
+    public var title: String {
+        switch self {
+        case .always: "When the check starts"
+        case .confirmedOnly: "Only when the alert is confirmed"
+        }
+    }
+}
+
 public struct VerifyViewSettings: Codable, Equatable, Sendable {
     public var placement: VerifyPlacementSetting = .tileThenInset
     /// Also keep checks that end quiet or suppressed on screen (default:
@@ -341,8 +371,28 @@ public struct VerifyViewSettings: Codable, Equatable, Sendable {
     public var showQuiet = false
     /// Seconds a check stays after its decision (at least 5; default 60).
     public var minSeconds = 60
+    /// What a check shows of itself: the whole step log (default), or one
+    /// headline that leads with the verdict.
+    public var detail: VerifyDetailSetting = .fullLog
+    /// When a check opens an inset or the small window: at once (default),
+    /// or only once it confirms the alert.
+    public var popUp: VerifyPopUpSetting = .always
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey { case placement, showQuiet, minSeconds, detail, popUp }
+
+    /// A file written before a field existed keeps that field's default.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func get<T: Decodable>(_ t: T.Type, _ k: CodingKeys) -> T? { (try? c.decodeIfPresent(t, forKey: k)) ?? nil }
+        let d = VerifyViewSettings()
+        placement = get(VerifyPlacementSetting.self, .placement) ?? d.placement
+        showQuiet = get(Bool.self, .showQuiet) ?? d.showQuiet
+        minSeconds = get(Int.self, .minSeconds) ?? d.minSeconds
+        detail = get(VerifyDetailSetting.self, .detail) ?? d.detail
+        popUp = get(VerifyPopUpSetting.self, .popUp) ?? d.popUp
+    }
 
     public static let minimumSeconds = 5
     /// The "Stay after the decision" choices (seconds), with a stored value

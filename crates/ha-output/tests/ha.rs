@@ -799,7 +799,16 @@ fn a_notify_entity_is_sent_with_notify_send_message() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["entity_id"], "notify.example_phone");
     assert_eq!(sent[0]["title"], "Alert");
-    assert!(sent[0]["message"].as_str().unwrap().starts_with("person"));
+    // The default message leads with the camera's name, like the desktop
+    // notification's title.
+    assert!(
+        sent[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Example Camera: person alert."),
+        "{}",
+        sent[0]["message"]
+    );
     assert!(
         rig.mock
             .bodies_for("/api/services/notify/example_phone")

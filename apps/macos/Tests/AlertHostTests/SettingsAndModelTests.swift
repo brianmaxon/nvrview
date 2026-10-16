@@ -79,6 +79,17 @@ import Testing
         #expect(alert.explanation.hasPrefix("Person on Camera 2"))
         #expect(AlertSummary(eventJSON: #"{"decision":{"decision":"quiet"}}"#) == nil)
     }
+
+    @Test func theTitleLeadsWithTheCameraName() throws {
+        let json = #"""
+            {"type":"alert","state":"new","source":"device","camera_name":"Front Door","decision":{"trigger_id":3,
+             "decision":"alert","severity":"critical","alert_id":9,"class":"person",
+             "camera":{"device":2,"channel":1,"lens":0},"explanation":"Person on Front Door at 22:30."}}
+            """#
+        let alert = try #require(AlertSummary(eventJSON: json))
+        #expect(alert.cameraName == "Front Door")
+        #expect(alert.title == "Front Door: Critical person alert")
+    }
 }
 
 @Suite struct ModelInstallerTests {

@@ -166,6 +166,10 @@ final class AlertsSelfTest {
             guard await wait(15, { !notifier.notifications.isEmpty }) else { return fail(id, "no notification was raised") }
             let note = notifier.notifications[0]
             if note.body.isEmpty || note.body != decision["explanation"] as? String { fail(id, "the notification lacks the explanation") }
+            // The title leads with the camera's name ("Camera N" when the settings give none).
+            if !note.title.hasPrefix("Camera \(channel + 1): ") {
+                fail(id, "the notification title does not lead with the camera: \(note.title)")
+            }
             if note.snapshot?.starts(with: [0xFF, 0xD8]) != true { fail(id, "the notification has no snapshot") }
             if let alertID = decision["alert_id"] as? Int,
                 (try? core.alertSnapshotGet(alertID: UInt64(alertID)))?.starts(with: [0xFF, 0xD8]) != true

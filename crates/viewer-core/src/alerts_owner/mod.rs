@@ -1286,6 +1286,11 @@ impl Inner {
         if let Some(k) = &device_key {
             ev["device_key"] = json!(k);
         }
+        // The camera as the settings name it (the device's channel name, or
+        // "Camera N" without one): notifications lead with it.
+        if let (Some(s), Some(c)) = (st.engine.as_ref().map(Engine::settings), d.camera) {
+            ev["camera_name"] = json!(s.camera(c).display_name());
+        }
         self.send(ev);
         info!(
             trigger = d.trigger_id,
