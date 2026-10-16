@@ -392,6 +392,22 @@ impl EvidenceStore {
         out.into_iter().map(|e| e.1).collect()
     }
 
+    /// The newest set with a frame from `camera` (`{device, channel,
+    /// lens}` as in the decision): its ID, first frame, and that frame's
+    /// time.
+    pub(crate) fn latest_picture(&self, camera: &Value) -> Option<(u64, u32, i64)> {
+        let same = |c: &Value| {
+            ["device", "channel", "lens"]
+                .iter()
+                .all(|k| c[*k].as_u64().unwrap_or(0) == camera[*k].as_u64().unwrap_or(0))
+        };
+        self.sets
+            .iter()
+            .filter(|(_, s)| same(&s.doc["decision"]["camera"]))
+            .filter_map(|(id, s)| s.frames.iter().next().map(|(i, (at, _))| (*id, *i, *at)))
+            .max_by_key(|e| e.2)
+    }
+
     pub(crate) fn frame(&mut self, id: u64, index: u32, now_ms: i64) -> Option<Vec<u8>> {
         self.prune(now_ms);
         let set = self.sets.get(&id)?;

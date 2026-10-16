@@ -5,9 +5,8 @@
 //! [`Sample`]s. This module only counts: which samples have a box of an
 //! allowed class above the score floor whose foot point is in the region
 //! (and the camera's zones), weighted per angle, against the k needed.
-//! Geometry across frames (IoU tracking, moving vs parked), static-scene
-//! memory, and per-class thresholds by day and night come in a later slice
-//! and plug in by filling [`Sample`] and [`Check::moving`].
+//! The engine adds what the cheap filters found (crate::filters): which hits
+//! sit in the static-scene memory, and [`Check::moving`].
 
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +69,13 @@ pub struct Judged {
     pub in_region: bool,
     /// Counted as a hit (an allowed class, above, in the region).
     pub hit: bool,
+    /// A hit over hot cells of the static-scene memory.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stationary: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// The running count for one class.
@@ -104,7 +110,9 @@ pub enum Check {
         n: u32,
         angles: u32,
         score: f32,
-        /// Moving or parked, when the geometry step knows (later slice).
+        /// Moving (`true`) or parked (`false`) between the pictures, when
+        /// a hit could be compared with the other picture.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         moving: Option<bool>,
     },
     /// Some hits, fewer than k.
@@ -127,6 +135,36 @@ pub enum Check {
 impl Check {
     pub fn is_verified(&self) -> bool {
         matches!(self, Check::Verified { .. })
+    }
+
+    /// The class a check with hits settled on.
+    pub fn class(&self) -> Option<Class> {
+        match self {
+            Check::Verified { class, .. } | Check::Weak { class, .. } => Some(*class),
+            _ => None,
+        }
+    }
+
+    /// The same check with the geometry's moving or parked result.
+    pub fn with_moving(self, m: Option<bool>) -> Check {
+        match self {
+            Check::Verified {
+                class,
+                hits,
+                n,
+                angles,
+                score,
+                ..
+            } => Check::Verified {
+                class,
+                hits,
+                n,
+                angles,
+                score,
+                moving: m,
+            },
+            other => other,
+        }
     }
 }
 
@@ -195,6 +233,7 @@ impl Counter {
                 above,
                 in_region,
                 hit,
+                stationary: false,
             });
             if hit {
                 match hit_classes.iter_mut().find(|(c, _)| *c == d.class) {

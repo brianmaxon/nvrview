@@ -16,6 +16,9 @@
 //! - [`verify`]: k-of-n counting over sampled pictures; where detector
 //!   results and learned rarity plug in.
 //! - [`external`]: confirmation windows and per-source health.
+//! - [`filters`]: static-scene memory, moving versus parked, and repeat
+//!   suppression.
+//! - [`insight`]: what the filters learned, as layers an app can draw.
 //! - [`trace`], [`explain`], [`decision`]: what the app shows and logs.
 //! - [`settings`]: the settings document, defaults, and validation.
 
@@ -24,6 +27,8 @@ pub mod engine;
 pub mod episode;
 pub mod explain;
 pub mod external;
+pub mod filters;
+pub mod insight;
 pub mod model;
 pub mod rules;
 pub mod settings;

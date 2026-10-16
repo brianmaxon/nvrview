@@ -43,7 +43,7 @@ fn day_person_verified() {
     assert_eq!(alert(&d), (Severity::Normal, 1, 1, false, None));
     assert_eq!(
         d.explanation,
-        "Person on Camera 1 at 12:00 (day, outside camera). Verified in 2 of 2 pictures (0.81). The camera's AI agreed."
+        "Person on Camera 1 at 12:00 (day, outside camera). Verified in 2 of 2 pictures (0.81, moving). The camera's AI agreed."
     );
     assert_eq!(
         e.episode_state(cam(0), Class::Person),
@@ -72,7 +72,7 @@ fn night_person_outside_always_alerts() {
     );
     assert_eq!(
         d.explanation,
-        "Person on Camera 1 at 23:00 (night, outside camera). Verified in 2 of 2 pictures (0.81). The camera's AI agreed. Always alerts: a person on an outside camera at night."
+        "Person on Camera 1 at 23:00 (night, outside camera). Verified in 2 of 2 pictures (0.81, moving). The camera's AI agreed. Always alerts: a person on an outside camera at night."
     );
 }
 
@@ -384,7 +384,7 @@ fn external_trigger_needs_confirmation() {
     assert_eq!(d.camera, Some(cam(1)));
     assert_eq!(
         d.explanation,
-        "Person on Camera 2 at 12:00 (day, outside camera), after Sensor 1 fired. Verified in 2 of 3 pictures (0.70)."
+        "Person on Camera 2 at 12:00 (day, outside camera), after Sensor 1 fired. Verified in 2 of 3 pictures (0.70, not moving)."
     );
     let h = e.source_health("sensor-1");
     assert_eq!((h.fired, h.retriggers, h.confirmed), (1, 1, 1));
@@ -602,7 +602,7 @@ fn rarity_moves_one_step_and_never_always() {
     assert_eq!(alert(&d).0, Severity::Normal);
     assert_eq!(
         d.explanation,
-        "Animal on Camera 1 at 12:10 (day, outside camera). Verified in 2 of 2 pictures (0.80). The camera's AI agreed. Rare here at this hour (about 1 in 40)."
+        "Animal on Camera 1 at 12:10 (day, outside camera). Verified in 2 of 2 pictures (0.80, not moving). The camera's AI agreed. Rare here at this hour (about 1 in 40)."
     );
     let common = DecideInputs {
         rarity: Some(Rarity { one_in: 1 }),

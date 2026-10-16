@@ -726,10 +726,13 @@ NvStatus nv_alert_evidence_get(NvCore *core, const char *query, char *out, size_
 NvStatus nv_alert_evidence_frame_get(NvCore *core, uint64_t trigger_id, uint32_t index,
                                      uint8_t *out, size_t cap, size_t *len);
 NvStatus nv_alert_evidence_pin(NvCore *core, uint64_t trigger_id);
+NvStatus nv_alert_insights_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);  /* minor 17 */
+NvStatus nv_alert_insights_reset(NvCore *core, const char *request);                               /* minor 17 */
 ```
 
 All answer from memory or the local disk, never wait on a device, and may not
-be called from inside a callback. `NV_ABI_MINOR` is 14 (minor 16 adds `nv_alerts_output_targets`); nothing existing
+be called from inside a callback. `NV_ABI_MINOR` is 14 (minor 16 adds
+`nv_alerts_output_targets`, minor 17 the insight calls); nothing existing
 changed.
 
 **Message log.** `nv_alerts_messages` takes `{"input":"<id>","after":0,
@@ -839,6 +842,42 @@ touched). Everything is local, under
 deleted when it expires; the core expires on its own clock, so an expired set
 answers NV_ERR_UNKNOWN_ID. `nv_alerts_get`'s status gains `evidence`
 (`sets`, `pinned`, `bytes`, `retention_min`, `night_hold_h`).
+
+**Insights (minor 17).** What the cheap filters learned (NOTIFICATIONS.md,
+"Cheap filters"), as generic layers an app draws without knowing the
+technique:
+
+- `nv_alert_insights_get(query)`: NULL or `{}` answers
+  `{"cameras":[{"camera":{device,channel,lens},"classes":["person",...]}],
+  "at_ms"}` (the cameras with a scene memory);
+  `{"camera":{device,channel,lens}}` answers
+  `{"camera","at_ms","night","layers":[...],"picture"}`. `night` says whether
+  the night score floors are in force now; `picture` is the newest kept
+  evidence frame of the camera (`{"trigger_id","frame","at_ms"}`, read with
+  `nv_alert_evidence_frame_get`) or null. Each layer has `id`, `title`,
+  `description`, `provenance` (the method and where it comes from), `units`,
+  `range` (`[lo, hi]`, for a color scale), and a `kind`:
+  - `grid`: `rows`, `cols`, `values` (`rows * cols` numbers, row by row from
+    the top left of the picture), optional `class`, `threshold` (a level the
+    method treats specially), `updated_ms`. The scene memory is one grid per
+    class, id `scene.<class>`, 36 by 64.
+  - `boxes`: `boxes[]` of `{class, score, box:{x,y,w,h}}` (normalized),
+    optional `at_ms`. Id `repeat.last`: the camera's last alerted boxes.
+  - `scalar`: `items[]` of `{id, label, value, units}`. Id `thresholds`: the
+    score floors by day and night for the camera, and the filters' values.
+
+  A kind the app does not know is to be listed, not drawn. NV_ERR_NOT_CONFIGURED
+  before the first `nv_alerts_configure`; NV_ERR_INVALID_ARGUMENT for a bad
+  camera.
+- `nv_alert_insights_reset({"camera":{...}})` forgets the camera's scene
+  memory and its last alerted boxes, and saves the memory at once. Local data
+  only; nothing is sent to the camera. NV_ERR_NOT_CONFIGURED,
+  NV_ERR_INVALID_ARGUMENT as above.
+
+The scene memory lives in `data_dir/alerts/scene-memory.bin` (a small
+versioned binary file, at most 384 grids of about 11.5 KB), saved at most
+every 5 minutes while it changes and when the service stops; a missing,
+damaged, or other-version file starts an empty memory.
 
 **Settings.** `nv_alerts_configure` takes the settings document of
 NOTIFICATIONS.md ("Settings": `cameras`, `always_alert`, `mode`,
@@ -1714,6 +1753,7 @@ symbol at all, so a bound app checks first):
 | 14 | smart-alert debugging and review (see "Smart alerts", "Debugging and review (minor 14)"): `nv_alerts_messages`, `nv_alerts_output_test`, `nv_alert_evidence_put`, `nv_alert_evidence_get`, `nv_alert_evidence_frame_get`, `nv_alert_evidence_pin`, the `alerts_output_test` event, the `test`, `send_to_home_assistant`, and `only_camera` members of `nv_alerts_trigger_put`, the `sensor` and `test` filters of `nv_alerts_get`, and the connection diagnostics in an input's status |
 | 15 | recordings loudness gaps (docs/FFI-RECORDINGS.md, section 2a): the `gaps` member of `nv_recordings_loudness` and `start`/`end` (a span within the day) of `nv_sound_analyze_day`, which its `sound_analyze` events repeat |
 | 16 | notify targets (see "Smart alerts", "Debugging and review (minor 14)", "Target list"): `nv_alerts_output_targets` and the `alerts_output_targets` event |
+| 17 | what the alert filters learned (see "Smart alerts", "Debugging and review (minor 14)", "Insights"): `nv_alert_insights_get`, `nv_alert_insights_reset` |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Stepping a playback (`nv_playback_step`) takes the next

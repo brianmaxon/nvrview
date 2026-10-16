@@ -28,6 +28,7 @@ mod api;
 mod diag;
 mod evidence;
 mod frames;
+mod insight;
 mod modules;
 mod seams;
 mod store;
@@ -299,6 +300,10 @@ struct State {
     test_alerts: BTreeMap<u64, bool>,
     next_alert_id: u64,
     last_tick: Option<Instant>,
+    /// The alerts data folder (the scene memory is saved there).
+    dir: Option<PathBuf>,
+    /// When the scene memory was last saved.
+    scene_saved: Option<Instant>,
 }
 
 /// The shared part of the hub.
@@ -407,9 +412,11 @@ impl AlertHub {
                 evidence: EvidenceStore::open(dir.clone(), now_ms),
                 tests: BTreeMap::new(),
                 test_alerts: BTreeMap::new(),
-                feedback: FeedbackStore::open(dir),
+                feedback: FeedbackStore::open(dir.clone()),
                 next_alert_id: high_alert + 1,
                 last_tick: None,
+                dir,
+                scene_saved: None,
             }),
             wake: Notify::new(),
             intake: tx,
@@ -1658,6 +1665,8 @@ impl Inner {
             self.finish_check(st, id, fx);
         }
 
+        insight::save_scene_if_due(st, instant, false);
+
         // Holds that ended.
         let ended: Vec<CameraId> = st
             .wakes
@@ -1933,6 +1942,7 @@ impl Inner {
                     tasks.push(c);
                 }
             }
+            insight::save_scene_if_due(&mut st, Instant::now(), true);
             st.sessions.clear();
             st.checks.clear();
             st.waiting.clear();
@@ -2098,6 +2108,15 @@ impl Inner {
                         .and_then(|w| w.hold.as_ref())
                         .map(|h| h.classes.iter().copied().collect())
                         .unwrap_or_default();
+                    // Quiet pictures teach the static-scene memory too.
+                    let sample = Sample {
+                        camera: cam,
+                        at_ms,
+                        detections: detections.clone(),
+                    };
+                    if let Some(e) = st.engine.as_mut() {
+                        e.learn(&sample, now);
+                    }
                     for class in classes {
                         let seen = detections
                             .iter()

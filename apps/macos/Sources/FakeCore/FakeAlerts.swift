@@ -66,6 +66,8 @@ final class FakeAlertsState: @unchecked Sendable {
         /// What the next "list targets" reports: names with `entity` or `service`.
         var outputTargets: (ok: Bool, summary: String, targets: [(String, String)]) = (true, "Home Assistant: 0 notify targets", [])
         var evidence: [UInt64: FakeEvidence] = [:]
+        /// Minor 17: scripted insight layers per camera (FakeAlertsInsights.swift).
+        var insights: [AlertCamera: FakeInsights] = [:]
     }
 
     /// One kept set of evidence.

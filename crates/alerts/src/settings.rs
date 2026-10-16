@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::filters::FilterSettings;
 use crate::model::{CameraId, Class, Exposure, Mode, Severity};
 use crate::sun::in_daily_window;
 use crate::time::{MINUTE_MS, Millis, SECOND_MS};
@@ -33,6 +34,8 @@ pub struct AlertSettings {
     pub outputs: Vec<OutputSettings>,
     pub standby: StandbySettings,
     pub learning: LearningSettings,
+    /// Static-scene memory, moving versus parked, and repeat suppression.
+    pub filters: FilterSettings,
 }
 
 impl Default for AlertSettings {
@@ -51,6 +54,7 @@ impl Default for AlertSettings {
             outputs: vec![OutputSettings::desktop()],
             standby: StandbySettings::default(),
             learning: LearningSettings::default(),
+            filters: FilterSettings::default(),
         }
     }
 }
@@ -81,6 +85,13 @@ pub struct CameraSettings {
     /// Whether device motion without a class asks our detector to look.
     #[serde(default)]
     pub verify_motion: bool,
+    /// This camera's score floor by day (`None`: the verification default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_score: Option<f32>,
+    /// This camera's score floor at night (`None`: the verification night
+    /// default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_min_score: Option<f32>,
 }
 
 fn default_classes() -> Vec<Class> {
@@ -107,6 +118,8 @@ impl CameraSettings {
             zones: Vec::new(),
             schedule: Schedule::Always,
             verify_motion: false,
+            min_score: None,
+            night_min_score: None,
         }
     }
 
@@ -289,9 +302,11 @@ impl TimingSettings {
 pub struct VerifySettings {
     /// Pictures with a hit needed (k in k-of-n); 1 picture is "weak".
     pub k: u8,
-    /// The detector score floor (per-class, day and night thresholds come
-    /// with the verification slice).
+    /// The detector score floor by day (cameras may set their own).
     pub min_score: f32,
+    /// The detector score floor at night (cameras may set their own).
+    /// Infrared pictures give the detector more confident false boxes.
+    pub night_min_score: f32,
     /// Pictures from this long before the trigger count (a pre-trigger
     /// picture from the recording).
     pub window_before_s: u32,
@@ -304,6 +319,7 @@ impl Default for VerifySettings {
         VerifySettings {
             k: 2,
             min_score: 0.5,
+            night_min_score: 0.5,
             window_before_s: 2,
             window_after_s: 10,
         }
@@ -613,7 +629,13 @@ fn clean_name(name: &mut Option<String>, issues: &mut Vec<Issue>) {
     }
 }
 
-fn clamp_u32(v: &mut u32, lo: u32, hi: u32, what: &'static str, issues: &mut Vec<Issue>) {
+pub(crate) fn clamp_u32(
+    v: &mut u32,
+    lo: u32,
+    hi: u32,
+    what: &'static str,
+    issues: &mut Vec<Issue>,
+) {
     let c = (*v).clamp(lo, hi);
     if c != *v {
         *v = c;
@@ -637,7 +659,13 @@ fn clamp_i64(v: &mut i64, lo: i64, hi: i64, what: &'static str, issues: &mut Vec
     }
 }
 
-fn clamp_f32(v: &mut f32, lo: f32, hi: f32, what: &'static str, issues: &mut Vec<Issue>) {
+pub(crate) fn clamp_f32(
+    v: &mut f32,
+    lo: f32,
+    hi: f32,
+    what: &'static str,
+    issues: &mut Vec<Issue>,
+) {
     let c = if v.is_finite() { v.clamp(lo, hi) } else { lo };
     if c != *v {
         *v = c;
@@ -650,6 +678,18 @@ fn round_tenth(v: f64) -> f64 {
 }
 
 impl AlertSettings {
+    /// The detector score floor for a camera by day or at night.
+    pub fn score_floor(&self, camera: CameraId, night: bool) -> f32 {
+        let c = self.cameras.iter().find(|c| c.camera == camera);
+        let v = &self.verification;
+        if night {
+            c.and_then(|c| c.night_min_score)
+                .unwrap_or(v.night_min_score)
+        } else {
+            c.and_then(|c| c.min_score).unwrap_or(v.min_score)
+        }
+    }
+
     /// Settings for a camera, or the defaults for an unlisted one.
     pub fn camera(&self, camera: CameraId) -> CameraSettings {
         self.cameras
@@ -776,6 +816,14 @@ impl AlertSettings {
             "verification score floor",
             &mut issues,
         );
+        clamp_f32(
+            &mut v.night_min_score,
+            0.05,
+            0.99,
+            "verification night score floor",
+            &mut issues,
+        );
+        self.filters.validate(&mut issues);
         clamp_u32(
             &mut v.window_before_s,
             0,
@@ -808,6 +856,12 @@ impl AlertSettings {
             }
             c.classes.sort();
             c.classes.dedup();
+            for f in [&mut c.min_score, &mut c.night_min_score]
+                .into_iter()
+                .flatten()
+            {
+                clamp_f32(f, 0.05, 0.99, "camera score floor", &mut issues);
+            }
             if let Schedule::Windows { windows } = &mut c.schedule {
                 windows.truncate(16);
                 for w in windows.iter_mut() {

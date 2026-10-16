@@ -48,7 +48,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// Minor 15: loudness gaps with their reasons ("gaps" in
 /// nv_recordings_loudness) and a span within the day for nv_sound_analyze_day.
 /// Minor 16: nv_alerts_output_targets and the alerts_output_targets event.
-pub const NV_ABI_MINOR: u32 = 16;
+/// Minor 17: what the alert filters learned (nv_alert_insights_get,
+/// nv_alert_insights_reset).
+pub const NV_ABI_MINOR: u32 = 17;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -3824,6 +3826,52 @@ pub unsafe extern "C" fn nv_alert_evidence_frame_get(
 pub unsafe extern "C" fn nv_alert_evidence_pin(core: *mut NvCore, trigger_id: u64) -> NvStatus {
     // SAFETY: per the caller.
     unsafe { rec_call(core, |c| Ok(c.alert_evidence_pin(trigger_id)?)) }
+}
+
+/// What the alert filters learned, as JSON (minor 17): NULL or "{}" answers
+/// {"cameras":[{"camera","classes"}],"at_ms"}, the cameras with a scene
+/// memory; {"camera":{"device","channel","lens"}} answers that camera's
+/// insight layers {"camera","at_ms","night","layers":[...],"picture"}: each
+/// layer has "id", "title", "description", "provenance", "units", "range",
+/// and a "kind" of "grid" ("rows","cols","values"), "boxes" ("boxes"), or
+/// "scalar" ("items"); "picture" is the newest kept evidence frame of the
+/// camera ({"trigger_id","frame","at_ms"}) or null. Into `out` like
+/// nv_alerts_get. NV_ERR_NOT_CONFIGURED before the first nv_alerts_configure.
+///
+/// # Safety
+/// `core` is a live handle; `query` is null or a NUL-terminated string;
+/// `out` is null or valid for writing `cap` bytes; `len` is valid for one
+/// write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_insights_get(
+    core: *mut NvCore,
+    query: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.alert_insights_get(opt_arg(query)?.unwrap_or(""))?)
+        })
+    }
+}
+
+/// Forgets what the alert filters learned about one camera (minor 17):
+/// `request` is {"camera":{"device","channel","lens"}}. A local data action:
+/// nothing is sent to the camera. NV_ERR_NOT_CONFIGURED before the first
+/// nv_alerts_configure.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_insights_reset(
+    core: *mut NvCore,
+    request: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.alert_insights_reset(arg(request)?)?)) }
 }
 
 #[cfg(test)]

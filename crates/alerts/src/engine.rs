@@ -23,13 +23,17 @@ use crate::decision::{Decision, Outcome, QuietReason, Quieted, SuppressReason};
 use crate::episode::{Admission, EpisodeKey, EpisodeState, Timeliness};
 use crate::explain::explain;
 use crate::external::{SourceHealth, Window};
+use crate::filters::book::FilterKind;
+use crate::filters::{FilterBook, RepeatMemory, SceneMemory};
 use crate::model::{CameraId, Class, Severity, Source};
-use crate::rules::{RuleInput, Support, context, could_be_always, evaluate, schedule_allows};
+use crate::rules::{RuleInput, Support, context, could_be_always, schedule_allows};
 use crate::settings::{AlertSettings, FailPolicy, Issue, Require, SourceMapping};
 use crate::time::{HOUR_MS, Millis, SECOND_MS, clamp_offset};
 use crate::trace::{GateResult, RarityEffect, Step, StepKind, Trace, frame_step};
 use crate::trigger::{Trigger, TriggerState};
 use crate::verify::{Angle, Check, CheckSpec, Counter, Rarity, Sample};
+
+mod filters;
 
 /// The host's clock reading: now, and its current UTC offset (minutes east).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +119,8 @@ struct Open {
     window: Option<Window>,
     deadline_ms: Millis,
     late: bool,
+    /// What the pictures showed, for the cheap filters.
+    book: FilterBook,
 }
 
 /// The most trigger ids remembered for duplicate detection.
@@ -146,6 +152,10 @@ pub struct Engine {
     mutes: BTreeMap<CameraId, Millis>,
     open: BTreeMap<u64, Open>,
     recent: VecDeque<u64>,
+    /// Static-scene memory (the host saves and loads it).
+    scene: SceneMemory,
+    /// The last alerted boxes per camera, for repeat suppression.
+    repeats: RepeatMemory,
 }
 
 /// Serializable counters for a status view.
@@ -169,6 +179,8 @@ impl Engine {
                 mutes: BTreeMap::new(),
                 open: BTreeMap::new(),
                 recent: VecDeque::new(),
+                scene: SceneMemory::new(),
+                repeats: RepeatMemory::new(),
             },
             issues,
         )
@@ -469,6 +481,7 @@ impl Engine {
                 window: None,
                 deadline_ms: now.ms + pending,
                 late,
+                book: FilterBook::new(),
             });
             return Intake {
                 trigger_id: id,
@@ -505,6 +518,7 @@ impl Engine {
                 until_ms: window.until_ms,
                 classes: mapping.classes.clone(),
                 k: mapping.k,
+                min_score: Some(mapping.min_score),
             },
         ));
         let next = Next::Sample {
@@ -521,6 +535,7 @@ impl Engine {
             window: Some(window),
             deadline_ms: window.until_ms + pending,
             late,
+            book: FilterBook::new(),
         });
         Intake {
             trigger_id: id,
@@ -686,6 +701,7 @@ impl Engine {
                 window: None,
                 deadline_ms: now.ms + pending,
                 late,
+                book: FilterBook::new(),
             });
             return Intake {
                 trigger_id: id,
@@ -697,6 +713,7 @@ impl Engine {
             tl!(self, test).touch(key, now.ms);
         }
         let v = self.settings.verification;
+        let floor = self.settings.score_floor(cam, ctx.night);
         let from = trigger.at_ms - Millis::from(v.window_before_s) * SECOND_MS;
         let until =
             trigger.received_ms.max(trigger.at_ms) + Millis::from(v.window_after_s) * SECOND_MS;
@@ -708,7 +725,7 @@ impl Engine {
                 weight: 1.0,
             }],
             classes: classes.clone(),
-            min_score: v.min_score,
+            min_score: floor,
             k: f32::from(v.k),
             from_ms: from,
             until_ms: until,
@@ -721,6 +738,7 @@ impl Engine {
                 until_ms: until,
                 classes: classes.clone(),
                 k: f32::from(v.k),
+                min_score: Some(floor),
             },
         ));
         self.open_check(Open {
@@ -731,6 +749,7 @@ impl Engine {
             window: None,
             deadline_ms: until + pending,
             late,
+            book: FilterBook::new(),
         });
         Intake {
             trigger_id: id,
@@ -779,12 +798,21 @@ impl Engine {
         let open = self.open.get_mut(&trigger_id)?;
         let counter = open.counter.as_mut()?;
         let mut steps = Vec::new();
-        let Some(judged) = counter.add(sample) else {
+        let Some(mut judged) = counter.add(sample) else {
             return Some(SampleProgress {
                 steps,
                 reached: counter.reached(),
             });
         };
+        filters::note_picture(
+            &mut self.scene,
+            &self.settings.filters,
+            &mut open.book,
+            sample,
+            &mut judged,
+            !open.trigger.test,
+            now.ms,
+        );
         steps.push(
             open.trace
                 .push(now.ms, frame_step(sample.camera, sample.at_ms, judged)),
@@ -824,10 +852,15 @@ impl Engine {
             counter,
             sensor,
             late,
+            book,
             ..
         } = open;
         let trigger_class = trigger.kind.class();
         let check = counter.as_ref().map(Counter::result);
+        let verdict = check
+            .and_then(|c| c.class())
+            .map(|class| book.verdict(class, &self.settings.filters));
+        let check = check.map(|c| c.with_moving(verdict.as_ref().and_then(|v| v.moving)));
         let incident = inputs.incident.clone();
 
         // Support, the final camera, and the final class.
@@ -939,7 +972,22 @@ impl Engine {
             night: ctx.night,
             mode: self.settings.mode,
         };
-        let mut rules = evaluate(&input, &self.settings.always_alert);
+        let filtered = verdict.map(|v| self.judge_filters(v, cam, support, trigger.test, now));
+        let (mut rules, parked) = filters::rules_with(
+            &input,
+            &self.settings.always_alert,
+            filtered.as_ref(),
+            &self.settings.filters,
+        );
+        let filtered = filtered.map(|mut f| {
+            if parked && f.acted.is_none() {
+                f.acted = Some(FilterKind::Parked);
+            }
+            f
+        });
+        if let Some(f) = &filtered {
+            trace.push(now.ms, f.step());
+        }
         rules.unverified |= forced_unverified;
         trace.push(
             now.ms,
@@ -982,6 +1030,12 @@ impl Engine {
             };
             return self.finish(trace, Some(cam), class, quiet(reason), incident, now);
         };
+
+        // The cheap filters: in the same place as before, or a repeat.
+        if let Some(reason) = filtered.as_ref().and_then(filters::Filtered::quiet_reason) {
+            tl!(self, test).discard(&key);
+            return self.finish(trace, Some(cam), class, quiet(reason), incident, now);
+        }
 
         if rules.always.is_none() {
             // The gate let it through as a possible always-alert case, or it
@@ -1124,6 +1178,9 @@ impl Engine {
                 quieted: Some(Quieted::Cooldown { left_ms, since_ms }),
             },
         };
+        if let (false, Outcome::Alert { alert_id, .. }, Some(f)) = (test, &outcome, &filtered) {
+            self.repeats.alerted(cam, *alert_id, &f.verdict.set, now.ms);
+        }
         self.finish(trace, Some(cam), class, outcome, incident, now)
     }
 

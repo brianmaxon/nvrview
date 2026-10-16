@@ -37,8 +37,10 @@
  * Minor 15: loudness gaps with their reasons ("gaps" in
  * nv_recordings_loudness) and a span within the day for nv_sound_analyze_day.
  * Minor 16: nv_alerts_output_targets and the alerts_output_targets event.
+ * Minor 17: what the alert filters learned (nv_alert_insights_get,
+ * nv_alert_insights_reset).
  */
-#define NV_ABI_MINOR 16
+#define NV_ABI_MINOR 17
 
 /**
  * Most bytes of an AudioSpecificConfig an encoder's `open` may write.
@@ -2002,6 +2004,39 @@ enum NvStatus nv_alert_evidence_frame_get(struct NvCore *core,
  * `core` is a live handle.
  */
 enum NvStatus nv_alert_evidence_pin(struct NvCore *core, uint64_t trigger_id);
+
+/**
+ * What the alert filters learned, as JSON (minor 17): NULL or "{}" answers
+ * {"cameras":[{"camera","classes"}],"at_ms"}, the cameras with a scene
+ * memory; {"camera":{"device","channel","lens"}} answers that camera's
+ * insight layers {"camera","at_ms","night","layers":[...],"picture"}: each
+ * layer has "id", "title", "description", "provenance", "units", "range",
+ * and a "kind" of "grid" ("rows","cols","values"), "boxes" ("boxes"), or
+ * "scalar" ("items"); "picture" is the newest kept evidence frame of the
+ * camera ({"trigger_id","frame","at_ms"}) or null. Into `out` like
+ * nv_alerts_get. NV_ERR_NOT_CONFIGURED before the first nv_alerts_configure.
+ *
+ * # Safety
+ * `core` is a live handle; `query` is null or a NUL-terminated string;
+ * `out` is null or valid for writing `cap` bytes; `len` is valid for one
+ * write.
+ */
+enum NvStatus nv_alert_insights_get(struct NvCore *core,
+                                    const char *query,
+                                    char *out,
+                                    size_t cap,
+                                    size_t *len);
+
+/**
+ * Forgets what the alert filters learned about one camera (minor 17):
+ * `request` is {"camera":{"device","channel","lens"}}. A local data action:
+ * nothing is sent to the camera. NV_ERR_NOT_CONFIGURED before the first
+ * nv_alerts_configure.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string.
+ */
+enum NvStatus nv_alert_insights_reset(struct NvCore *core, const char *request);
 
 #ifdef __cplusplus
 }  // extern "C"

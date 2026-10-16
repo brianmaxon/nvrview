@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decision::Outcome;
 use crate::episode::Admission;
+use crate::filters::book::FilterKind;
 use crate::model::{CameraId, Class, Exposure, Kind, Mode, Severity, Source};
 use crate::rules::{AlwaysRule, NightBasis, Support};
 use crate::settings::OutputKind;
@@ -98,6 +99,9 @@ pub enum StepKind {
         until_ms: Millis,
         classes: Vec<Class>,
         k: f32,
+        /// The score floor in force (by day or night, for this camera).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_score: Option<f32>,
     },
     /// A camera's stream was started for the check (reported by the host).
     CameraWoken {
@@ -129,6 +133,25 @@ pub enum StepKind {
         /// For a camera's own detection: whether our check agreed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agreed_with_device: Option<bool>,
+    },
+    /// What the cheap filters found for the class the check settled on.
+    Filters {
+        class: Class,
+        /// Hit boxes of the class over all pictures.
+        hits: u32,
+        /// Of those, over hot cells of the static-scene memory.
+        stationary: u32,
+        /// How long the place has been warm, when every hit was stationary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stationary_for_ms: Option<Millis>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        moving: Option<bool>,
+        /// The alert whose boxes these repeat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repeat_of: Option<u64>,
+        /// The filter that changed the decision, if one did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acted: Option<FilterKind>,
     },
     Rules {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,6 +354,7 @@ mod tests {
                     above: true,
                     in_region: true,
                     hit: true,
+                    stationary: false,
                 }],
             ),
         );
@@ -428,6 +452,7 @@ mod tests {
                 above: false,
                 in_region: true,
                 hit: false,
+                stationary: false,
             })
             .collect();
         judged[0].hit = true;

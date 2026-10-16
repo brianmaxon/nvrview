@@ -237,4 +237,7 @@ extension CoreAPI {
     public func alertEvidenceGet(query: String?) throws(CoreStatus) -> String { throw .unsupported }
     public func alertEvidenceFrameGet(triggerID: UInt64, index: UInt32) throws(CoreStatus) -> Data { throw .unsupported }
     public func alertEvidencePin(triggerID: UInt64) throws(CoreStatus) { throw .unsupported }
+    // Minor 17: what the alert filters learned.
+    public func alertInsightsGet(query: String?) throws(CoreStatus) -> String { throw .unsupported }
+    public func alertInsightsReset(request: String) throws(CoreStatus) { throw .unsupported }
 }

@@ -484,7 +484,7 @@ public enum TraceText {
                     + dets.map { d -> String in
                         var w = "\(cls(d["class"])) \(String(format: "%.2f", d["score"]?.double ?? 0))"
                         if d["hit"]?.bool == true {
-                            w += " hit"
+                            w += d["stationary"]?.bool == true ? " hit, in place" : " hit"
                         } else if d["above"]?.bool == false {
                             w += " below floor"
                         } else if d["in_region"]?.bool == false {
@@ -518,6 +518,23 @@ public enum TraceText {
             case true?: t += "; the camera's AI agreed"
             case false?: t += "; the camera's AI disagreed"
             case nil: break
+            }
+            return t
+        case "filters":
+            let hits = f["hits"]?.int64 ?? 0
+            var t = "Filters: \(hits) \(cls(f["class"])) box\(hits == 1 ? "" : "es")"
+            if let n = f["stationary"]?.int64, n > 0 { t += ", \(n) in place" }
+            switch f["moving"]?.bool {
+            case true?: t += ", moving"
+            case false?: t += ", not moving"
+            case nil: break
+            }
+            if let a = f["repeat_of"]?.int64 { t += ", repeats alert #\(a)" }
+            switch f["acted"]?.string {
+            case "scene_memory": t += " → held back: in the same place as before (scene memory)"
+            case "repeat": t += " → held back: a repeat"
+            case "parked": t += " → not an always-alert case (did not move)"
+            default: break
             }
             return t
         case "rules":
@@ -607,6 +624,8 @@ public enum TraceText {
         case "low_severity": "low severity"
         case "muted": "camera muted"
         case "class_off": "class off"
+        case "stationary": "in the same place as before (scene memory)"
+        case "repeat": "the same detections as the last alert"
         case let other: (other ?? "?").replacingOccurrences(of: "_", with: " ")
         }
     }

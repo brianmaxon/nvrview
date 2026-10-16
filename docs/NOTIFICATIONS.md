@@ -298,11 +298,94 @@ stills of 1280×720 or more, and small distant figures are where models fail.
   reach k (default 2 of 2 for a camera's own trigger; across angles with
   weights for external triggers). One hit is **weak**: rules may still alert
   one severity lower, but weak never satisfies an always-alert rule.
-- **Thresholds** per class, camera, and day or night (starting points from
-  VISION.md: person 0.5 with tiles, 0.6 at night; vehicle 0.6, stricter at
-  night for headlights and infrared glare), tuned by feedback within bounds.
-- **Cheap filters first:** static-scene memory, repeat suppression, and masks
-  (ARCHITECTURE.md).
+- **Thresholds** per camera and day or night (built: `verification.min_score`
+  and `verification.night_min_score`, 0.5 and 0.5, with a camera's own
+  `min_score` and `night_min_score` over them; the floor in force is in the
+  trace's `sampling` step). Starting points from VISION.md: person 0.5 with
+  tiles, 0.6 at night; vehicle 0.6, stricter at night for headlights and
+  infrared glare. The night default stays 0.5 for now: the replay below shows
+  the cheap filters remove the static night false alerts without the recall a
+  higher floor costs (person recall 96 % at 0.5 and 87 % at 0.6 with tiles,
+  VISION.md). Per class and tuned by feedback: later.
+- **Cheap filters first:** static-scene memory, moving versus parked, repeat
+  suppression, and masks (ARCHITECTURE.md; below).
+
+### Cheap filters
+
+Built in `crates/alerts` (`filters`, wired in `engine`), on the boxes of each
+check. Every filter's verdict is a `filters` trace step, and a check held back
+is a quiet decision with its evidence kept, never a deleted one.
+
+- **Static-scene memory.** Per camera (device, channel, lens) and per class, a
+  64 by 36 grid of warmth. Each learned picture moves every cell its boxes
+  cover toward 1 (`scene_rise` 0.35); with nothing covering it a cell halves
+  every `scene_half_life_min` (30). A camera and class learns at most once per
+  `scene_learn_spacing_s` (120), so warmth measures time spent in place, not
+  how often pictures were taken: a place is hot (`scene_hot` 0.7) after three
+  learns at least two minutes apart. Boxes from `scene_learn_min_score` (0.3)
+  up are learned, below the alert floor on purpose: the detector's weak,
+  repeated guesses at one spot are the evidence. Every check's pictures teach
+  it, quiet ones included, and so do the "still present" re-checks. A hit is
+  **stationary** when `scene_cover` (0.6) of its cells are hot; when every hit
+  of the class a check settled on is stationary, the check is held back:
+  "Not alerted: a person in the same place as for the last 40 min (scene
+  memory)." (quiet reason `stationary`, `for_ms`). Per class, so a parked car
+  never hides a person walking past it. The idea is the adaptive background
+  model's per-pixel running average with exponential forgetting (Stauffer and
+  Grimson, 1999), kept over detector boxes instead of pixels.
+- **Moving versus parked.** The two pictures of a check (about 1 s apart):
+  each hit is matched to the best same-class box in the nearest other picture
+  of its camera; an overlap (IoU) of `parked_iou` (0.8) or more is parked,
+  less is moving, and no box of the class to compare with is unknown.
+  `Check::moving` (the `checked` step) is true when any hit moved, false when
+  every compared hit stayed. A parked check never holds an alert back (a
+  person waiting at a door is real), but with `parked_blocks_always` (on) it
+  cannot make "a person on an outside camera at night" apply by itself: it
+  alerts at the ordinary severity ("It did not move between the pictures, so
+  it is not an always-alert case.").
+- **Repeat suppression.** The hit boxes of a check's best picture are its set;
+  each camera remembers its last alerted set (in memory). A later set with the
+  same classes and counts, each box paired with one of the remembered set at
+  `repeat_iou` (0.6) or more, within `repeat_window_min` (30) of the last time
+  the set was seen, is held back: "Not alerted: the same detections as the
+  alert 3 min ago (repeat)." (quiet reason `repeat`, `alert_id`, `since_ms`).
+- **Order and scope.** Scene memory, then repeat, then parked. They act on our
+  detector's support (verified or weak), including always-alert cases, since
+  a box that stays in place is no more evidence at night than by day; they do
+  not touch self-evident triggers (doorbell, alarms), sensor-only alerts, or a
+  mute. A simulated trigger is shown what the filters found but never held
+  back, and never teaches the memory.
+- **Persistence and bounds.** The memory is saved by `viewer-core` as
+  `alerts/scene-memory.bin` (versioned binary, warmth as one byte per cell, at
+  most 384 grids of about 11.5 KB), at most every 5 minutes while it changes
+  and when the service stops; a damaged or other-version file starts empty.
+  The last alerted sets are memory only (at most 512 cameras).
+- **Insights.** What the filters learned is exposed as generic layers (FFI
+  minor 17, `nv_alert_insights_get`: a heatmap per class, the last alerted
+  boxes, the thresholds in force), drawn by the Events window's Scene Memory
+  pane (UX.md), with a per-camera reset (`nv_alert_insights_reset`, local data
+  only). A new technique shows there by adding a layer in Rust.
+- **Settings** (`filters` in the settings document, every value clamped):
+  `scene_memory` (on), `scene_half_life_min` (30, 1 to 1440),
+  `scene_rise` (0.35, 0.01 to 1), `scene_hot` (0.7, 0.05 to 0.99),
+  `scene_cover` (0.6, 0.05 to 1), `scene_learn_spacing_s` (120, 0 to 3600),
+  `scene_learn_min_score` (0.3, 0.05 to 0.99), `parked_iou` (0.8, 0.3 to
+  0.99), `parked_blocks_always` (on), `repeat` (on), `repeat_iou` (0.6, 0.3
+  to 0.99), `repeat_window_min` (30, 1 to 1440).
+- **How the defaults were chosen.** `cargo run -p alerts --example replay --
+  EVIDENCE_DIR LOG_DIR` replays kept evidence sets in time order (every set
+  teaches the memory) and prints, per filter and setting, object alerts kept
+  and removed, critical ones kept, removed, and lowered, and removed alerts
+  with a box that moved. On one installation's night of kept evidence (868
+  checks in about 100 minutes, 232 person alerts, 114 of them critical, no
+  labels): scene memory alone held back 76 %, repeat suppression alone 42 %,
+  the parked rule kept 108 critical alerts from being critical, and all three
+  at the defaults held back 94 % (219) with no critical alert left. A hot level
+  of 0.5 or a spacing of 60 s held back more (86 to 89 %) but makes a place hot
+  after two looks; 0.85 or 300 s let most static boxes through. The
+  "moved" column overstates: boxes on static objects jitter in size between
+  the two pictures, and every removed "moving" alert that was opened was a
+  false positive.
 - **Agreement with the camera's AI:** a camera `people` trigger our check
   confirms says "The camera's AI agreed". When our check sees nothing, the
   owner's rule applies: **quiet log**, except that on a camera marked **"trust
@@ -886,13 +969,17 @@ fields:
     "alert_id": 4, "rev": 1, "late": false, "unverified": false, "always": "night_outside_person"}]}}
 ```
 
-Other steps: `retrigger`, `camera_woken` (`first_picture_ms`), `rarity`
-(`one_in`, `effect`), `delivery` (`output`, `kind`, `ok`), `omitted`
-(`steps`). Gate results: `pass`, `pass_always`, `muted`, `schedule`,
+Other steps: `retrigger`, `camera_woken` (`first_picture_ms`), `filters`
+(`class`, `hits`, `stationary`, `stationary_for_ms`, `moving`, `repeat_of`,
+`acted`: `scene_memory`, `repeat`, or `parked`), `rarity` (`one_in`,
+`effect`), `delivery` (`output`, `kind`, `ok`), `omitted` (`steps`). A
+`frame_sampled` detection carries `stationary: true` for a hit over the scene
+memory; `sampling` carries the score floor in force (`min_score`). Gate results: `pass`, `pass_always`, `muted`, `schedule`,
 `class_off`, `cooldown`, `motion_only`, `unknown_kind`, `unknown_source`,
 `no_camera`, `duplicate`. Quiet reasons: `not_confirmed`, `nothing_seen`,
 `outside_region`, `could_not_look`, `low_severity`, `late`, `motion_only`,
-`unknown_kind`, `no_decision`. Suppress reasons: `muted`, `schedule`,
+`unknown_kind`, `no_decision`, `stationary` (`for_ms`), `repeat`
+(`alert_id`, `since_ms`). Suppress reasons: `muted`, `schedule`,
 `class_off`, `cooldown`, `duplicate`, `unknown_source`, `no_camera`.
 
 **Feedback:**
@@ -907,7 +994,9 @@ entrance, `trust_camera_ai`, classes, zones, schedule, `verify_motion`),
 `mode`, `location` (or null), `night` (30 and 30 min, fallback 22:00–06:00),
 `sources[]` (the mapping above), `timing` (cooldowns 60 s and 300 s,
 staleness 30 s, settle 120 s, re-check 10 s for at most 600 s, 2 misses),
-`verification` (k 2, score floor 0.5, window 2 s before and 10 s after),
+`verification` (k 2, score floor 0.5 by day and 0.5 at night, window 2 s
+before and 10 s after; a camera's own `min_score` and `night_min_score` go
+over them), `filters` (see "Cheap filters"),
 `min_alert_severity` (normal), `outputs[]` (kind, enabled, endpoint, minimum
 severity, pictures on), `standby` (automatic on battery off, 4 wakes per
 device), `learning` (on, promote at 1 in 20, demote at 1 in 2). Validation
@@ -958,8 +1047,10 @@ Built and tested; wired to `viewer-core` (below).
   finished), `mute` (at most 24 h).
 - `rules`, `sun`, `episode`, `verify` (k-of-n counting; the `Sample`
   detector input and the `RarityModel` trait with a no-baseline stand-in are
-  where later slices plug in), `external` (windows, source health), `trace`,
-  `explain`, `settings`, `zone`.
+  where later slices plug in), `filters` (static-scene memory, moving versus
+  parked, repeat suppression; "Cheap filters"), `insight` (the generic layers
+  for the apps), `external` (windows, source health), `trace`, `explain`,
+  `settings`, `zone`.
 - Bounded: 1024 episodes, 256 open checks, 4096 remembered trigger ids, 64
   trace steps, 8 detections per picture step.
 
@@ -1106,7 +1197,7 @@ FFI.md "Smart alerts" has their settings entries.
 | S0 | This page; ARCHITECTURE.md pointer; PARITY.md rows | — |
 | S1 | Hardware probes: push delay, cold wake, pre-trigger fetch, standby idle traffic, alarm-input pushes, the reported push kinds, a day/night state if one exists | — |
 | S2 | `crates/alerts`: rules engine, trace, explanations, settings (**done**) | S0 |
-| S3 | Verification maths: crop and tile plan, box merge, per-class thresholds, IoU tracking across pictures and angles, moving vs parked, static memory, repeat suppression | S2 |
+| S3 | Verification maths: crop and tile plan, box merge, per-class thresholds, IoU tracking across pictures and angles, moving vs parked, static memory, repeat suppression (**static memory, moving vs parked, repeat suppression, day and night floors per camera done**; per-class thresholds and tracking across angles to do) | S2 |
 | S4 | `viewer-core` orchestration: wake streams, picture collection, caps, still-present re-checks, catch-up, decision log store, trace events; ABI minor; `mock-nvr` end-to-end | S2, S3 |
 | S5 | Baselines: index backfill, Gamma–Poisson rates, novelty map | S2 |
 | S6 | macOS: Core ML runtime (**detector, queue and benchmark done**: `DetectorKit`; **verification host, snapshots, model fetch, notifications done**: `AlertHost`), actions, settings, verification view, event log, feedback | S4 |
@@ -1118,7 +1209,7 @@ FFI.md "Smart alerts" has their settings entries.
 | S12 | External triggers end to end: mapping UI, pre-trigger fetch, cross-angle k-of-n, source statistics | S3, S4, S10, S1 |
 | S13 | Feedback learning | S6, S7 |
 | S14 | Optional multimodal verifier (borderline band, captions after the fact, budget, fail open) | S4 |
-| S15 | Evaluation harness; pick k-of-n and threshold defaults | S3 |
+| S15 | Evaluation harness; pick k-of-n and threshold defaults (the cheap filters' replay tool and defaults done: `crates/alerts/examples/replay.rs`) | S3 |
 | S16 | A headless service as a preferred candidate (decoder, model runtime, packaging) | S9 |
 
 ## Decisions

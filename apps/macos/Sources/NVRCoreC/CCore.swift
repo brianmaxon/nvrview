@@ -738,6 +738,17 @@ public final class CCore: CoreAPI {
         try check(nv_alert_evidence_pin(try core(), triggerID))
     }
 
+    public func alertInsightsGet(query: String?) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { out, cap, len in
+            if let query { nv_alert_insights_get(c, query, out, cap, len) } else { nv_alert_insights_get(c, nil, out, cap, len) }
+        }
+    }
+
+    public func alertInsightsReset(request: String) throws(CoreStatus) {
+        try check(nv_alert_insights_reset(try core(), request))
+    }
+
     // MARK: Recorded playback (minor 6)
 
     public func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback {

@@ -7,6 +7,8 @@ mod common;
 mod cooldown;
 #[path = "engine.rs"]
 mod engine;
+#[path = "filters.rs"]
+mod filters;
 #[path = "props.rs"]
 mod props;
 #[path = "scenario.rs"]

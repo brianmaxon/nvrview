@@ -4,6 +4,8 @@
 //! engine decides with a trace; woken streams stop when checks end and
 //! episodes settle. Nothing here waits on real time.
 
+#[path = "alerts/insight.rs"]
+mod insight;
 mod mock_ha;
 #[allow(unused_imports)]
 #[path = "../../mqtt-triggers/tests/common/mod.rs"]
@@ -31,8 +33,11 @@ const NIGHT_S: i64 = 1_781_132_400;
 enum Answer {
     /// A person standing in the middle of the picture.
     Person,
-    /// A vehicle in the middle of the picture.
-    Vehicle,
+    /// A person whose box starts this far across the picture (a person
+    /// walking: give each picture its own place).
+    PersonAt(f32),
+    /// A vehicle whose box starts this far across the picture.
+    VehicleAt(f32),
     /// Nothing found.
     Nothing,
     /// No answer at all (the app could not check it).
@@ -173,8 +178,11 @@ impl Harness {
             let boxes = match answer {
                 Answer::Silent => continue,
                 Answer::Nothing => json!({"detections": []}),
-                Answer::Vehicle => json!({"detections": [
-                    {"class": "vehicle", "score": 0.8, "box": {"x": 0.3, "y": 0.4, "w": 0.3, "h": 0.2}}
+                Answer::PersonAt(x) => json!({"detections": [
+                    {"class": "person", "score": 0.8, "box": {"x": x, "y": 0.3, "w": 0.1, "h": 0.4}}
+                ]}),
+                Answer::VehicleAt(x) => json!({"detections": [
+                    {"class": "vehicle", "score": 0.8, "box": {"x": x, "y": 0.4, "w": 0.3, "h": 0.2}}
                 ]}),
                 Answer::Person => json!({"detections": [
                     {"class": "person", "score": 0.8, "box": {"x": 0.4, "y": 0.3, "w": 0.1, "h": 0.4}},
@@ -1386,9 +1394,13 @@ fn a_second_vehicle_inside_the_cooldown_is_logged_with_evidence_but_not_notified
                 jpeg,
             )
             .unwrap();
-        h.run_until_with("a decision", 20, &mut |_, _| Answer::Vehicle, |h| {
-            h.decisions().len() == n
-        });
+        // Another car: in another place (the same boxes would be a repeat).
+        h.run_until_with(
+            "a decision",
+            20,
+            &mut |_, i| Answer::VehicleAt(if i < 2 { 0.1 } else { 0.6 }),
+            |h| h.decisions().len() == n,
+        );
         ids.push(id);
         h.sim.advance(Duration::from_secs(10));
     }
@@ -1420,7 +1432,9 @@ fn a_second_vehicle_inside_the_cooldown_is_logged_with_evidence_but_not_notified
 }
 
 /// An always-alert case inside a cooldown still notifies (an update of the
-/// same alert), as before.
+/// same alert), as before: a person walking (a person standing still in
+/// the same place is not an always-alert case by itself, and the same boxes
+/// again are a repeat).
 #[test]
 fn an_always_alert_case_inside_the_cooldown_still_notifies() {
     let mut h = Harness::new(1, NIGHT_S, false);
@@ -1434,9 +1448,12 @@ fn an_always_alert_case_inside_the_cooldown_still_notifies() {
                 &json!({"source": "device", "camera": h.cam(0), "kind": "people"}).to_string(),
             )
             .unwrap();
-        h.run_until_with("a decision", 20, &mut |_, _| Answer::Person, |h| {
-            h.decisions().len() == n
-        });
+        h.run_until_with(
+            "a decision",
+            20,
+            &mut |_, n| Answer::PersonAt(0.1 + 0.08 * n as f32),
+            |h| h.decisions().len() == n,
+        );
         h.sim.advance(Duration::from_secs(10));
     }
     let states: Vec<String> = h

@@ -407,7 +407,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 16;
+    public const uint AbiMinor = 17;
 
     /// <summary>NV_ASC_MAX: most bytes of an AudioSpecificConfig an encoder's open may write (minor 9).</summary>
     public const int AscMax = 64;
@@ -933,6 +933,16 @@ public static unsafe partial class NvNative
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_alert_evidence_pin(nint core, ulong triggerId);
+
+    /// <summary>What the alert filters learned: the cameras, or one camera's insight layers (query JSON or null; minor 17).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_insights_get(nint core, string? query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Forgets what the alert filters learned about one camera (a local data action; minor 17).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_insights_reset(nint core, string request);
 
     // Recorded playback (minor 6; docs/FFI.md, "Recorded playback (minor 6)").
 

@@ -287,7 +287,9 @@ MAC_OWNED = {
                _S + "MockHomeAssistant.swift", _M + "AppAlerts/SmartAlertEventsWindow.swift", _M + "AppAlerts/SmartAlertsModel.swift",
                _M + "AppAlerts/SmartAlertsSettingsView.swift", _M + "AppStage/StageView+Verify.swift", _M + "AppAlerts/VerificationViews.swift",
                _C + "SmartAlerts.swift", _C + "SmartAlertSettings.swift", _C + "VerificationBoard.swift",
-               _F + "FakeAlerts.swift", "apps/macos/Sources/AlertHost/", "apps/macos/Sources/DetectorKit/"],
+               _F + "FakeAlerts.swift", "apps/macos/Sources/AlertHost/", "apps/macos/Sources/DetectorKit/",
+               _S + "SelfTest+SceneMemory.swift", _M + "AppAlerts/SceneMemoryModel.swift", _M + "AppAlerts/SceneMemoryView.swift",
+               _M + "AppAlerts/SmartAlertsModel+Insights.swift", _C + "AlertInsights.swift", _F + "FakeAlertsInsights.swift"],
 }
 MAC_APP_EXTRA = ["docs/nvrview.h", "crates/viewer-ffi/include/", "scripts/macos-selftest-areas.txt"] + FIXTURES
 
