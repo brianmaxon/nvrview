@@ -338,6 +338,8 @@ package final class SmartAlertsModel {
     /// "always a window").
     package var panelChecks: [VerifyCheck] {
         board.shown.filter { c in
+            // "Only when confirmed": the window waits for the alert.
+            guard board.mayPopUp(c) else { return false }
             let onScreen = c.primaryCamera.flatMap { model.cameraRef($0) }.map(isOnScreen) ?? false
             return place(c, onScreen: onScreen) == .window
         }

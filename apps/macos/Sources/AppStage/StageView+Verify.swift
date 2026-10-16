@@ -60,7 +60,9 @@ extension StageView {
             case .tile?:
                 for cam in inLayout { tiles[cam, default: []].append(c) }
             case .inset?:
-                if let cam = ref(c) { insets[cam, default: []].append(c) }
+                // "Only when confirmed": no inset until the alert is confirmed
+                // (a check that never confirms never opens one).
+                if let cam = ref(c), alerts.board.mayPopUp(c) { insets[cam, default: []].append(c) }
             default: break
             }
         }
@@ -92,7 +94,7 @@ extension StageView {
         layoutVerificationInsets()
     }
 
-    private var currentVerificationLeaves: [LeafFrame] { insetBoard.swap == nil ? frames.leaves : [] }
+    package var currentVerificationLeaves: [LeafFrame] { insetBoard.swap == nil ? frames.leaves : [] }
 
     /// The bands over the tiles (from the stage's chrome layout).
     package func layoutVerification(_ leaves: [LeafFrame]) {

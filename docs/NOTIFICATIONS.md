@@ -760,6 +760,11 @@ and records each result as a `delivery` step such as "Home Assistant:
 - **Other actions:** plain `turn_on` (left on), `script.turn_on` with the facts
   as script variables, and a notification with a message from a template
   (see "Notify targets" below).
+  The default message is `{camera}: {class} alert. {explanation}`, which
+  leads with the camera's name like the desktop notification's title
+  ("Front Door: Critical person alert"). The alert event carries
+  `camera_name` (the settings' name, "Camera N" without one) for the app's
+  notification.
   Templates use only `{camera}`, `{class}`, `{time}`, `{severity}`, and
   `{explanation}`, filled in one pass from typed alert facts (control
   characters removed, 200 characters at most), so no trigger payload text is

@@ -207,6 +207,7 @@ extension SelfTest {
                 stage.unfocus()
                 advance(StageView.focusDuration)
             }
+            verifyHeadlineStep(camera, check: check)
             smartTileCamera = camera
             verifyDismissStep(t ?? 0, camera, alertID: check?.alertID)
         }
@@ -295,9 +296,7 @@ extension SelfTest {
                 alerts.update { $0.view.placement = .tileThenInset }
                 if app.verificationPanel?.window?.isVisible == true { problems.append("the empty checks window stayed") }
                 _ = t1
-                stage.unfocus()
-                advance(StageView.focusDuration)
-                verifyStickStep()
+                verifyPopUpStep { [self] in verifyStickStep() }
             }
         }
     }

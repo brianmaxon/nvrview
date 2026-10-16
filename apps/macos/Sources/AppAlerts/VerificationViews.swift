@@ -38,12 +38,21 @@ extension VerifyOverlayContent {
     package init(check c: VerifyCheck, camera: AlertCamera?, model: any AlertsHost, lines count: Int, others: Int) {
         let name: (AlertCamera) -> String = { [model] cam in model.cameraRef(cam).map(model.name(of:)) ?? "Camera \(cam.channel + 1)" }
         checkID = c.id
-        var head = c.headline(cameraName: name)
+        // "Single headline" leads with the verdict and shows no log; the
+        // full log keeps the original headline. Either way, how long ago
+        // the check started, counting up (viewer clock).
+        let headlineOnly = model.alertsModel.settings.view.detail == .headline
+        var head = headlineOnly ? c.verdictHeadline(cameraName: name) : c.headline(cameraName: name)
+        head += " · " + ElapsedText.ago(since: c.startedAt, now: model.clock.now)
         if others > 0 { head += " · +\(others) more" }
         headline = head
-        lines = c.steps.suffix(count).map { TraceText.line($0, cameraName: name) }
-        if let e = c.explanation, c.decision != nil, lines.last.map({ !$0.hasPrefix("Delivered") }) ?? true {
-            lines = Array((lines + [e]).suffix(count))
+        if headlineOnly {
+            lines = []
+        } else {
+            lines = c.steps.suffix(count).map { TraceText.line($0, cameraName: name) }
+            if let e = c.explanation, c.decision != nil, lines.last.map({ !$0.hasPrefix("Delivered") }) ?? true {
+                lines = Array((lines + [e]).suffix(count))
+            }
         }
         boxes = camera.flatMap { c.pictures[$0]?.boxes } ?? []
         self.others = others
@@ -292,7 +301,9 @@ package struct VerificationCard: View {
         let name: (AlertCamera) -> String = { [model] cam in model.cameraRef(cam).map(model.name(of:)) ?? "Camera \(cam.channel + 1)" }
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(check.headline(cameraName: name)).font(.subheadline.bold())
+                TimelineView(.periodic(from: Date(), by: 1)) { _ in
+                    Text(headline(name)).font(.subheadline.bold())
+                }
                 Spacer()
                 Button {
                     model.alertsModel.dismiss(check.id)
@@ -309,12 +320,23 @@ package struct VerificationCard: View {
                         Text(name(cam)).font(.caption2).padding(3).background(.black.opacity(0.6)).foregroundStyle(.white)
                     }
             }
-            TraceLogView(steps: check.steps, cameraName: name)
-            if let e = check.explanation { Text(e).font(.caption).textSelection(.enabled) }
+            if model.alertsModel.settings.view.detail == .fullLog {
+                TraceLogView(steps: check.steps, cameraName: name)
+                if let e = check.explanation { Text(e).font(.caption).textSelection(.enabled) }
+            }
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
         .onHover { model.alertsModel.hover(check.id, $0) }
+    }
+
+    /// The headline per the detail setting, with how long ago the check
+    /// started (the card refreshes every second).
+    private func headline(_ name: (AlertCamera) -> String) -> String {
+        let text =
+            model.alertsModel.settings.view.detail == .headline
+            ? check.verdictHeadline(cameraName: name) : check.headline(cameraName: name)
+        return text + " · " + ElapsedText.ago(since: check.startedAt, now: model.clock.now)
     }
 
     package init(model: any AlertsHost, check: VerifyCheck) {

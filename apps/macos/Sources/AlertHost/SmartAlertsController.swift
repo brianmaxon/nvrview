@@ -225,6 +225,9 @@ struct AlertSummary: Sendable, Equatable {
     var className: String
     var explanation: String
     var camera: AlertCamera?
+    /// The camera as the settings name it (the device's channel name, or
+    /// "Camera N" without one); the notification leads with it.
+    var cameraName: String?
     /// A simulated trigger: the notification says so.
     var isTest = false
 
@@ -240,6 +243,7 @@ struct AlertSummary: Sendable, Equatable {
         severity = (decision["severity"] as? String) ?? "normal"
         className = (decision["class"] as? String) ?? "other"
         explanation = (decision["explanation"] as? String) ?? ""
+        cameraName = object["camera_name"] as? String
         if let c = decision["camera"] as? [String: Any],
             let device = (c["device"] as? NSNumber)?.uint64Value,
             let channel = (c["channel"] as? NSNumber)?.uint16Value
@@ -248,18 +252,9 @@ struct AlertSummary: Sendable, Equatable {
         }
     }
 
-    /// "Critical person alert", "Vehicle alert", ...
+    /// "Front Door: Critical person alert", "Smoke alarm", ... (`AlertText`).
     var title: String {
-        let noun: String
-        switch className {
-        case "smoke": noun = "smoke alarm"
-        case "co": noun = "carbon monoxide alarm"
-        case "visitor": noun = "doorbell"
-        default: noun = "\(className) alert"
-        }
-        let text = severity == "critical" ? "Critical \(noun)" : noun
-        let title = text.prefix(1).uppercased() + text.dropFirst()
-        return isTest ? "Test: \(title)" : title
+        AlertText.title(cameraName: cameraName, className: className, severity: severity, isTest: isTest)
     }
 
     var thread: String {

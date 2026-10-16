@@ -48,11 +48,11 @@ package struct SmartAlertsSettingsView: View {
 
 /// A binding to one part of the settings.
 @MainActor
-private func setting<T>(_ alerts: SmartAlertsModel, _ path: WritableKeyPath<SmartAlertSettings, T>) -> Binding<T> {
+package func setting<T>(_ alerts: SmartAlertsModel, _ path: WritableKeyPath<SmartAlertSettings, T>) -> Binding<T> {
     Binding(get: { alerts.settings[keyPath: path] }, set: { v in alerts.update { $0[keyPath: path] = v } })
 }
 
-private func caption(_ text: String) -> some View {
+package func caption(_ text: String) -> some View {
     Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 }
 
@@ -841,36 +841,6 @@ package struct HARuleRow: View {
     package init(model: any AlertsHost, index: Int) {
         self.model = model
         self.index = index
-    }
-}
-
-// MARK: Live view
-
-package struct SmartAlertsLiveViewSettings: View {
-    package let alerts: SmartAlertsModel
-
-    package var body: some View {
-        Form {
-            Section("Live checks") {
-                Picker("Show checks", selection: setting(alerts, \.view.placement)) {
-                    ForEach(VerifyPlacementSetting.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                Toggle("Also keep checks that end quiet or suppressed", isOn: setting(alerts, \.view.showQuiet))
-                Picker("Stay after the decision", selection: setting(alerts, \.view.minSeconds)) {
-                    ForEach(VerifyViewSettings.stayChoices(including: alerts.settings.view.minSeconds), id: \.self) {
-                        Text(VerifyViewSettings.stayTitle($0)).tag($0)
-                    }
-                }
-                caption(
-                    "Each check shows the camera's picture with the detector's boxes and every step from the trigger to the decision. It stays longer while the alert is still going, never takes the keyboard, and closes with its × button, Esc, or Dismiss All."
-                )
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    package init(alerts: SmartAlertsModel) {
-        self.alerts = alerts
     }
 }
 

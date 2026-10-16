@@ -121,7 +121,7 @@ fn d_cooldown() -> u64 {
     30_000
 }
 fn d_template() -> String {
-    "{class} on {camera} at {time}: {explanation}".to_string()
+    "{camera}: {class} alert. {explanation}".to_string()
 }
 fn d_attempts() -> u32 {
     3

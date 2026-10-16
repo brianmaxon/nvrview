@@ -1752,7 +1752,11 @@ document's `secrets` map.
   the pictures needed, and alerting unverified when no picture could be
   checked. The status line shows whether the core started the sensor's input
   and, when the core reports it, "Connected" or "Login rejected".
-- **Outputs.** Desktop notifications (on, from a severity, with a picture).
+- **Outputs.** Desktop notifications (on, from a severity, with a picture;
+  the title leads with the camera's name: "Front Door: Critical person alert",
+  or "Camera 3: Vehicle alert" when the camera has no name; a multi-lens
+  camera's lens is part of its name, "Front Door · Lens 2"; a smoke or CO
+  alarm from a sensor with no camera has no name in front).
   Home Assistant: address, token (Keychain only), Test (asks the API root with
   the token; turns nothing on; never follows a redirect), from a severity,
   pictures (on; a warning when the address may be outside the local
@@ -1798,6 +1802,31 @@ events and the boxes the app's detector answered:
   with its angles' pictures (the picture the detector checked, when it hands
   one over) and boxes, its whole step log and explanation, a close button,
   and Dismiss All; Esc closes the newest when it is focused.
+- **Heading and elapsed time.** The band's heading (and a verification
+  inset's heading, after its time) says how long ago the check started,
+  counting up on the viewer clock: "just now" under a second, "12 s ago" under
+  a minute, "3 min ago" under an hour (whole minutes, rounded down), then
+  "2 h ago". It is redrawn only when the words change.
+- **Full log or one headline.** Settings > Smart Alerts > Live checks, "Show
+  in each check": "The full step log" (the default: the original headline
+  and the latest steps) or "A single headline", one line that leads with the
+  verdict and no log. The words: "Checking: person at Front Door" while it
+  runs; "Confirmed: person at Front Door" once it alerts ("... (not notified)"
+  when a cooldown kept it quiet; "Alert, not confirmed: ..." for an
+  always-alert case that could not be checked); "Not confirmed: person at
+  Front Door" when the check ended without seeing it; "Confirmed, quiet log:
+  ..." for a confirmed detection below the alert level; "Not alerted: ..." for
+  a mute or a class that is off. The camera is left out for a sensor's own
+  alarm. The full log stays in the Smart Alert Events window.
+- **Pop-up only when confirmed.** "Open an inset or window": "When the check
+  starts" (the default) or "Only when the alert is confirmed". With the
+  second, a check of a camera that is not in a tile runs unseen (no inset, no
+  small window); when it confirms the alert, the inset (or window) appears
+  with the verdict headline or log as chosen, and "12 s ago" already counting.
+  A check that is not confirmed never opens one; the Events window logs it
+  and no notification is sent, as before. A camera that is in a tile keeps its
+  band there while it checks (the tile is already on screen; the setting is
+  about pop-ups).
 - **Which and how long.** A check shows from its first step. It goes at the
   decision if it ended quiet or suppressed (unless "keep quiet checks" is on
   or it was an always-alert candidate). An alert stays while its episode is

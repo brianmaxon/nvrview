@@ -400,6 +400,15 @@ fn no_answer_fails_open_for_always_alert_cases() {
     assert_eq!(d["severity"], "critical");
     assert_eq!(d["unverified"], true);
     assert_eq!(d["always"], "night_outside_person");
+    // The event names the camera for notifications ("Camera N" when the
+    // settings give no name).
+    let ev = h
+        .rec
+        .events_of("alert")
+        .into_iter()
+        .find(|e| e["state"] != "settled")
+        .unwrap();
+    assert_eq!(ev["camera_name"], "Camera 1", "{ev}");
     // Requests that timed out were reported.
     assert!(
         h.rec
