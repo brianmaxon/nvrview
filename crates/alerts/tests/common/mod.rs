@@ -75,6 +75,9 @@ pub fn run(
     inputs: DecideInputs,
 ) -> Decision {
     let t0 = t.received_ms;
+    // Each trigger's boxes sit in their own place (separate events are not
+    // repeats of one another).
+    let shift = (t.id % 9) as f32 * 0.05 - 0.2;
     let intake = e.intake(t, now(t0));
     match intake.next {
         Next::Done(d) => *d,
@@ -83,6 +86,7 @@ pub fn run(
             let mut last = t0;
             for (c, off, d) in frames {
                 last = t0 + off;
+                let d = d.into_iter().map(|d| moved(d, shift)).collect();
                 e.sample(intake.trigger_id, &sample(c, t0 + off, d), now(last + 50));
             }
             e.decide(intake.trigger_id, inputs, now(last + 100))
@@ -92,8 +96,24 @@ pub fn run(
     }
 }
 
-/// Two pictures of a person on `c`, 1 s apart.
+/// The same detection moved across the picture by `dx`.
+pub fn moved(d: Detection, dx: f32) -> Detection {
+    Detection {
+        bbox: BBox::new(d.bbox.x + dx, d.bbox.y, d.bbox.w, d.bbox.h),
+        ..d
+    }
+}
+
+/// Two pictures of a person walking on `c`, 1 s apart.
 pub fn seen(c: CameraId, score: f32) -> Vec<(CameraId, Millis, Vec<Detection>)> {
+    vec![
+        (c, 200, vec![det(Class::Person, score)]),
+        (c, 1200, vec![moved(det(Class::Person, score - 0.05), 0.05)]),
+    ]
+}
+
+/// Two pictures of a person standing still on `c`, 1 s apart.
+pub fn standing(c: CameraId, score: f32) -> Vec<(CameraId, Millis, Vec<Detection>)> {
     vec![
         (c, 200, vec![det(Class::Person, score)]),
         (c, 1200, vec![det(Class::Person, score - 0.05)]),

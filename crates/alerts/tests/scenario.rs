@@ -168,7 +168,7 @@ fn a_day_of_triggers() {
     // The smoke alarm pattern on the inside camera's microphone.
     day.trigger(audio(7, cam(2), "smoke_alarm", at(16, 0)), vec![]);
     // Night (sunset about 20:21 UTC; night from about 20:51): a person on
-    // the perimeter camera, and again 30 s later.
+    // the perimeter camera, and again 30 s later in the same place.
     day.trigger(device(8, cam(1), "people", at(21, 30)), seen(cam(1), 0.75));
     day.trigger(
         device(9, cam(1), "people", at(21, 30) + 30 * SECOND_MS),
@@ -216,7 +216,8 @@ fn a_day_of_triggers() {
         ("15:00", "alert normal"),
         ("17:00", "alert critical"),
         ("22:30", "alert critical"),
-        ("22:30", "alert critical update"),
+        // The same boxes 30 s later: a repeat, not a new alert.
+        ("22:30", "quiet Repeat { alert_id: 5, since_ms: 30000 }"),
         ("23:00", "quiet NotConfirmed"),
         ("00:10", "quiet Late { age_ms: 1800000 }"),
         ("00:10", "alert critical late"),
@@ -229,7 +230,7 @@ fn a_day_of_triggers() {
     let ex = |i: usize| day.log[i].2.as_str();
     assert_eq!(
         ex(0),
-        "Person on Camera 1 at 08:30 (day, outside camera, entrance). Verified in 2 of 2 pictures (0.80). The camera's AI agreed."
+        "Person on Camera 1 at 08:30 (day, outside camera, entrance). Verified in 2 of 2 pictures (0.80, moving). The camera's AI agreed."
     );
     assert_eq!(
         ex(5),
@@ -237,11 +238,11 @@ fn a_day_of_triggers() {
     );
     assert_eq!(
         ex(7),
-        "Person on Camera 2 at 22:30 (night, perimeter camera). Verified in 2 of 2 pictures (0.75). The camera's AI agreed. Always alerts: a person on an outside camera at night."
+        "Person on Camera 2 at 22:30 (night, perimeter camera). Verified in 2 of 2 pictures (0.75, moving). The camera's AI agreed. Always alerts: a person on an outside camera at night."
     );
     assert_eq!(
         ex(10),
-        "Vehicle on Camera 1 at 23:40 (night, outside camera, entrance). Verified in 2 of 2 pictures (0.80). The camera's AI agreed. Not alerted: reported 30 min late."
+        "Vehicle on Camera 1 at 23:40 (night, outside camera, entrance). Verified in 2 of 2 pictures (0.80, not moving). The camera's AI agreed. Not alerted: reported 30 min late."
     );
     assert_eq!(
         ex(11),

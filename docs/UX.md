@@ -1913,6 +1913,45 @@ sentence; "Older…" pages back.
   (nothing there, wrong type, not interesting here or now, duplicate), are
   stored with the entry and shown. Mute Camera mutes it for 15 minutes, an
   hour, or until 07:00 (the only thing that stops always-alert rules).
+- **Filters in the trace.** A check's steps include what the cheap filters
+  found (docs/NOTIFICATIONS.md, "Cheap filters"): "Filters: 2 person boxes,
+  2 in place, not moving → held back: in the same place as before (scene
+  memory)", "... repeats alert #7 → held back: a repeat", or "... → not an
+  always-alert case (did not move)"; a picture's hit over the scene memory
+  reads "person 0.61 hit, in place". Held-back checks are quiet decisions
+  ("Not alerted: a person in the same place as for the last 40 min (scene
+  memory).").
+
+#### Scene Memory
+
+A segmented control at the top of the Events window switches between
+**Events** and **Scene Memory**: what the alert filters learned, per camera
+(FFI minor 17, `nv_alert_insights_get`).
+
+- **Cameras.** The cameras the filters learned about, with their classes,
+  named as in the viewer. "Nothing learned yet" until a camera's checks have
+  taught the memory.
+- **Picture.** The camera's newest kept picture (from the evidence store; a
+  dark frame when none is kept) with the chosen heatmap over it: one color
+  scale (dark blue through teal and green to yellow, equal steps of
+  lightness), transparent where nothing was learned, scaled with the picture.
+  A **Layer** picker chooses the heatmap (one per class, "Scene memory:
+  person"), an **Opacity** slider sets how strongly it covers the picture, and
+  **Last alerted boxes** draws the boxes repeat suppression compares with.
+- **Legend.** The scale with its range and units, a white mark at the level
+  the method treats as hot, the layer's description, and its method
+  ("Method: a per-cell running average with exponential forgetting ...").
+- **Thresholds.** The values in force on that camera now (score floors by day
+  and at night, the hot level and share, the half-life, the parked and repeat
+  overlaps, the repeat window), and whether the night ones apply now.
+- **Generic.** Every layer the core sends is drawn by its kind (a heatmap,
+  boxes, or values) with its own title, units, range, description, and
+  method, so a new technique in the core appears here without a new screen; a
+  kind this version cannot draw is listed with its description.
+- **Reset Scene Memory…** (after a confirmation: "Things that stay in place
+  will alert again until the memory has learned them") forgets what the
+  filters learned about the camera. It changes only local data; nothing is
+  sent to the camera.
 
 ## Finding devices
 

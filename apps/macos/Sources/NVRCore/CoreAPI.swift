@@ -331,6 +331,13 @@ public protocol CoreAPI: Sendable {
     func alertEvidenceFrameGet(triggerID: UInt64, index: UInt32) throws(CoreStatus) -> Data
     /// `nv_alert_evidence_pin` (minor 14): "Keep".
     func alertEvidencePin(triggerID: UInt64) throws(CoreStatus)
+    /// `nv_alert_insights_get` (minor 17): the cameras with what the alert
+    /// filters learned (`InsightCameraList.parse`), or one camera's insight
+    /// layers (`{"camera":...}`, `AlertInsights.parse`).
+    func alertInsightsGet(query: String?) throws(CoreStatus) -> String
+    /// `nv_alert_insights_reset` (minor 17): forgets what the filters learned
+    /// about one camera (`{"camera":...}`; local data only).
+    func alertInsightsReset(request: String) throws(CoreStatus)
 
     // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
     //

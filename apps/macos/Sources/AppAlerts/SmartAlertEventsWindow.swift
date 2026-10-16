@@ -246,10 +246,13 @@ package final class SmartAlertEventsModel {
 @MainActor
 package final class SmartAlertEventsWindowController: NSWindowController, NSWindowDelegate {
     package let events: SmartAlertEventsModel
+    /// The Scene Memory pane (SceneMemoryView.swift).
+    package let scene: SceneMemoryModel
     package var onClose: (SmartAlertEventsWindowController) -> Void = { _ in }
 
     package init(app: any AlertsHost) {
         events = SmartAlertEventsModel(app: app)
+        scene = SceneMemoryModel(app: app)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -258,7 +261,7 @@ package final class SmartAlertEventsWindowController: NSWindowController, NSWind
         window.setFrameAutosaveName("SmartAlertEvents")
         window.contentMinSize = NSSize(width: 720, height: 420)
         super.init(window: window)
-        let hosting = NSHostingController(rootView: SmartAlertEventsView(events: events))
+        let hosting = NSHostingController(rootView: SmartAlertEventsTabs(events: events, scene: scene))
         hosting.sizingOptions = []
         window.contentViewController = hosting
         window.setContentSize(NSSize(width: 980, height: 620))

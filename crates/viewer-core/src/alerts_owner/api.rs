@@ -388,6 +388,9 @@ impl crate::Core {
             None => {
                 let (mut e, issues) = Engine::new(settings);
                 e.set_next_alert_id(st.next_alert_id);
+                if let Some(scene) = super::insight::load_scene(st.dir.as_deref()) {
+                    e.set_scene(scene);
+                }
                 st.engine = Some(e);
                 issues
             }

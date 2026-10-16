@@ -391,6 +391,37 @@ fn smart_alerts_through_the_c_interface() {
             NvStatus::NV_ERR_UNKNOWN_ID
         );
 
+        // What the filters learned (minor 17), and a reset.
+        let mut buf = vec![0 as c_char; 64 * 1024];
+        let mut n = 0usize;
+        assert_eq!(
+            nv_alert_insights_get(core, ptr::null(), buf.as_mut_ptr(), buf.len(), &mut n),
+            NvStatus::NV_OK
+        );
+        let list: Value =
+            serde_json::from_str(CStr::from_ptr(buf.as_ptr()).to_str().unwrap()).unwrap();
+        assert!(list["cameras"].is_array(), "{list}");
+        let q = c(&json!({ "camera": serde_json::from_str::<Value>(&cam).unwrap() }).to_string());
+        assert_eq!(
+            nv_alert_insights_get(core, q.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut n),
+            NvStatus::NV_OK
+        );
+        let one: Value =
+            serde_json::from_str(CStr::from_ptr(buf.as_ptr()).to_str().unwrap()).unwrap();
+        assert!(
+            one["layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["id"] == "thresholds"),
+            "{one}"
+        );
+        assert_eq!(nv_alert_insights_reset(core, q.as_ptr()), NvStatus::NV_OK);
+        assert_eq!(
+            nv_alert_insights_reset(core, c("{}").as_ptr()),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+
         // Feedback and mute.
         let fb = c(
             &json!({"alert_id": alert_id, "vote": "down", "reason": "nothing_there"}).to_string(),

@@ -5,6 +5,7 @@
 
 use crate::decision::{Outcome, QuietReason, Quieted, SuppressReason};
 use crate::episode::{Admission, UpdateWhy};
+use crate::filters::book::FilterKind;
 use crate::model::{CameraId, Class, Mode};
 use crate::rules::Support;
 use crate::settings::AlertSettings;
@@ -151,6 +152,17 @@ pub fn explain(trace: &Trace, settings: &AlertSettings, offset_min: i32) -> Stri
         }
     }
 
+    // The cheap filters, when one kept an always-alert rule from applying.
+    if trace
+        .find(|k| match k {
+            StepKind::Filters { acted, .. } => Some(*acted == Some(FilterKind::Parked)),
+            _ => None,
+        })
+        .unwrap_or(false)
+    {
+        out.push("It did not move between the pictures, so it is not an always-alert case.".into());
+    }
+
     // Rules.
     if let Some((.., support, always, unverified)) = rules {
         if let Some(rule) = always {
@@ -226,10 +238,13 @@ pub fn explain(trace: &Trace, settings: &AlertSettings, offset_min: i32) -> Stri
             duration_words(since_ms)
         )),
         Some(Outcome::Alert { .. }) | None => {}
-        Some(Outcome::Quiet { reason }) => out.push(format!(
-            "Not alerted: {}.",
-            quiet_words(reason, settings, offset_min)
-        )),
+        Some(Outcome::Quiet { reason }) => {
+            let class = rules.map(|r| r.1).or(received.map(|r| r.0));
+            out.push(format!(
+                "Not alerted: {}.",
+                quiet_words(reason, class, settings, offset_min)
+            ))
+        }
         Some(Outcome::Suppress { reason }) => {
             let class = rules.map(|r| r.1).or(received.map(|r| r.0));
             out.push(format!(
@@ -263,7 +278,21 @@ pub fn explain(trace: &Trace, settings: &AlertSettings, offset_min: i32) -> Stri
     out.join(" ")
 }
 
-fn quiet_words(r: QuietReason, _settings: &AlertSettings, _offset: i32) -> String {
+/// "a person", "a vehicle", "an animal".
+fn a_noun(class: Option<Class>) -> String {
+    match class {
+        Some(Class::Animal) => "an animal".into(),
+        Some(c) => format!("a {}", c.lower()),
+        None => "it".into(),
+    }
+}
+
+fn quiet_words(
+    r: QuietReason,
+    class: Option<Class>,
+    _settings: &AlertSettings,
+    _offset: i32,
+) -> String {
     match r {
         QuietReason::NotConfirmed => "our check did not confirm it".into(),
         QuietReason::NothingSeen { hits, n } => {
@@ -276,6 +305,21 @@ fn quiet_words(r: QuietReason, _settings: &AlertSettings, _offset: i32) -> Strin
         QuietReason::MotionOnly => "motion with no person, vehicle, or animal reported".into(),
         QuietReason::UnknownKind => "an event of a kind nvrview does not know".into(),
         QuietReason::NoDecision => "the check did not finish".into(),
+        QuietReason::Stationary { for_ms } if for_ms >= 60_000 => format!(
+            "{} in the same place as for the last {} (scene memory)",
+            a_noun(class),
+            duration_words(for_ms)
+        ),
+        QuietReason::Stationary { .. } => {
+            format!(
+                "{} in a place it has been before (scene memory)",
+                a_noun(class)
+            )
+        }
+        QuietReason::Repeat { since_ms, .. } => format!(
+            "the same detections as the alert {} ago (repeat)",
+            duration_words(since_ms)
+        ),
     }
 }
 

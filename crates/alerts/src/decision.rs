@@ -81,6 +81,11 @@ pub enum QuietReason {
     UnknownKind,
     /// The host never finished the check.
     NoDecision,
+    /// Every box sat where boxes of its class have been for a while
+    /// (static-scene memory), for at least `for_ms`.
+    Stationary { for_ms: Millis },
+    /// The same boxes as the camera's last alert, `since_ms` ago.
+    Repeat { alert_id: u64, since_ms: Millis },
 }
 
 /// Why something was not alerted, by the user's settings or timing.
