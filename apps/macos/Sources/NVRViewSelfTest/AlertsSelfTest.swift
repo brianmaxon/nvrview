@@ -587,11 +587,12 @@ final class AlertsSelfTest {
     }
 }
 
-/// A detector for the mock's synthetic pictures: a person in the middle of
+/// A detector for the mock's synthetic pictures: a person walking across
 /// every crop, or nothing.
 private final class StubDetector: CropDetecting, @unchecked Sendable {
     let person: Bool
     private let cls = Mutex(0)
+    private let calls = Mutex(0)
     init(person: Bool) { self.person = person }
     /// The model class it reports (0 person, 2 car, 16 dog).
     var classID: Int {
@@ -599,12 +600,20 @@ private final class StubDetector: CropDetecting, @unchecked Sendable {
         set { cls.withLock { $0 = newValue } }
     }
 
+    /// The box moves by half its width on every call, so that the core's
+    /// moving-versus-parked and repeat filters see something walking past
+    /// rather than a stationary object.
     func detect(picture: DetectorPicture, crops: [NormRect]) throws -> [CropDetections] {
-        crops.map { crop in
+        let step = calls.withLock { n in
+            defer { n += 1 }
+            return n % 12
+        }
+        let x = 0.1 + 0.05 * Double(step)
+        return crops.map { crop in
             CropDetections(
                 crop: crop,
                 detections: person
-                    ? [RawDetection(classID: classID, score: 0.9, box: NormRect(x: 0.4, y: 0.3, width: 0.1, height: 0.4))]
+                    ? [RawDetection(classID: classID, score: 0.9, box: NormRect(x: x, y: 0.3, width: 0.1, height: 0.4))]
                     : [])
         }
     }
