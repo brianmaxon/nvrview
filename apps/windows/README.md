@@ -1104,6 +1104,12 @@ parallel checks and merges finish sooner. To add one:
    ```powershell
    .\setup-windows.ps1 -SshOnly -AuthorizedKey "ssh-ed25519 AAAA... name"
    ```
+
+   The same command repairs a computer whose SSH server stopped answering
+   because its `sshd` service is gone (a Windows or package update can remove
+   the service while winget still lists the package): it registers the service
+   again from the installed files, else reinstalls the package, else installs
+   the Windows feature, and keeps the keys and `sshd_config`.
 2. On the Mac, add an alias with that key to `~/.ssh/config`:
 
    ```

@@ -35,7 +35,10 @@
   subnet only.
 .PARAMETER SshOnly
   Only turn on the OpenSSH server and add -AuthorizedKey, as -EnableSsh does:
-  no toolchain, no repository, no tests. For adding or replacing a key.
+  no toolchain, no repository, no tests. For adding or replacing a key, and
+  for repairing a server whose sshd service is gone (the package still
+  installed, the service not): it registers the service again from the
+  installed files, else reinstalls the package, else uses the Windows feature.
 .PARAMETER SshSource
   Where the OpenSSH server comes from when none is installed: 'winget' (the
   default: Microsoft's Win32-OpenSSH package, Microsoft.OpenSSH.Preview) or
@@ -184,25 +187,67 @@ if (-not $SshOnly) {
   git -C $RepoDir config core.longpaths true
 }
 
-if ($EnableSsh) {
-  Step 'OpenSSH server (key-only, local subnet only)'
-  if (Get-Service -Name sshd -ErrorAction SilentlyContinue) {
-    Write-Host 'an sshd service already exists; not installing another OpenSSH server'
-  } elseif ($SshSource -eq 'winget') {
-    Install-WingetPackage 'Microsoft.OpenSSH.Preview'
-  } else {
-    $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-    Write-Host 'installing the OpenSSH server from Windows Update: this often takes 2-10 minutes'
-    Write-Host 'with no progress shown (if it stays NotPresent, stop and use -SshSource winget)'
-    try {
-      Add-WindowsCapability -Online -Name $cap.Name | Out-Null
-    } catch {
-      Write-Host "Add-WindowsCapability failed ($($_.Exception.Message)); trying DISM"
-      dism /Online /Add-Capability /CapabilityName:$($cap.Name) /NoRestart
-      if ($LASTEXITCODE -ne 0) { throw 'Could not install the OpenSSH server; try -SshSource winget' }
+function Test-SshdService { [bool](Get-Service -Name sshd -ErrorAction SilentlyContinue) }
+
+# The Windows optional feature. When it reports Installed but there is no sshd
+# service (a broken install), it is removed and added again.
+function Install-SshFeature {
+  $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+  if ($cap.State -eq 'Installed') {
+    Write-Host 'the OpenSSH server feature says Installed but there is no sshd service; removing it first'
+    Remove-WindowsCapability -Online -Name $cap.Name | Out-Null
+  }
+  Write-Host 'installing the OpenSSH server from Windows Update: this often takes 2-10 minutes'
+  Write-Host 'with no progress shown (if it stays NotPresent, stop and use -SshSource winget)'
+  try {
+    Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+  } catch {
+    Write-Host "Add-WindowsCapability failed ($($_.Exception.Message)); trying DISM"
+    dism /Online /Add-Capability /CapabilityName:$($cap.Name) /NoRestart
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install the OpenSSH server; try -SshSource winget' }
+  }
+}
+
+# Microsoft's Win32-OpenSSH package. winget can list it as installed after its
+# sshd service is gone (an update or upgrade unregistered it, the files may
+# remain), so a missing service is repaired here: first by registering the
+# service from the installed files (install-sshd.ps1), then by reinstalling
+# the package. The keys and sshd_config in C:\ProgramData\ssh are kept.
+function Install-SshWinget {
+  $id = 'Microsoft.OpenSSH.Preview'
+  Install-WingetPackage $id
+  if (Test-SshdService) { return }
+
+  $dirs = @((Join-Path $env:ProgramFiles 'OpenSSH'), (Join-Path $env:ProgramFiles 'OpenSSH-Win64'))
+  foreach ($dir in $dirs) {
+    $script = Join-Path $dir 'install-sshd.ps1'
+    if ((Test-Path $script) -and (Test-Path (Join-Path $dir 'sshd.exe'))) {
+      Write-Host "$id is installed but has no sshd service; registering it from $dir"
+      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script
+      if (Test-SshdService) { return }
     }
   }
-  if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+
+  Write-Host "$id is installed but has no sshd service; reinstalling it"
+  winget uninstall --id $id --exact --source winget --silent --accept-source-agreements
+  Install-WingetPackage $id
+}
+
+if ($EnableSsh) {
+  Step 'OpenSSH server (key-only, local subnet only)'
+  if (Test-SshdService) {
+    Write-Host 'an sshd service already exists; not installing another OpenSSH server'
+  } elseif ($SshSource -eq 'winget') {
+    Install-SshWinget
+    if (-not (Test-SshdService)) {
+      Write-Host 'still no sshd service from winget; trying the Windows feature instead'
+      winget uninstall --id 'Microsoft.OpenSSH.Preview' --exact --source winget --silent --accept-source-agreements
+      Install-SshFeature
+    }
+  } else {
+    Install-SshFeature
+  }
+  if (-not (Test-SshdService)) {
     throw 'No sshd service after installing the OpenSSH server.'
   }
   Set-Service -Name sshd -StartupType Automatic
